@@ -1,6 +1,11 @@
-[package]
-name = "cloud"
-version = "0.1.0"
-edition = "2021"
+[workspace]
+resolver = "2"
+members = ["backend", "launcher", "web", "plugins/audio", "plugins/video", "plugins/image", "plugins/git"]
 
-[dependencies]
+[workspace.package]
+version = "0"
+authors = "Martin Miksanik"
+description = "Cloud system"
+documentation = "https://gitlab.com/xmiksay/cloud#"
+
+[workspace.dependencies]
