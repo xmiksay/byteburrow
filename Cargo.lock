@@ -426,6 +426,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "web",
 ]
 
 [[package]]
@@ -2129,6 +2130,7 @@ dependencies = [
 name = "shared"
 version = "0.1.0"
 dependencies = [
+ "dotenvy",
  "sea-orm",
  "sea-orm-migration",
  "serde",
@@ -2995,6 +2997,16 @@ dependencies = [
 [[package]]
 name = "web"
 version = "0.1.0"
+dependencies = [
+ "axum",
+ "futures-util",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "shared",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "webpki-roots"
