@@ -73,7 +73,7 @@ Background workers that perform compute-intensive or event-driven tasks:
    cargo run --bin agent -- start
    ```
 
-4. **Run the Frontend**:
+5. **Run the Frontend**:
    ```bash
    cd frontend
    npm install

@@ -13,6 +13,9 @@ use sea_orm::{DatabaseConnection, EntityTrait};
 use shared::entities::dummy;
 use std::sync::Arc;
 
+use tower_http::services::{ServeDir, ServeFile};
+use std::path::PathBuf;
+
 pub struct AppState {
     pub db: DatabaseConnection,
 }
@@ -20,9 +23,13 @@ pub struct AppState {
 pub async fn run(config: Config, db: DatabaseConnection) {
     let state = Arc::new(AppState { db });
 
+    let index_path = PathBuf::from(&config.frontend_dist).join("index.html");
+    
     let app = Router::new()
-        .route("/", get(root_handler))
+        .route("/api/dummy", get(root_handler))
         .route("/ws", get(ws_handler))
+        .nest_service("/", ServeDir::new(&config.frontend_dist).fallback(ServeFile::new(index_path)))
+        .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&config.server_addr)
