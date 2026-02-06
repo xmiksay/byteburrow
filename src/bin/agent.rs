@@ -37,11 +37,12 @@ async fn main() {
         Commands::Status => {
             println!("Agent is running (mock)");
         }
-        Commands::TestDb => {
-            match db_connect(&config).await {
-                Ok(_) => println!("Successfully connected to database at {}", config.database_url),
-                Err(e) => eprintln!("Failed to connect to database: {}", e),
-            }
-        }
+        Commands::TestDb => match db_connect(&config).await {
+            Ok(_) => println!(
+                "Successfully connected to database at {}",
+                config.database_url
+            ),
+            Err(e) => eprintln!("Failed to connect to database: {}", e),
+        },
     }
 }

@@ -1,5 +1,5 @@
+use cloud::migrations::Migrator;
 use sea_orm_migration::prelude::*;
-use shared::migrations::Migrator;
 
 #[tokio::main]
 async fn main() {

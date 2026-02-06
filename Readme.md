@@ -79,7 +79,11 @@ Background workers that perform compute-intensive or event-driven tasks:
    npm install
    npm run dev
    ```
-
+6. ** Cross-compile for turris is with a target**:
+   ```bash
+   cross build --release --target armv7-unknown-linux-musleabihf
+   ```
+   
 ### Docker Setup
 
 The application is containerized for easy deployment. The Dockerfile expects pre-built binaries for a lightweight production image.

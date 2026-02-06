@@ -1,4 +1,4 @@
-use shared::{db_connect, Config};
+use cloud::{db_connect, Config};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
@@ -17,5 +17,5 @@ async fn main() {
         .await
         .expect("Failed to connect to database");
 
-    web::run(config, db).await;
+    cloud::web::run(config, db).await;
 }

@@ -1,6 +1,5 @@
 [workspace]
-resolver = "2"
-members = ["shared", "web", "plugins/audio", "plugins/video", "plugins/image", "plugins/git"]
+resolver = "1"
 
 [package]
 name = "cloud"
@@ -19,8 +18,6 @@ dotenvy = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 futures-util = { workspace = true }
-shared = { path = "shared" }
-web = { path = "web" }
 sea-orm-migration = { workspace = true }
 uuid = { workspace = true, features = ["v4", "serde"] }
 
