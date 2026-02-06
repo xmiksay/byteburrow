@@ -1,4 +1,4 @@
-use cloud::{db_connect, Config};
+use cloud::{db_connect, config::Config};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]

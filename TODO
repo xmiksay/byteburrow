@@ -1,0 +1,12 @@
+Create recursive discovery method
+Add crud operation with files and shares
+Add streaming file content endpoint
+Connect forntend
+Add FTP endpoint to serve shared folders
+Add upnp endpoint to server UPNP
+Move file header detection to storage mod
+Add endpoint compatible with nextxloud
+Entry can be symlink - change is_directory to Entry Kind
+Frontend code hightlight
+Frontend Markdown hightlight
+Never store raw tokens, everytime must be salted

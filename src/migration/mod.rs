@@ -5,7 +5,7 @@ mod m20220101_000002_group;
 mod m20220101_000003_group_user;
 mod m20220101_000004_tag;
 mod m20220101_000005_storage;
-mod m20220101_000006_path;
+mod m20220101_000006_entry;
 mod m20220101_000007_shared;
 mod m20220101_000008_shared_user;
 mod m20220101_000009_shared_group;
@@ -28,7 +28,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20220101_000003_group_user::Migration),
             Box::new(m20220101_000004_tag::Migration),
             Box::new(m20220101_000005_storage::Migration),
-            Box::new(m20220101_000006_path::Migration),
+            Box::new(m20220101_000006_entry::Migration),
             Box::new(m20220101_000007_shared::Migration),
             Box::new(m20220101_000008_shared_user::Migration),
             Box::new(m20220101_000009_shared_group::Migration),

@@ -1,6 +1,6 @@
+pub mod entry;
 pub mod group;
 pub mod group_user;
-pub mod path;
 pub mod shared;
 pub mod shared_group;
 pub mod shared_user;

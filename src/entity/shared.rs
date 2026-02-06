@@ -16,14 +16,14 @@ pub struct Model {
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
     #[sea_orm(
-        belongs_to = "super::path::Entity",
+        belongs_to = "super::entry::Entity",
         from = "Column::PathId",
-        to = "super::path::Column::Id"
+        to = "super::entry::Column::Id"
     )]
     Path,
 }
 
-impl Related<super::path::Entity> for Entity {
+impl Related<super::entry::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Path.def()
     }

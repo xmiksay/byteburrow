@@ -1,8 +1,20 @@
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
+/// Entry type enum - File, Directory, or Symlink
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
+#[sea_orm(rs_type = "String", db_type = "String(StringLen::N(16))")]
+pub enum EntryType {
+    #[sea_orm(string_value = "file")]
+    File,
+    #[sea_orm(string_value = "directory")]
+    Directory,
+    #[sea_orm(string_value = "symlink")]
+    Symlink,
+}
+
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq, Serialize, Deserialize)]
-#[sea_orm(table_name = "path")]
+#[sea_orm(table_name = "entry")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = true)]
     pub id: u32,
@@ -12,8 +24,9 @@ pub struct Model {
     pub parent_id: Option<u32>,
     pub path: String,
     pub hash: Option<String>,
-    pub is_directory: bool,
+    pub entry_type: EntryType,
     pub size: Option<i64>,
+    pub tags: Vec<u32>,
     pub modified_at: Option<DateTime>,
     pub created_at: DateTime,
 }
@@ -65,3 +78,25 @@ impl Related<super::group::Entity> for Entity {
 }
 
 impl ActiveModelBehavior for ActiveModel {}
+
+impl Model {
+    /// Check if entry is a directory
+    pub fn is_directory(&self) -> bool {
+        self.entry_type == EntryType::Directory
+    }
+
+    /// Check if entry is a file
+    pub fn is_file(&self) -> bool {
+        self.entry_type == EntryType::File
+    }
+
+    /// Check if entry is a symlink
+    pub fn is_symlink(&self) -> bool {
+        self.entry_type == EntryType::Symlink
+    }
+
+    /// Check if entry has a specific tag
+    pub fn has_tag(&self, tag_id: u32) -> bool {
+        self.tags.contains(&tag_id)
+    }
+}

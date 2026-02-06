@@ -123,13 +123,13 @@ pub async fn health_handler() -> impl IntoResponse {
     }))
 }
 
-/// Thumbnail endpoint - serves thumbnail by path hash (public, no auth)
+/// Thumbnail endpoint - serves thumbnail by entry hash (public, no auth)
 /// GET /api/thumbnail/:hash
 pub async fn thumbnail_handler(
     AxumPath(hash): AxumPath<String>,
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    use crate::entity::path;
+    use crate::entity::entry;
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
     // Validate hash format (basic validation)
@@ -137,9 +137,9 @@ pub async fn thumbnail_handler(
         return Err((StatusCode::BAD_REQUEST, "Invalid hash format".to_string()));
     }
 
-    // Find path by hash in database
-    let path_record = path::Entity::find()
-        .filter(path::Column::Hash.eq(&hash))
+    // Find entry by hash in database
+    let entry_record = entry::Entity::find()
+        .filter(entry::Column::Hash.eq(&hash))
         .one(&state.db)
         .await
         .map_err(|e| {
@@ -147,9 +147,9 @@ pub async fn thumbnail_handler(
             (StatusCode::INTERNAL_SERVER_ERROR, "Database error".to_string())
         })?;
 
-    let path_entity = path_record.ok_or((
+    let entry_entity = entry_record.ok_or((
         StatusCode::NOT_FOUND,
-        "Path not found for this hash".to_string(),
+        "Entry not found for this hash".to_string(),
     ))?;
 
     // Construct thumbnail path using the hash
@@ -160,7 +160,7 @@ pub async fn thumbnail_handler(
     if !thumbnail_path.exists() {
         return Err((
             StatusCode::NOT_FOUND,
-            format!("Thumbnail file not found for path: {}", path_entity.path),
+            format!("Thumbnail file not found for entry: {}", entry_entity.path),
         ));
     }
 
@@ -168,7 +168,7 @@ pub async fn thumbnail_handler(
     let thumbnail_data = fs::read(&thumbnail_path)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to read thumbnail {} for path {}: {}", hash, path_entity.path, e);
+            tracing::error!("Failed to read thumbnail {} for entry {}: {}", hash, entry_entity.path, e);
             (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read thumbnail".to_string())
         })?;
 

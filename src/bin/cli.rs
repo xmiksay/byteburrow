@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use cloud::{db_connect, Config};
+use cloud::{db_connect, config::Config};
 
 #[derive(Parser)]
 #[command(name = "cloud-agent")]

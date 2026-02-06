@@ -1,0 +1,1 @@
+# Stop travers in git directory

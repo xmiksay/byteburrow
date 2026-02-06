@@ -1,7 +1,7 @@
 pub mod auth;
 pub mod handlers;
 
-use crate::Config;
+use crate::config::Config;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -33,7 +33,8 @@ pub async fn run(config: Config, db: DatabaseConnection) {
     // Public routes (no authentication required)
     let public_routes = Router::new()
         .route("/api/health", get(handlers::health_handler))
-        .route("/api/login", post(handlers::login_handler));
+        .route("/api/login", post(handlers::login_handler))
+        .route("/api/thumbnail/:hash", get(handlers::thumbnail_handler));
 
     // Protected routes (authentication required)
     let protected_routes = Router::new()

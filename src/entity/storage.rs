@@ -27,11 +27,11 @@ pub enum Relation {
         to = "super::group::Column::Id"
     )]
     DefaultGroup,
-    #[sea_orm(has_many = "super::path::Entity")]
+    #[sea_orm(has_many = "super::entry::Entity")]
     Path,
 }
 
-impl Related<super::path::Entity> for Entity {
+impl Related<super::entry::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Path.def()
     }
