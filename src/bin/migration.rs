@@ -1,4 +1,4 @@
-use cloud::migrations::Migrator;
+use cloud::migration::Migrator;
 use sea_orm_migration::prelude::*;
 
 #[tokio::main]

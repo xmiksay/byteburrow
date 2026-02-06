@@ -9,16 +9,17 @@ impl MigrationTrait for Migration {
         manager
             .create_table(
                 Table::create()
-                    .table(Dummy::Table)
+                    .table(Group::Table)
                     .if_not_exists()
                     .col(
-                        ColumnDef::new(Dummy::Id)
-                            .uuid()
+                        ColumnDef::new(Group::Id)
+                            .unsigned()
                             .not_null()
+                            .auto_increment()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(Dummy::Name).string().not_null())
-                    .col(ColumnDef::new(Dummy::Description).string())
+                    .col(ColumnDef::new(Group::Name).string().not_null())
+                    .col(ColumnDef::new(Group::Description).string())
                     .to_owned(),
             )
             .await
@@ -26,13 +27,13 @@ impl MigrationTrait for Migration {
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
-            .drop_table(Table::drop().table(Dummy::Table).to_owned())
+            .drop_table(Table::drop().table(Group::Table).to_owned())
             .await
     }
 }
 
 #[derive(DeriveIden)]
-enum Dummy {
+enum Group {
     Table,
     Id,
     Name,

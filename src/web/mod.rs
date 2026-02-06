@@ -1,4 +1,6 @@
-use crate::entities::dummy;
+pub mod auth;
+pub mod handlers;
+
 use crate::Config;
 use axum::{
     extract::{
@@ -6,11 +8,10 @@ use axum::{
         State,
     },
     response::IntoResponse,
-    routing::get,
-    Json, Router,
+    routing::{get, post},
+    Router,
 };
-use futures_util::{sink::SinkExt, stream::StreamExt};
-use sea_orm::{DatabaseConnection, EntityTrait};
+use sea_orm::DatabaseConnection;
 use std::sync::Arc;
 
 use std::path::PathBuf;
@@ -18,15 +19,30 @@ use tower_http::services::{ServeDir, ServeFile};
 
 pub struct AppState {
     pub db: DatabaseConnection,
+    pub config: Config,
 }
 
 pub async fn run(config: Config, db: DatabaseConnection) {
-    let state = Arc::new(AppState { db });
+    let state = Arc::new(AppState {
+        db,
+        config: config.clone(),
+    });
 
     let index_path = PathBuf::from(&config.frontend_dist).join("index.html");
 
+    // Public routes (no authentication required)
+    let public_routes = Router::new()
+        .route("/api/health", get(handlers::health_handler))
+        .route("/api/login", post(handlers::login_handler));
+
+    // Protected routes (authentication required)
+    let protected_routes = Router::new()
+        .route("/api/me", get(handlers::me_handler))
+        .route("/api/storages", get(handlers::protected_handler));
+
     let app = Router::new()
-        .route("/api/dummy", get(root_handler))
+        .merge(public_routes)
+        .merge(protected_routes)
         .route("/ws", get(ws_handler))
         .nest_service(
             "/",
@@ -38,17 +54,8 @@ pub async fn run(config: Config, db: DatabaseConnection) {
     let listener = tokio::net::TcpListener::bind(&config.server_addr)
         .await
         .unwrap();
-    tracing::debug!("listening on {}", listener.local_addr().unwrap());
+    tracing::info!("Server listening on {}", listener.local_addr().unwrap());
     axum::serve(listener, app).await.unwrap();
-}
-
-async fn root_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let records = dummy::Entity::find()
-        .all(&state.db)
-        .await
-        .expect("Failed to fetch records from database");
-
-    Json(records)
 }
 
 async fn ws_handler(

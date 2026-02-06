@@ -6,6 +6,10 @@ name = "cloud"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+plugin-contactlist = []
+
 [dependencies]
 axum = { workspace = true, features = ["ws"] }
 tokio = { workspace = true, features = ["full"] }
@@ -20,6 +24,11 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 futures-util = { workspace = true }
 sea-orm-migration = { workspace = true }
 uuid = { workspace = true, features = ["v4", "serde"] }
+base64 = { workspace = true }
+sha2 = { workspace = true }
+tower = { workspace = true }
+axum-extra = { workspace = true, features = ["typed-header"] }
+chrono = { workspace = true }
 
 [workspace.package]
 version = "0.0.1"
@@ -41,3 +50,8 @@ tracing-subscriber = { version = "0.3" }
 futures-util = "0.3"
 sea-orm-migration = { version = "1.0", features = ["runtime-tokio-rustls", "sqlx-postgres"] }
 uuid = { version = "1.1" }
+base64 = "0.22"
+sha2 = "0.10"
+tower = "0.4"
+axum-extra = "0.9"
+chrono = "0.4"
