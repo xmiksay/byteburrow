@@ -173,40 +173,10 @@ pub async fn thumbnail_handler(
         })?;
 
     // Determine content type based on file extension or first bytes
-    let content_type = determine_content_type(&thumbnail_path, &thumbnail_data);
+    let content_type = crate::web::storage::determine_content_type(&thumbnail_path, &thumbnail_data);
 
     Ok((
         [(header::CONTENT_TYPE, content_type)],
         thumbnail_data,
     ))
-}
-
-/// Determine content type from file path and data
-fn determine_content_type(path: &PathBuf, data: &[u8]) -> &'static str {
-    // Try to determine from extension first
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        return match ext.to_lowercase().as_str() {
-            "jpg" | "jpeg" => "image/jpeg",
-            "png" => "image/png",
-            "gif" => "image/gif",
-            "webp" => "image/webp",
-            "bmp" => "image/bmp",
-            "svg" => "image/svg+xml",
-            _ => "application/octet-stream",
-        };
-    }
-
-    // Fallback: detect from magic bytes
-    if data.len() >= 4 {
-        match &data[0..4] {
-            [0xFF, 0xD8, 0xFF, ..] => "image/jpeg",
-            [0x89, 0x50, 0x4E, 0x47] => "image/png",
-            [0x47, 0x49, 0x46, ..] => "image/gif",
-            [0x52, 0x49, 0x46, 0x46] => "image/webp",
-            [0x42, 0x4D, ..] => "image/bmp",
-            _ => "application/octet-stream",
-        }
-    } else {
-        "application/octet-stream"
-    }
 }

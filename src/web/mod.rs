@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod handlers;
+pub mod storage;
 
 use crate::config::Config;
 use axum::{
