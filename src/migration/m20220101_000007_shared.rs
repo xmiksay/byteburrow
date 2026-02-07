@@ -13,12 +13,12 @@ impl MigrationTrait for Migration {
                     .if_not_exists()
                     .col(
                         ColumnDef::new(Shared::Id)
-                            .unsigned()
+                            .integer()
                             .not_null()
                             .auto_increment()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(Shared::PathId).unsigned().not_null())
+                    .col(ColumnDef::new(Shared::PathId).integer().not_null())
                     .col(ColumnDef::new(Shared::Token).string())
                     .col(ColumnDef::new(Shared::CanWrite).boolean().not_null().default(false))
                     .col(ColumnDef::new(Shared::ExpiresAt).timestamp())
@@ -30,9 +30,9 @@ impl MigrationTrait for Migration {
                     )
                     .foreign_key(
                         ForeignKey::create()
-                            .name("fk_shared_path")
+                            .name("fk_shared_entry")
                             .from(Shared::Table, Shared::PathId)
-                            .to(Path::Table, Path::Id)
+                            .to(Entry::Table, Entry::Id)
                             .on_delete(ForeignKeyAction::Cascade)
                             .on_update(ForeignKeyAction::Cascade),
                     )
@@ -60,7 +60,7 @@ enum Shared {
 }
 
 #[derive(DeriveIden)]
-enum Path {
+enum Entry {
     Table,
     Id,
 }

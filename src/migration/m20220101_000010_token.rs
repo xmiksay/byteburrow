@@ -12,21 +12,19 @@ impl MigrationTrait for Migration {
                     .table(Token::Table)
                     .if_not_exists()
                     .col(
-                        ColumnDef::new(Token::Id)
-                            .unsigned()
+                        ColumnDef::new(Token::Nonce)
+                            .string()
                             .not_null()
-                            .auto_increment()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(Token::UserId).unsigned().not_null())
-                    .col(ColumnDef::new(Token::Nonce).string().not_null().unique_key())
-                    .col(ColumnDef::new(Token::ExpiresAt).timestamp().not_null())
+                    .col(ColumnDef::new(Token::UserId).integer().not_null())
+                    .col(ColumnDef::new(Token::ExpiresAt).timestamp_with_time_zone().not_null())
                     .col(ColumnDef::new(Token::UserAgent).string())
                     .col(ColumnDef::new(Token::IpAddress).string())
-                    .col(ColumnDef::new(Token::LastActivity).timestamp())
+                    .col(ColumnDef::new(Token::LastActivity).timestamp_with_time_zone())
                     .col(
                         ColumnDef::new(Token::CreatedAt)
-                            .timestamp()
+                            .timestamp_with_time_zone()
                             .not_null()
                             .default(Expr::current_timestamp()),
                     )
@@ -86,9 +84,8 @@ impl MigrationTrait for Migration {
 #[derive(DeriveIden)]
 enum Token {
     Table,
-    Id,
-    UserId,
     Nonce,
+    UserId,
     ExpiresAt,
     UserAgent,
     IpAddress,

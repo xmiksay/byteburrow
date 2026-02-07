@@ -13,7 +13,7 @@ impl MigrationTrait for Migration {
                     .if_not_exists()
                     .col(
                         ColumnDef::new(Storage::Id)
-                            .unsigned()
+                            .integer()
                             .not_null()
                             .auto_increment()
                             .primary_key(),
@@ -21,8 +21,8 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Storage::Name).string().not_null())
                     .col(ColumnDef::new(Storage::Description).string())
                     .col(ColumnDef::new(Storage::Path).string().not_null())
-                    .col(ColumnDef::new(Storage::DefaultUser).unsigned().not_null())
-                    .col(ColumnDef::new(Storage::DefaultGroup).unsigned().not_null())
+                    .col(ColumnDef::new(Storage::DefaultUser).integer().not_null())
+                    .col(ColumnDef::new(Storage::DefaultGroup).integer().not_null())
                     .foreign_key(
                         ForeignKey::create()
                             .name("fk_storage_default_user")

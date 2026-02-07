@@ -17,16 +17,16 @@ pub enum EntryType {
 #[sea_orm(table_name = "entry")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = true)]
-    pub id: u32,
-    pub storage_id: u32,
-    pub user_id: u32,
-    pub group_id: u32,
-    pub parent_id: Option<u32>,
+    pub id: i32,
+    pub storage_id: i32,
+    pub user_id: i32,
+    pub group_id: i32,
+    pub parent_id: Option<i32>,
     pub path: String,
     pub hash: Option<String>,
     pub entry_type: EntryType,
     pub size: Option<i64>,
-    pub tags: Vec<u32>,
+    pub tags: Vec<i32>,
     pub modified_at: Option<DateTime>,
     pub created_at: DateTime,
 }
@@ -96,7 +96,7 @@ impl Model {
     }
 
     /// Check if entry has a specific tag
-    pub fn has_tag(&self, tag_id: u32) -> bool {
+    pub fn has_tag(&self, tag_id: i32) -> bool {
         self.tags.contains(&tag_id)
     }
 }

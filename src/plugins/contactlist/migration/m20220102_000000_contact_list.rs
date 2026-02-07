@@ -13,13 +13,13 @@ impl MigrationTrait for Migration {
                     .if_not_exists()
                     .col(
                         ColumnDef::new(ContactList::Id)
-                            .unsigned()
+                            .integer()
                             .not_null()
                             .auto_increment()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(ContactList::UserId).unsigned().not_null())
-                    .col(ColumnDef::new(ContactList::GroupId).unsigned().not_null())
+                    .col(ColumnDef::new(ContactList::UserId).integer().not_null())
+                    .col(ColumnDef::new(ContactList::GroupId).integer().not_null())
                     .col(ColumnDef::new(ContactList::Name).string().not_null())
                     .col(ColumnDef::new(ContactList::Description).text())
                     .col(

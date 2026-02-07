@@ -5,9 +5,9 @@ use serde::{Deserialize, Serialize};
 #[sea_orm(table_name = "group_user")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = true)]
-    pub id: u32,
-    pub user_id: u32,
-    pub group_id: u32,
+    pub id: i32,
+    pub user_id: i32,
+    pub group_id: i32,
     pub admin: bool,
 }
 

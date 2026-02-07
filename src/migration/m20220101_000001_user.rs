@@ -13,7 +13,7 @@ impl MigrationTrait for Migration {
                     .if_not_exists()
                     .col(
                         ColumnDef::new(User::Id)
-                            .unsigned()
+                            .integer()
                             .not_null()
                             .auto_increment()
                             .primary_key(),
@@ -22,8 +22,18 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(User::Description).string())
                     .col(ColumnDef::new(User::Username).string().not_null())
                     .col(ColumnDef::new(User::Password).string().not_null())
-                    .col(ColumnDef::new(User::Enabled).boolean().not_null().default(true))
-                    .col(ColumnDef::new(User::Admin).boolean().not_null().default(false))
+                    .col(
+                        ColumnDef::new(User::Enabled)
+                            .boolean()
+                            .not_null()
+                            .default(true),
+                    )
+                    .col(
+                        ColumnDef::new(User::Admin)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
                     .to_owned(),
             )
             .await

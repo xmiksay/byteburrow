@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 #[sea_orm(table_name = "contact")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = true)]
-    pub id: u32,
-    pub contact_list_id: u32,
+    pub id: i32,
+    pub contact_list_id: i32,
 
     // vCard UID - unique identifier for CardDAV sync
     #[sea_orm(unique)]

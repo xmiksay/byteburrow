@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 #[sea_orm(table_name = "contact_list")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = true)]
-    pub id: u32,
-    pub user_id: u32,
-    pub group_id: u32,
+    pub id: i32,
+    pub user_id: i32,
+    pub group_id: i32,
     pub name: String,
     pub description: Option<String>,
     pub created_at: DateTime,

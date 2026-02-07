@@ -13,12 +13,12 @@ impl MigrationTrait for Migration {
                     .if_not_exists()
                     .col(
                         ColumnDef::new(ContactAddress::Id)
-                            .unsigned()
+                            .integer()
                             .not_null()
                             .auto_increment()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(ContactAddress::ContactId).unsigned().not_null())
+                    .col(ColumnDef::new(ContactAddress::ContactId).integer().not_null())
                     .col(ColumnDef::new(ContactAddress::AddressType).string().not_null())
                     .col(ColumnDef::new(ContactAddress::PoBox).string())
                     .col(ColumnDef::new(ContactAddress::ExtendedAddress).string())

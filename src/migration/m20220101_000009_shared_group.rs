@@ -13,13 +13,13 @@ impl MigrationTrait for Migration {
                     .if_not_exists()
                     .col(
                         ColumnDef::new(SharedGroup::Id)
-                            .unsigned()
+                            .integer()
                             .not_null()
                             .auto_increment()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(SharedGroup::SharedId).unsigned().not_null())
-                    .col(ColumnDef::new(SharedGroup::GroupId).unsigned().not_null())
+                    .col(ColumnDef::new(SharedGroup::SharedId).integer().not_null())
+                    .col(ColumnDef::new(SharedGroup::GroupId).integer().not_null())
                     .foreign_key(
                         ForeignKey::create()
                             .name("fk_shared_group_shared")

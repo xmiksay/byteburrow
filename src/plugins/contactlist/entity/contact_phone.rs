@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 #[sea_orm(table_name = "contact_phone")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = true)]
-    pub id: u32,
-    pub contact_id: u32,
+    pub id: i32,
+    pub contact_id: i32,
 
     // vCard TEL value
     pub phone_number: String,

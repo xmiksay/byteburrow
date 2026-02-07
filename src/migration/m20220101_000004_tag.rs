@@ -13,12 +13,12 @@ impl MigrationTrait for Migration {
                     .if_not_exists()
                     .col(
                         ColumnDef::new(Tag::Id)
-                            .unsigned()
+                            .integer()
                             .not_null()
                             .auto_increment()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(Tag::UserId).unsigned().not_null())
+                    .col(ColumnDef::new(Tag::UserId).integer().not_null())
                     .col(ColumnDef::new(Tag::Name).string().not_null())
                     .col(ColumnDef::new(Tag::Description).string())
                     .foreign_key(

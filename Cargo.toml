@@ -29,6 +29,8 @@ sha2 = { workspace = true }
 tower = { workspace = true }
 axum-extra = { workspace = true, features = ["typed-header"] }
 chrono = { workspace = true }
+getrandom = "0.4.1"
+hex = "0.4.3"
 
 [workspace.package]
 version = "0.0.1"

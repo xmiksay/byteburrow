@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 #[sea_orm(table_name = "shared")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = true)]
-    pub id: u32,
-    pub path_id: u32,
+    pub id: i32,
+    pub path_id: i32,
     pub token: Option<String>,
     pub can_write: bool,
     pub expires_at: Option<DateTime>,

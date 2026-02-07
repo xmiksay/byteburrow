@@ -1,6 +1,6 @@
-pub mod auth;
 pub mod handlers;
 pub mod storage;
+pub mod user;
 
 use crate::config::Config;
 use axum::{
@@ -9,7 +9,7 @@ use axum::{
         State,
     },
     response::IntoResponse,
-    routing::{get, post},
+    routing::get,
     Router,
 };
 use sea_orm::DatabaseConnection;
@@ -34,13 +34,12 @@ pub async fn run(config: Config, db: DatabaseConnection) {
     // Public routes (no authentication required)
     let public_routes = Router::new()
         .route("/api/health", get(handlers::health_handler))
-        .route("/api/login", post(handlers::login_handler))
-        .route("/api/thumbnail/:hash", get(handlers::thumbnail_handler));
+        .route("/api/thumbnail/:hash", get(handlers::thumbnail_handler))
+        .nest("/api/user", user::router());
 
     // Protected routes (authentication required)
     let protected_routes = Router::new()
-        .route("/api/me", get(handlers::me_handler))
-        .route("/api/storages", get(handlers::protected_handler));
+        .nest("/api/storage", storage::router());
 
     let app = Router::new()
         .merge(public_routes)

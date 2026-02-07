@@ -13,13 +13,13 @@ impl MigrationTrait for Migration {
                     .if_not_exists()
                     .col(
                         ColumnDef::new(GroupUser::Id)
-                            .unsigned()
+                            .integer()
                             .not_null()
                             .auto_increment()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(GroupUser::UserId).unsigned().not_null())
-                    .col(ColumnDef::new(GroupUser::GroupId).unsigned().not_null())
+                    .col(ColumnDef::new(GroupUser::UserId).integer().not_null())
+                    .col(ColumnDef::new(GroupUser::GroupId).integer().not_null())
                     .col(ColumnDef::new(GroupUser::Admin).boolean().not_null().default(false))
                     .foreign_key(
                         ForeignKey::create()

@@ -5,12 +5,12 @@ use serde::{Deserialize, Serialize};
 #[sea_orm(table_name = "storage")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = true)]
-    pub id: u32,
+    pub id: i32,
     pub name: String,
     pub description: Option<String>,
     pub path: String,
-    pub default_user: u32,
-    pub default_group: u32,
+    pub default_user: i32,
+    pub default_group: i32,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

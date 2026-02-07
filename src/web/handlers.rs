@@ -1,119 +1,13 @@
-use crate::entity::storage;
-use crate::web::{auth::*, AppState};
+use crate::web::AppState;
 use axum::{
     extract::{Path as AxumPath, State},
     http::{header, StatusCode},
     response::IntoResponse,
     Json,
 };
-use sea_orm::EntityTrait;
-use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs;
-use std::path::PathBuf;
-
-/// Login request payload
-#[derive(Debug, Deserialize)]
-pub struct LoginRequest {
-    pub username: String,
-    pub password: String,
-}
-
-/// Login response
-#[derive(Debug, Serialize)]
-pub struct LoginResponse {
-    pub token: String,
-    pub expires_in_days: i64,
-}
-
-/// Error response
-#[derive(Debug, Serialize)]
-pub struct ErrorResponse {
-    pub error: String,
-}
-
-/// Login endpoint - accepts Basic Auth or JSON payload
-pub async fn login_handler(
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<LoginRequest>,
-) -> Result<Json<LoginResponse>, (StatusCode, Json<ErrorResponse>)> {
-    use crate::entity::user;
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
-
-    // Get salt from config
-    let password_hash = hash_password(&payload.password, &state.config.salt);
-
-    // Find user by username and password hash
-    let user_record = user::Entity::find()
-        .filter(user::Column::Username.eq(&payload.username))
-        .filter(user::Column::Password.eq(password_hash))
-        .one(&state.db)
-        .await
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Database error".to_string(),
-                }),
-            )
-        })?;
-
-    let user = user_record.ok_or((
-        StatusCode::UNAUTHORIZED,
-        Json(ErrorResponse {
-            error: "Invalid credentials".to_string(),
-        }),
-    ))?;
-
-    // Create token (30 days validity)
-    let duration_days = 30;
-    let token = create_token(user.id, duration_days, None, None, &state)
-        .await
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Failed to create token".to_string(),
-                }),
-            )
-        })?;
-
-    Ok(Json(LoginResponse {
-        token,
-        expires_in_days: duration_days,
-    }))
-}
-
-/// Protected handler - requires authentication
-pub async fn protected_handler(
-    auth_user: AuthUser,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    let records = storage::Entity::find()
-        .all(&state.db)
-        .await
-        .expect("Failed to fetch records from database");
-
-    Json(serde_json::json!({
-        "user": {
-            "id": auth_user.id,
-            "username": auth_user.username,
-            "name": auth_user.name,
-            "admin": auth_user.admin,
-        },
-        "storages": records,
-    }))
-}
-
-/// Me endpoint - returns current user info
-pub async fn me_handler(auth_user: AuthUser) -> impl IntoResponse {
-    Json(serde_json::json!({
-        "id": auth_user.id,
-        "username": auth_user.username,
-        "name": auth_user.name,
-        "admin": auth_user.admin,
-    }))
-}
 
 /// Health check endpoint (no auth required)
 pub async fn health_handler() -> impl IntoResponse {
@@ -144,7 +38,10 @@ pub async fn thumbnail_handler(
         .await
         .map_err(|e| {
             tracing::error!("Database error while looking up hash {}: {}", hash, e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "Database error".to_string())
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Database error".to_string(),
+            )
         })?;
 
     let entry_entity = entry_record.ok_or((
@@ -165,18 +62,22 @@ pub async fn thumbnail_handler(
     }
 
     // Read the thumbnail file
-    let thumbnail_data = fs::read(&thumbnail_path)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to read thumbnail {} for entry {}: {}", hash, entry_entity.path, e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read thumbnail".to_string())
-        })?;
+    let thumbnail_data = fs::read(&thumbnail_path).await.map_err(|e| {
+        tracing::error!(
+            "Failed to read thumbnail {} for entry {}: {}",
+            hash,
+            entry_entity.path,
+            e
+        );
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to read thumbnail".to_string(),
+        )
+    })?;
 
     // Determine content type based on file extension or first bytes
-    let content_type = crate::web::storage::determine_content_type(&thumbnail_path, &thumbnail_data);
+    let content_type =
+        crate::web::storage::determine_content_type(&thumbnail_path, &thumbnail_data);
 
-    Ok((
-        [(header::CONTENT_TYPE, content_type)],
-        thumbnail_data,
-    ))
+    Ok(([(header::CONTENT_TYPE, content_type)], thumbnail_data))
 }

@@ -13,6 +13,7 @@ async fn main() {
         .init();
 
     let config = Config::from_env();
+    Config::set(std::sync::Arc::new(config.clone()));
     let db = db_connect(&config)
         .await
         .expect("Failed to connect to database");

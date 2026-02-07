@@ -6,6 +6,14 @@ pub struct Migration;
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // Create enum type for entry_type
+        manager
+            .get_connection()
+            .execute_unprepared(
+                "CREATE TYPE entry_type_enum AS ENUM ('file', 'directory', 'symlink')",
+            )
+            .await?;
+
         manager
             .create_table(
                 Table::create()
@@ -13,15 +21,15 @@ impl MigrationTrait for Migration {
                     .if_not_exists()
                     .col(
                         ColumnDef::new(Entry::Id)
-                            .unsigned()
+                            .integer()
                             .not_null()
                             .auto_increment()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(Entry::StorageId).unsigned().not_null())
-                    .col(ColumnDef::new(Entry::UserId).unsigned().not_null())
-                    .col(ColumnDef::new(Entry::GroupId).unsigned().not_null())
-                    .col(ColumnDef::new(Entry::ParentId).unsigned())
+                    .col(ColumnDef::new(Entry::StorageId).integer().not_null())
+                    .col(ColumnDef::new(Entry::UserId).integer().not_null())
+                    .col(ColumnDef::new(Entry::GroupId).integer().not_null())
+                    .col(ColumnDef::new(Entry::ParentId).integer())
                     .col(ColumnDef::new(Entry::Path).string().not_null())
                     .col(ColumnDef::new(Entry::Hash).string())
                     .col(
@@ -90,7 +98,15 @@ impl MigrationTrait for Migration {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
             .drop_table(Table::drop().table(Entry::Table).to_owned())
-            .await
+            .await?;
+
+        // Drop the enum type
+        manager
+            .get_connection()
+            .execute_unprepared("DROP TYPE IF EXISTS entry_type_enum")
+            .await?;
+
+        Ok(())
     }
 }
 
