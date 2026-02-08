@@ -80,6 +80,7 @@ pub async fn run(config: Config, db: DatabaseConnection) {
     let api_router = Router::new()
         .route("/health", get(health_handler))
         .route("/version", get(version_handler))
+        .route("/config", get(config_handler))
         .route("/ws", get(ws::ws_handler))
         .nest("/user", user::router())
         .nest("/group", group::router())
@@ -127,5 +128,12 @@ pub async fn version_handler() -> impl IntoResponse {
     Json(serde_json::json!({
         "commit": env!("GIT_COMMIT"),
         "version": env!("CARGO_PKG_VERSION"),
+    }))
+}
+
+/// Config endpoint - returns public configuration
+pub async fn config_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "base_url": state.config.base_url,
     }))
 }

@@ -12,6 +12,7 @@ pub struct Config {
     pub thumbnail_storage: String,
     pub token_expiration_days: i64,
     pub token_length: usize,
+    pub base_url: String,
 }
 
 impl Config {
@@ -44,6 +45,8 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(32);
 
+        let base_url = env::var("BASE_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
+        
         Self {
             database_url,
             server_addr,
@@ -52,6 +55,7 @@ impl Config {
             thumbnail_storage,
             token_expiration_days,
             token_length,
+            base_url,
         }
     }
 }
