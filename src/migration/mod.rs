@@ -7,8 +7,6 @@ mod m20220101_000004_tag;
 mod m20220101_000005_storage;
 mod m20220101_000006_entry;
 mod m20220101_000007_shared;
-mod m20220101_000008_shared_user;
-mod m20220101_000009_shared_group;
 mod m20220101_000010_token;
 
 // Plugin migrations (feature-gated)
@@ -30,8 +28,6 @@ impl MigratorTrait for Migrator {
             Box::new(m20220101_000005_storage::Migration),
             Box::new(m20220101_000006_entry::Migration),
             Box::new(m20220101_000007_shared::Migration),
-            Box::new(m20220101_000008_shared_user::Migration),
-            Box::new(m20220101_000009_shared_group::Migration),
             Box::new(m20220101_000010_token::Migration),
         ];
 

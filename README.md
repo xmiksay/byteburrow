@@ -1,186 +1,87 @@
-# ☁️ Cloud
+# Cloud System
 
-A modular cloud storage and classification system built with Rust, designed for high performance and extensibility. Provides NextCloud-compatible APIs with advanced features like automated file classification, media indexing, and real-time WebSocket communication.
+A modern, high-performance personal cloud storage and file management system built with Rust and Vue 3.
 
-## ✨ Features
+## 🚀 Features
 
-| Category | Description |
-|----------|-------------|
-| **📁 File API** | NextCloud-compatible endpoints for seamless mobile app synchronization |
-| **📺 Media Indexing** | Optimized directory listing tailored for Kodi/Kore media centers |
-| **🔗 Granular Sharing** | Share individual files or entire directories using unique hashes |
-| **🏷️ Smart Tagging** | Automatic file classification and tagging based on content analysis |
-| **⚡ Real-time Communication** | WebSocket-based communication for responsive frontend updates |
-| **👥 User Management** | Integrated authentication and group-based access control |
-| **🤖 Automated Agents** | Background tasks for classifying media (Video, Books, Music, etc.) |
+### 📂 File Management
+- **Interactive File Explorer**: Browse storage locations with a clean, responsive interface and breadcrumb navigation.
+- **Full Entry Lifecycle**: Create, rename, move, and delete files and directories directly from the browser.
+- **Smart Discovery**: Sophisticated synchronization between the physical filesystem and the database state.
+- **Downloads**: Secure file downloading with proper mimetype detection.
 
-## 🏗️ Architecture
+### 📝 Advanced File Viewer & Editor
+- **Multi-mode Interface**: Seamlessly switch between **Preview** and **Edit** modes.
+- **Markdown Excellence**: Full Markdown rendering support including syntax-highlighted code blocks.
+- **Universal Syntax Highlighting**: High-performance highlighting for 35+ formats (Rust, JS, TS, Python, C++, Go, etc.) powered by `highlight.js`.
+- **Responsive Editor**: A premium text editing experience with auto-detecting language support and fullscreen mode.
+- **Saved Indicators**: Visual "dirty" state tracking for unsaved changes.
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                         Frontend                            │
-│                      (Vue.js + Vite)                        │
-└─────────────────────────┬───────────────────────────────────┘
-                          │ WebSocket / REST
-┌─────────────────────────▼───────────────────────────────────┐
-│                       Web Server                            │
-│                    (Axum + Tokio)                           │
-│  ┌─────────────┬──────────────┬────────────────────────┐    │
-│  │  REST API   │  WebSocket   │  NextCloud Compatible  │    │
-│  │  /api/*     │  /api/ws/*   │  /api/remote/*         │    │
-│  └─────────────┴──────────────┴────────────────────────┘    │
-└─────────────────────────┬───────────────────────────────────┘
-                          │
-┌─────────────────────────▼───────────────────────────────────┐
-│                       Core Logic                            │
-│  ┌──────────┬──────────┬──────────┬────────────────────┐    │
-│  │  Entity  │  Storage │   Auth   │      Plugins       │    │
-│  │  Models  │  Layer   │  Module  │  (Image, Git, etc) │    │
-│  └──────────┴──────────┴──────────┴────────────────────┘    │
-└─────────────────────────┬───────────────────────────────────┘
-                          │
-┌─────────────────────────▼───────────────────────────────────┐
-│                     PostgreSQL                              │
-│                     (SeaORM)                                │
-└─────────────────────────────────────────────────────────────┘
-```
+### 🛡️ Security & Administration
+- **Robust Auth**: Secure authentication system using Bearer tokens and JWT-like functionality.
+- **Role-Based Access**: Granular permissions with separate logic for Admin and regular users.
+- **User & Group Management**: Comprehensive tools for managing users and organizational groups.
+- **Storage Administration**: Define and manage multiple storage backend locations with specific owner/group defaults.
 
 ## 🛠️ Tech Stack
 
-- **Backend**: [Rust](https://www.rust-lang.org/) with [Axum](https://github.com/tokio-rs/axum) + [Tokio](https://tokio.rs/)
-- **Database**: [PostgreSQL](https://www.postgresql.org/) with [SeaORM](https://www.sea-ql.org/SeaORM/)
-- **Frontend**: [Vue.js](https://vuejs.org/) with [Vite](https://vitejs.dev/)
-- **Security**: SHA-256 for file and directory hashing
-- **Efficiency**: "Smart Traversal" logic avoids unnecessary deep-dives into large directories (e.g., skipping internal Git files once a repository is detected)
+### Backend (Rust)
+- **Axum**: High-performance web framework for the API and static serving.
+- **SeaORM**: Asynchronous ORM for PostgreSQL with robust migrations.
+- **Tokio**: Industry-standard asynchronous runtime.
+- **Tower HTTP**: Middleware for CORS, tracing, and high-performance file serving.
+- **Tracing**: Structured logging and instrumentation for observability.
 
-## 📦 Project Structure
+### Frontend (Vue 3)
+- **Vite**: Ultra-fast build tool and development server.
+- **TypeScript**: Type-safe application logic.
+- **Lucide Vue Next**: Consistent, beautiful icon system.
+- **Highlight.js**: Client-side syntax highlighting.
+- **Marked**: High-speed Markdown parsing and rendering.
+- **Vanilla CSS**: Premium, custom-designed UI with glassmorphism and modern animations.
 
-```
-cloud/
-├── src/
-│   ├── bin/               # Binary entry points
-│   │   ├── cloud.rs       # Main web server
-│   │   ├── cloud_cli.rs   # CLI tool
-│   │   └── cloud_migration.rs  # Database migrations
-│   ├── auth/              # Authentication module
-│   ├── config/            # Configuration management
-│   ├── entity/            # SeaORM database entities
-│   ├── jobs/              # Background job handlers
-│   ├── migration/         # Database migrations
-│   ├── plugins/           # Extensible plugin system
-│   ├── storage/           # File storage layer
-│   ├── web/               # HTTP/WebSocket handlers
-│   ├── ftp/               # FTP server (planned)
-│   └── upnp/              # UPnP server (planned)
-├── frontend/              # Vue.js frontend application
-├── data/                  # Data files
-├── Dockerfile             # Container configuration
-└── docker-compose.yml     # Multi-service orchestration
-```
-
-## 🚀 Getting Started
+## 📦 Installation & Setup
 
 ### Prerequisites
-
-- Rust (latest stable)
+- Rust (Latest Stable)
 - PostgreSQL
-- Node.js (for frontend)
-- [nvm](https://github.com/nvm-sh/nvm) (recommended for Node.js version management)
+- Node.js & npm (Use `nvm use` in the `frontend` directory to use the version specified in `.nvmrc`)
 
-**Node.js Setup with nvm:**
+### Backend Configuration
+1. Create a `.env` file in the root directory:
+```env
+DATABASE_URL=postgres://user:password@localhost/cloud_db
+SERVER_ADDR=127.0.0.1:3000
+FRONTEND_DIST=./frontend/dist
+```
+2. Run migrations:
 ```bash
-# Install nvm (if not already installed)
-curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.0/install.sh | bash
-
-# Use the project's Node.js version (if .nvmrc exists)
-nvm use
-
-# Or install and use a specific version
-nvm install --lts
-nvm use --lts
+cargo run --bin cloud-migration up
+```
+3. Start the server:
+```bash
+cargo run --bin cloud
 ```
 
-### Development Setup
-
-1. **Configure environment**
-   ```bash
-   # Create .env file
-   cat > .env << EOF
-   DATABASE_URL=postgres://user:password@localhost/cloud_db
-   SERVER_ADDR=0.0.0.0:3000
-   EOF
-   ```
-
-2. **Run database migrations**
-   ```bash
-   cargo run --bin cloud_migration
-   ```
-
-3. **Start the web server**
-   ```bash
-   cargo run --bin cloud
-   ```
-
-4. **Start the frontend** (in a separate terminal)
-   ```bash
-   cd frontend
-   npm install
-   npm run dev
-   ```
-
-5. **Run a Plugin/Agent**
-   ```bash
-   cargo run --bin cloud_cli -- start
-   ```
-
-### 🐳 Docker Setup
-
+### Frontend Setup
+1. Navigate to the `frontend` directory:
 ```bash
-# Build release binaries
-cargo build --release
-
-# Start all services
-docker-compose up -d
-
-# View logs
-docker-compose logs -f web
+cd frontend
+npm install
+```
+2. Build for production or start dev server:
+```bash
+npm run build # For production
+npm run dev   # For development
 ```
 
-**Services started:**
-| Service | Port | Description |
-|---------|------|-------------|
-| PostgreSQL | 5432 | Database |
-| Web Server | 3000 | Main application |
-| Agent | - | Background worker |
+## 🏗️ Architecture
 
-### Cross-Compilation (Turris)
-
-```bash
-cross build --release --target armv7-unknown-linux-musleabihf
-```
-
-## 📡 API Endpoints
-
-| Endpoint | Description |
-|----------|-------------|
-| `/api/*` | REST API for file operations |
-| `/api/ws/*` | WebSocket real-time communication |
-| `/api/remote/*` | NextCloud-compatible endpoints |
-| `/shared/indexed/[HASH]` | Public hash-based file sharing |
-
-## 🔌 Plugins
-
-Extensible plugin system for background processing:
-
-- **Image Processing** - Object and face detection for automatic tagging
-- **Git Indexer** - Metadata extraction for Git repositories
-- **Video Library** - Format conversion, subtitle fetching, and metadata
-- **File Watchers** - `inotify`-based file change detection
-
-## 📝 License
-
-Developed by Martin Miksanik
+The system is designed with a clear separation of concerns:
+- **`src/web/`**: Axum routers and handlers for users, groups, and storage.
+- **`src/storage/`**: Core logic for filesystem interaction, including `StorageWrapper` for atomic operations.
+- **`src/entity/`**: Database models and shared types.
+- **`frontend/src/components/`**: Reusable Vue components (FileExplorer, FileViewer, UserSelect, etc.).
 
 ---
-
-*See [TODO](./TODO) for planned features and improvements.*
+*Created with ❤️ by Martin Miksanik*

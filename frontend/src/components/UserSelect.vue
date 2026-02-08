@@ -1,16 +1,17 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { Search, ChevronDown, Check, User as UserIcon } from 'lucide-vue-next'
+import { Search, ChevronDown, Check, User as UserIcon, X } from 'lucide-vue-next'
 import { userService } from '../services/user'
 import type { User } from '../types'
 
 const props = defineProps<{
-  modelValue: number
+  modelValue: number | number[]
+  multiple?: boolean
   error?: string
 }>()
 
 const emit = defineEmits<{
-  (e: 'update:modelValue', value: number): void
+  (e: 'update:modelValue', value: number | number[]): void
 }>()
 
 const users = ref<User[]>([])
@@ -19,9 +20,17 @@ const isOpen = ref(false)
 const searchQuery = ref('')
 const dropdownRef = ref<HTMLElement | null>(null)
 
-const selectedUser = computed(() => 
-  users.value.find(u => u.id === props.modelValue)
-)
+const selectedUsers = computed(() => {
+  if (props.multiple) {
+    const ids = props.modelValue as number[]
+    return users.value.filter(u => ids.includes(u.id))
+  } else {
+    const id = props.modelValue as number
+    return users.value.filter(u => u.id === id)
+  }
+})
+
+const selectedUser = computed(() => selectedUsers.value[0])
 
 const filteredUsers = computed(() => {
   if (!searchQuery.value) return users.value
@@ -43,9 +52,27 @@ const fetchUsers = async () => {
   }
 }
 
+const isSelected = (userId: number) => {
+  if (props.multiple) {
+    return (props.modelValue as number[]).includes(userId)
+  }
+  return props.modelValue === userId
+}
+
 const selectUser = (user: User) => {
-  emit('update:modelValue', user.id)
-  isOpen.value = false
+  if (props.multiple) {
+    const currentValues = [...(props.modelValue as number[])]
+    const index = currentValues.indexOf(user.id)
+    if (index === -1) {
+      currentValues.push(user.id)
+    } else {
+      currentValues.splice(index, 1)
+    }
+    emit('update:modelValue', currentValues)
+  } else {
+    emit('update:modelValue', user.id)
+    isOpen.value = false
+  }
   searchQuery.value = ''
 }
 
@@ -77,12 +104,21 @@ onUnmounted(() => {
       @click="toggleDropdown"
     >
       <div class="selected-value">
-        <template v-if="selectedUser">
-          <UserIcon :size="16" class="user-icon" />
-          <span>{{ selectedUser.name }}</span>
-          <span class="username-hint">({{ selectedUser.username }})</span>
+        <template v-if="selectedUsers.length > 0">
+          <div v-if="multiple" class="chips-container">
+            <div v-for="user in selectedUsers" :key="user.id" class="chip">
+              <UserIcon :size="14" />
+              <span>{{ user.name }}</span>
+              <X :size="14" class="remove-chip" @click.stop="selectUser(user)" />
+            </div>
+          </div>
+          <template v-else>
+            <UserIcon :size="16" class="user-icon" />
+            <span>{{ selectedUser.name }}</span>
+            <span class="username-hint">({{ selectedUser.username }})</span>
+          </template>
         </template>
-        <span v-else class="placeholder">Select user...</span>
+        <span v-else class="placeholder">Select user(s)...</span>
       </div>
       <ChevronDown :size="18" class="chevron" />
     </div>
@@ -108,14 +144,14 @@ onUnmounted(() => {
             v-for="user in filteredUsers" 
             :key="user.id"
             class="option"
-            :class="{ 'is-selected': user.id === modelValue }"
+            :class="{ 'is-selected': isSelected(user.id) }"
             @click="selectUser(user)"
           >
             <div class="option-content">
               <span class="option-name">{{ user.name }}</span>
               <span class="option-username">{{ user.username }}</span>
             </div>
-            <Check v-if="user.id === modelValue" :size="16" class="check-icon" />
+            <Check v-if="isSelected(user.id)" :size="16" class="check-icon" />
           </div>
         </template>
         <div v-else class="empty-state">
@@ -165,6 +201,35 @@ onUnmounted(() => {
   align-items: center;
   gap: 8px;
   font-size: 0.875rem;
+  flex-wrap: wrap;
+}
+
+.chips-container {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  background: rgba(59, 130, 246, 0.15);
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  border-radius: 6px;
+  color: var(--accent-color);
+  font-size: 0.75rem;
+}
+
+.remove-chip {
+  cursor: pointer;
+  opacity: 0.7;
+  transition: opacity 0.2s;
+}
+
+.remove-chip:hover {
+  opacity: 1;
 }
 
 .user-icon {

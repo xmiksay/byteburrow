@@ -9,14 +9,20 @@ import {
   FileText,
   AlertCircle,
   Maximize2,
-  Minimize2
+  Minimize2,
+  Tag as TagIcon
 } from 'lucide-vue-next'
 import { marked } from 'marked'
 import { markedHighlight } from 'marked-highlight'
 import hljs from 'highlight.js'
 import 'highlight.js/styles/github-dark.css'
 import { storageService } from '../services/storage'
-import type { Storage, DirectoryEntry } from '../types'
+import { tagService } from '../services/tag'
+import { useAuth } from '../composables/useAuth'
+import TagDialog from './TagDialog.vue'
+import type { Storage, DirectoryEntry, Tag } from '../types'
+
+const { user } = useAuth()
 
 // Configure marked to use highlight.js
 marked.use(markedHighlight({
@@ -108,6 +114,24 @@ onMounted(() => {
 const getBasename = (path: string) => {
   return path.split('/').filter(s => s).pop() || path
 }
+
+// Tags logic
+const allTags = ref<Tag[]>([])
+const showTagsModal = ref(false)
+
+const fetchTags = async () => {
+  try {
+    allTags.value = await tagService.getTags()
+  } catch (err: any) {
+    console.error('Failed to fetch tags:', err)
+  }
+}
+
+const handleTagsUpdated = (newTags: number[]) => {
+  props.entry.tags = newTags
+}
+
+onMounted(fetchTags)
 </script>
 
 <template>
@@ -120,6 +144,12 @@ const getBasename = (path: string) => {
             <h3>{{ getBasename(entry.path) }}</h3>
             <span class="path-label">{{ entry.path }}</span>
           </div>
+        </div>
+
+        <div class="header-tags" v-if="entry.tags?.length">
+          <span v-for="tagId in entry.tags" :key="tagId" class="tag-pill">
+            {{ allTags.find(t => t.id === tagId)?.name || 'Tag' }}
+          </span>
         </div>
 
         <div class="viewer-actions">
@@ -146,6 +176,10 @@ const getBasename = (path: string) => {
             <Loader2 v-if="saving" :size="16" class="spin" />
             <Save v-else :size="16" />
             <span>{{ saving ? 'Saving...' : 'Save' }}</span>
+          </button>
+
+          <button v-if="user?.admin" class="btn-icon" @click="showTagsModal = true" title="Manage Tags">
+            <TagIcon :size="20" />
           </button>
 
           <div class="header-divider"></div>
@@ -204,6 +238,15 @@ const getBasename = (path: string) => {
         </div>
       </footer>
     </div>
+
+    <!-- Tags Dialog -->
+    <TagDialog
+      v-if="showTagsModal"
+      :storage="storage"
+      :entry="entry"
+      @close="showTagsModal = false"
+      @updated="handleTagsUpdated"
+    />
   </div>
 </template>
 
@@ -269,9 +312,25 @@ const getBasename = (path: string) => {
 }
 
 .path-label {
-  font-size: 0.75rem;
-  color: var(--text-secondary);
   font-family: monospace;
+}
+
+.header-tags {
+  display: flex;
+  gap: 8px;
+  margin-left: 20px;
+  flex: 1;
+  overflow: hidden;
+}
+
+.tag-pill {
+  font-size: 0.7rem;
+  padding: 2px 8px;
+  background: rgba(59, 130, 246, 0.2);
+  color: var(--accent-color);
+  border-radius: 4px;
+  white-space: nowrap;
+  border: 1px solid rgba(59, 130, 246, 0.3);
 }
 
 .viewer-actions {
@@ -488,6 +547,77 @@ const getBasename = (path: string) => {
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(10px); }
   to { opacity: 1; transform: translateY(0); }
+}
+
+/* Modal Inner styles */
+.modal-overlay-inner {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  backdrop-filter: blur(4px);
+}
+
+.modal {
+  width: 90%;
+  max-width: 400px;
+}
+
+.modal-header {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border-color);
+  background: none;
+}
+
+.modal-body {
+  padding: 20px;
+}
+
+.tags-selection-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  gap: 8px;
+  margin-bottom: 20px;
+  max-height: 250px;
+  overflow-y: auto;
+}
+
+.tag-checkbox-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px;
+  cursor: pointer;
+  transition: all 0.2s;
+  font-size: 0.875rem;
+}
+
+.tag-checkbox-item.selected {
+  background: rgba(59, 130, 246, 0.15);
+  border-color: var(--accent-color);
+  color: var(--accent-color);
+}
+
+.hidden-checkbox {
+  display: none;
+}
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.btn-secondary {
+  padding: 8px 16px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  color: var(--text-primary);
+  cursor: pointer;
 }
 
 .spin {

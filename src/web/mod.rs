@@ -2,6 +2,7 @@ pub mod group;
 pub mod storage;
 pub mod user;
 pub mod ws;
+pub mod tag;
 
 use crate::auth::Auth;
 use crate::config::Config;
@@ -78,10 +79,12 @@ pub async fn run(config: Config, db: DatabaseConnection) {
     // API router - all API routes under /api
     let api_router = Router::new()
         .route("/health", get(health_handler))
+        .route("/version", get(version_handler))
         .route("/ws", get(ws::ws_handler))
         .nest("/user", user::router())
         .nest("/group", group::router())
-        .nest("/storage", storage::router());
+        .nest("/storage", storage::router())
+        .nest("/tag", tag::router());
 
     let app = Router::new()
         .nest("/api", api_router)
@@ -116,5 +119,13 @@ pub async fn health_handler(State(state): State<Arc<AppState>>) -> impl IntoResp
         "status": "ok",
         "service": "cloud",
         "database": db_status,
+    }))
+}
+
+/// Version endpoint
+pub async fn version_handler() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "commit": env!("GIT_COMMIT"),
+        "version": env!("CARGO_PKG_VERSION"),
     }))
 }

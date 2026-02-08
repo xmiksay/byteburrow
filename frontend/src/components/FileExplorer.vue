@@ -8,11 +8,25 @@ import {
   Download, 
   Eye, 
   HardDrive,
-  MoreVertical,
+  FilePlus,
+  FolderPlus,
+  Trash2,
+  Edit2,
+  X,
+  Save,
+  Link,
+  Tag as TagIcon,
+  Share2
 } from 'lucide-vue-next'
 import { storageService } from '../services/storage'
-import type { Storage, DirectoryEntry } from '../types'
+import { tagService } from '../services/tag'
+import { useAuth } from '../composables/useAuth'
+import type { Storage, DirectoryEntry, Tag } from '../types'
 import FileViewer from './FileViewer.vue'
+import MediaViewer from './MediaViewer.vue'
+import ShareDialog from './ShareDialog.vue'
+
+const { user } = useAuth()
 
 const props = defineProps<{
   initialStorageId?: number
@@ -25,6 +39,24 @@ const entries = ref<DirectoryEntry[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
 const selectedFile = ref<DirectoryEntry | null>(null)
+const selectedMediaFile = ref<DirectoryEntry | null>(null)
+
+// Modal state
+const showModal = ref(false)
+const modalMode = ref<'create-file' | 'create-folder' | 'rename'>('create-file')
+const itemName = ref('')
+const itemToRename = ref<DirectoryEntry | null>(null)
+const submitting = ref(false)
+
+// Tags state
+const allTags = ref<Tag[]>([])
+const showTagsModal = ref(false)
+const entryToTag = ref<DirectoryEntry | null>(null)
+const selectedEntryTags = ref<number[]>([])
+
+// Share state
+const showShareModal = ref(false)
+const entryToShare = ref<DirectoryEntry | null>(null)
 
 const pathSegments = computed(() => {
   if (!currentPath.value) return []
@@ -78,8 +110,8 @@ const navigateUp = () => {
   navigateTo(parentPath)
 }
 
-const formatSize = (bytes?: number) => {
-  if (bytes === undefined) return '-'
+const formatSize = (bytes?: number | null) => {
+  if (bytes === undefined || bytes === null) return ''
   const units = ['B', 'KB', 'MB', 'GB', 'TB']
   let size = bytes
   let unitIdx = 0
@@ -87,12 +119,13 @@ const formatSize = (bytes?: number) => {
     size /= 1024
     unitIdx++
   }
-  return unitIdx === 0 ? `${bytes} B` : `${size.toFixed(1)} ${units[unitIdx]}`
+  return unitIdx === 0 ? `${bytes} B` : `${size.toFixed(0)} ${units[unitIdx]}`
 }
 
 const formatDate = (dateStr?: string) => {
   if (!dateStr) return '-'
-  return new Date(dateStr).toLocaleString()
+  const date = new Date(dateStr)
+  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: '2-digit' })
 }
 
 const getFileUrl = (entry: DirectoryEntry, mode: 'show' | 'download') => {
@@ -100,8 +133,51 @@ const getFileUrl = (entry: DirectoryEntry, mode: 'show' | 'download') => {
   return `/api/storage/${selectedStorage.value.id}/${mode}/${entry.path}`
 }
 
+const fetchTags = async () => {
+  try {
+    allTags.value = await tagService.getTags()
+  } catch (err: any) {
+    console.error('Failed to fetch tags:', err)
+  }
+}
+
+const openTagsModal = (entry: DirectoryEntry) => {
+  entryToTag.value = entry
+  selectedEntryTags.value = [...(entry.tags || [])]
+  showTagsModal.value = true
+}
+
+const openShareModal = (entry: DirectoryEntry) => {
+  entryToShare.value = entry
+  showShareModal.value = true
+}
+
+const handleTagsSubmit = async () => {
+  if (!entryToTag.value || !selectedStorage.value) return
+  
+  try {
+    submitting.value = true
+    await storageService.updateEntryTags(
+      selectedStorage.value.id, 
+      entryToTag.value.path, 
+      selectedEntryTags.value
+    )
+    await fetchEntries()
+    showTagsModal.value = false
+  } catch (err: any) {
+    alert('Failed to update tags: ' + err.message)
+  } finally {
+    submitting.value = false
+  }
+}
+
+const getTagName = (tagId: number) => {
+  return allTags.value.find(t => t.id === tagId)?.name || `Tag ${tagId}`
+}
+
 onMounted(() => {
   fetchStorages()
+  fetchTags()
 })
 
 const sortedEntries = computed(() => {
@@ -126,11 +202,84 @@ const isViewableAsText = (path: string) => {
   ].includes(ext || '')
 }
 
+const isImage = (path: string) => {
+  const ext = path.split('.').pop()?.toLowerCase() || ''
+  return ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'].includes(ext)
+}
+
+const isMediaFile = (path: string) => {
+  const ext = path.split('.').pop()?.toLowerCase() || ''
+  const isAudio = ['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac'].includes(ext)
+  const isVideo = ['mp4', 'webm', 'ogv', 'mov', 'mkv'].includes(ext)
+  return isAudio || isVideo
+}
+
+const getThumbnailUrl = (entry: DirectoryEntry, size: 'small' | 'large' | 'mini') => {
+  if (!entry.hash || entry.hash.length === 0) return null
+  const hex = Array.from(entry.hash).map(b => b.toString(16).padStart(2, '0')).join('')
+  return `/api/storage/thumbnail/${hex}/${size}`
+}
+
 const handleEntryClick = (entry: DirectoryEntry) => {
-  if (entry.entry_type === 'Directory') {
+  if (entry.entry_type === 'Directory' || (entry.entry_type === 'Symlink' && !isMediaFile(entry.path) && !isViewableAsText(entry.path))) {
     navigateTo(entry.path)
   } else if (isViewableAsText(entry.path)) {
     selectedFile.value = entry
+  } else if (isMediaFile(entry.path)) {
+    selectedMediaFile.value = entry
+  }
+}
+
+const openCreateModal = (mode: 'create-file' | 'create-folder') => {
+  modalMode.value = mode
+  itemName.value = ''
+  showModal.value = true
+}
+
+const openRenameModal = (entry: DirectoryEntry) => {
+  modalMode.value = 'rename'
+  itemToRename.value = entry
+  itemName.value = getBasename(entry.path)
+  showModal.value = true
+}
+
+const handleModalSubmit = async () => {
+  if (!itemName.value.trim() || !selectedStorage.value) return
+  
+  try {
+    submitting.value = true
+    if (modalMode.value === 'create-file') {
+      const path = currentPath.value ? `${currentPath.value}/${itemName.value}` : itemName.value
+      await storageService.createEntry(selectedStorage.value.id, path, 'File')
+    } else if (modalMode.value === 'create-folder') {
+      const path = currentPath.value ? `${currentPath.value}/${itemName.value}` : itemName.value
+      await storageService.createEntry(selectedStorage.value.id, path, 'Directory')
+    } else if (modalMode.value === 'rename' && itemToRename.value) {
+      const entry = itemToRename.value
+      const basename = getBasename(entry.path)
+      const parent = entry.path.substring(0, entry.path.length - basename.length)
+      const newPath = `${parent}${itemName.value}`
+      await storageService.renameEntry(selectedStorage.value.id, entry.path, newPath)
+    }
+    
+    await fetchEntries()
+    showModal.value = false
+  } catch (err: any) {
+    alert('Operation failed: ' + err.message)
+  } finally {
+    submitting.value = false
+  }
+}
+
+const deleteEntry = async (entry: DirectoryEntry) => {
+  if (!confirm(`Are you sure you want to delete ${getBasename(entry.path)}?`)) return
+  if (!selectedStorage.value) return
+  
+  try {
+    await storageService.removeEntry(selectedStorage.value.id, entry.path)
+    await fetchEntries()
+  } catch (err: any) {
+    alert('Failed to delete: ' + err.message)
   }
 }
 </script>
@@ -158,6 +307,17 @@ const handleEntryClick = (entry: DirectoryEntry) => {
             <ChevronRight v-if="index < pathSegments.length - 1" :size="16" class="separator" />
           </template>
         </div>
+      </div>
+
+      <div class="header-actions">
+        <button class="btn-secondary" @click="openCreateModal('create-file')" title="New File">
+          <FilePlus :size="18" />
+          <span>New File</span>
+        </button>
+        <button class="btn-secondary" @click="openCreateModal('create-folder')" title="New Folder">
+          <FolderPlus :size="18" />
+          <span>New Folder</span>
+        </button>
       </div>
     </div>
 
@@ -195,8 +355,18 @@ const handleEntryClick = (entry: DirectoryEntry) => {
              @click="handleEntryClick(entry)">
           <div class="col-name">
             <Folder v-if="entry.entry_type === 'Directory'" :size="18" class="entry-icon folder" />
+            <Link v-else-if="entry.entry_type === 'Symlink'" :size="18" class="entry-icon symlink" />
+            <div v-else-if="isImage(entry.path) && entry.hash" class="entry-thumbnail-container">
+              <img :src="getThumbnailUrl(entry, 'mini')!" :alt="getBasename(entry.path)" class="entry-thumbnail" @error="(e) => (e.target as HTMLImageElement).style.display = 'none'" />
+              <File :size="18" class="entry-icon file fallback-icon" />
+            </div>
             <File v-else :size="18" class="entry-icon file" />
             <span class="entry-name">{{ getBasename(entry.path) }}</span>
+            <div class="entry-tags" v-if="entry.tags.length > 0">
+              <span v-for="tagId in entry.tags" :key="tagId" class="tag-pill">
+                {{ getTagName(tagId) }}
+              </span>
+            </div>
           </div>
           <div class="col-size">{{ formatSize(entry.size) }}</div>
           <div class="col-date">{{ formatDate(entry.modified_at) }}</div>
@@ -210,8 +380,17 @@ const handleEntryClick = (entry: DirectoryEntry) => {
                   <Download :size="16" />
                 </a>
               </template>
-              <button class="btn-icon-sm more">
-                <MoreVertical :size="16" />
+              <button class="btn-icon-sm" @click="openRenameModal(entry)" title="Rename">
+                <Edit2 :size="16" />
+              </button>
+              <button class="btn-icon-sm danger" @click="deleteEntry(entry)" title="Delete">
+                <Trash2 :size="16" />
+              </button>
+              <button v-if="user?.admin" class="btn-icon-sm" @click="openTagsModal(entry)" title="Manage Tags">
+                <TagIcon :size="16" />
+              </button>
+              <button class="btn-icon-sm share" @click="openShareModal(entry)" title="Share">
+                <Share2 :size="16" />
               </button>
             </div>
           </div>
@@ -230,6 +409,109 @@ const handleEntryClick = (entry: DirectoryEntry) => {
       :storage="selectedStorage"
       :entry="selectedFile"
       @close="selectedFile = null"
+    />
+
+    <!-- Media Viewer Modal -->
+    <MediaViewer
+      v-if="selectedMediaFile && selectedStorage"
+      :storage="selectedStorage"
+      :entry="selectedMediaFile"
+      @close="selectedMediaFile = null"
+    />
+
+    <!-- Creation/Rename Modal -->
+    <div v-if="showModal" class="modal-overlay" @click.self="showModal = false">
+      <div class="modal glass-panel">
+        <div class="modal-header">
+          <h3>
+            <template v-if="modalMode === 'create-file'">Create New File</template>
+            <template v-else-if="modalMode === 'create-folder'">Create New Folder</template>
+            <template v-else>Rename Entry</template>
+          </h3>
+          <button class="btn-icon" @click="showModal = false">
+            <X :size="20" />
+          </button>
+        </div>
+        
+        <form @submit.prevent="handleModalSubmit" class="modal-body">
+          <div class="form-group">
+            <label for="itemName">Name</label>
+            <input
+              id="itemName"
+              v-model="itemName"
+              type="text"
+              :placeholder="modalMode === 'create-folder' ? 'Folder name' : 'File name'"
+              autofocus
+            />
+          </div>
+          
+          <div class="modal-footer">
+            <button type="button" class="btn-secondary" @click="showModal = false" :disabled="submitting">
+              Cancel
+            </button>
+            <button type="submit" class="btn-primary" :disabled="submitting || !itemName.trim()">
+              <Save :size="16" />
+              <span>{{ submitting ? 'Processing...' : 'Confirm' }}</span>
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Tags Modal -->
+    <div v-if="showTagsModal && entryToTag" class="modal-overlay" @click.self="showTagsModal = false">
+      <div class="modal glass-panel fade-in">
+        <div class="modal-header">
+          <div class="header-title">
+            <TagIcon :size="20" class="header-icon" />
+            <h3>Manage Tags</h3>
+          </div>
+          <button class="btn-icon" @click="showTagsModal = false">
+            <X :size="20" />
+          </button>
+        </div>
+        
+        <div class="modal-body">
+          <p class="modal-subtitle">Applying tags to: <strong>{{ getBasename(entryToTag.path) }}</strong></p>
+          
+          <div class="tags-selection-grid">
+            <label v-for="tag in allTags" :key="tag.id" class="tag-checkbox-item glass-panel" :class="{ selected: selectedEntryTags.includes(tag.id) }">
+              <input 
+                type="checkbox" 
+                :value="tag.id" 
+                v-model="selectedEntryTags"
+                class="hidden-checkbox"
+              />
+              <TagIcon :size="16" />
+              <span>{{ tag.name }}</span>
+            </label>
+            
+            <div v-if="allTags.length === 0" class="empty-tags-hint">
+              <TagIcon :size="32" style="opacity: 0.1; margin-bottom: 10px;" />
+              <p>No tags available.</p>
+              <span class="hint">Create tags in the Tag Management section first.</span>
+            </div>
+          </div>
+          
+          <div class="modal-footer">
+            <button type="button" class="btn-secondary" @click="showTagsModal = false" :disabled="submitting">
+              Cancel
+            </button>
+            <button type="button" class="btn-primary" @click="handleTagsSubmit" :disabled="submitting">
+              <Save :size="16" />
+              <span>{{ submitting ? 'Updating...' : 'Update Tags' }}</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Share Dialog -->
+    <ShareDialog
+      v-if="showShareModal && entryToShare"
+      :storage="selectedStorage!"
+      :entry="entryToShare"
+      @close="showShareModal = false"
     />
   </div>
 </template>
@@ -315,6 +597,31 @@ const handleEntryClick = (entry: DirectoryEntry) => {
   flex-shrink: 0;
 }
 
+.header-actions {
+  display: flex;
+  gap: 12px;
+}
+
+.btn-secondary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  color: var(--text-primary);
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+.btn-secondary:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: var(--text-secondary);
+}
+
 .explorer-content {
   flex: 1;
   display: flex;
@@ -326,28 +633,65 @@ const handleEntryClick = (entry: DirectoryEntry) => {
 
 .table-header {
   display: grid;
-  grid-template-columns: 1fr 120px 200px 100px;
-  padding: 16px 24px;
+  grid-template-columns: 1fr 60px 100px 170px;
+  padding: 8px 16px;
   background: rgba(255, 255, 255, 0.02);
   border-bottom: 1px solid var(--border-color);
   font-weight: 600;
-  font-size: 0.875rem;
+  font-size: 0.75rem;
   color: var(--text-secondary);
+  min-width: 0;
+  gap: 16px;
+}
+
+@media (max-width: 1100px) {
+  .table-header {
+    grid-template-columns: 1fr 60px 170px;
+  }
+  .col-time { display: none; }
+}
+
+@media (max-width: 750px) {
+  .table-header {
+    grid-template-columns: 1fr 170px;
+  }
+  .col-size { display: none; }
 }
 
 .entries-list {
   overflow-y: auto;
   flex: 1;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.entries-list::-webkit-scrollbar {
+  display: none;
 }
 
 .entry-row {
   display: grid;
-  grid-template-columns: 1fr 120px 200px 100px;
-  padding: 12px 24px;
+  grid-template-columns: 1fr 60px 100px 170px;
+  padding: 4px 16px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.03);
   align-items: center;
   transition: background 0.2s;
   cursor: pointer;
+  font-size: 0.8125rem;
+  min-width: 0;
+  gap: 16px;
+}
+
+@media (max-width: 1100px) {
+  .entry-row {
+    grid-template-columns: 1fr 60px 170px;
+  }
+}
+
+@media (max-width: 750px) {
+  .entry-row {
+    grid-template-columns: 1fr 170px;
+  }
 }
 
 .entry-row:hover {
@@ -359,6 +703,7 @@ const handleEntryClick = (entry: DirectoryEntry) => {
   align-items: center;
   gap: 12px;
   overflow: hidden;
+  min-width: 0;
 }
 
 .entry-name {
@@ -366,14 +711,63 @@ const handleEntryClick = (entry: DirectoryEntry) => {
   overflow: hidden;
   text-overflow: ellipsis;
   font-weight: 500;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.entry-tags {
+  display: flex;
+  gap: 4px;
+  overflow: hidden;
+  mask-image: linear-gradient(to right, black 85%, transparent 100%);
+  flex: 1;
+  min-width: 0;
+}
+
+.tag-pill {
+  font-size: 0.65rem;
+  padding: 2px 6px;
+  background: rgba(59, 130, 246, 0.15);
+  color: var(--accent-color);
+  border-radius: 4px;
+  white-space: nowrap;
+  border: 1px solid rgba(59, 130, 246, 0.2);
 }
 
 .entry-icon.folder { color: #f59e0b; }
-.entry-icon.file { color: #3b82f6; }
+.entry-icon.symlink { color: #06b6d4; }
+.entry-icon.file { color: var(--text-secondary); }
 
-.col-size, .col-date {
-  font-size: 0.875rem;
+.entry-thumbnail-container {
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+
+.entry-thumbnail {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 2px;
+  z-index: 2;
+}
+
+.fallback-icon {
+  position: absolute;
+  z-index: 1;
+}
+
+.col-size, .col-time {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.75rem;
   color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: right;
 }
 
 .action-buttons {
@@ -381,10 +775,20 @@ const handleEntryClick = (entry: DirectoryEntry) => {
   gap: 4px;
   opacity: 0;
   transition: opacity 0.2s;
+  justify-content: flex-end;
+  visibility: hidden;
 }
 
 .entry-row:hover .action-buttons {
   opacity: 1;
+  visibility: visible;
+}
+
+@media (max-width: 750px) {
+  .action-buttons {
+    opacity: 1;
+    visibility: visible;
+  }
 }
 
 .btn-icon-sm {
@@ -445,5 +849,223 @@ const handleEntryClick = (entry: DirectoryEntry) => {
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(5px); }
   to { opacity: 1; transform: translateY(0); }
+}
+
+/* Modal styles */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 3000;
+  padding: 20px;
+  backdrop-filter: blur(4px);
+}
+
+.modal {
+  width: 100%;
+  max-width: 400px;
+  animation: slideUp 0.15s ease-out;
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.explorer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0 4px;
+  gap: 8px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 20px 24px;
+}
+
+.modal-header h3 {
+  font-size: 1.125rem;
+  margin: 0;
+}
+
+.modal-body {
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.form-group label {
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+}
+
+.form-group input {
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  color: var(--text-primary);
+  outline: none;
+  transition: all 0.2s;
+}
+
+.form-group input:focus {
+  border-color: var(--accent-color);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  padding-top: 8px;
+}
+
+/* Tags selection styles */
+.modal-subtitle {
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+
+.tags-selection-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 10px;
+  max-height: 300px;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.tag-checkbox-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+  border: 1px solid transparent;
+}
+
+.tag-checkbox-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.tag-checkbox-item.selected {
+  background: rgba(59, 130, 246, 0.1);
+  border-color: rgba(59, 130, 246, 0.3);
+  color: var(--accent-color);
+}
+
+.hidden-checkbox {
+  display: none;
+}
+
+.empty-tags-hint {
+  grid-column: 1 / -1;
+  text-align: center;
+  padding: 20px;
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+}
+.fade-in {
+  animation: fadeIn 0.2s ease-out;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.tags-selection-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 12px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 4px;
+  margin-bottom: 24px;
+}
+
+.tag-checkbox-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+  border: 1px solid transparent;
+}
+
+.tag-checkbox-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.tag-checkbox-item.selected {
+  background: rgba(59, 130, 246, 0.12);
+  border-color: rgba(59, 130, 246, 0.4);
+  color: var(--accent-color);
+}
+
+.check-indicator {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  background: var(--accent-color);
+  border-radius: 50%;
+  box-shadow: 0 0 10px var(--accent-color);
+}
+
+.hidden-checkbox {
+  display: none;
+}
+
+.empty-tags-hint {
+  grid-column: 1 / -1;
+  text-align: center;
+  padding: 30px 20px;
+  color: var(--text-secondary);
+}
+
+.header-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.header-icon {
+  color: var(--accent-color);
+}
+
+.modal-subtitle {
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  margin-bottom: 20px;
+}
+
+.hint {
+  font-size: 0.75rem;
+  opacity: 0.7;
+  display: block;
 }
 </style>

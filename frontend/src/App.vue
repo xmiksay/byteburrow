@@ -9,20 +9,32 @@ import {
   Search,
   LogOut,
   UserCircle,
-  Folder
+  Folder,
+  Tag as TagIcon,
+  ChevronLeft,
+  ChevronRight,
+  Share2
 } from 'lucide-vue-next'
 import Login from './components/Login.vue'
 import UserManagement from './components/UserManagement.vue'
 import StorageManagement from './components/StorageManagement.vue'
 import GroupManagement from './components/GroupManagement.vue'
+import TagManagement from './components/TagManagement.vue'
 import FileExplorer from './components/FileExplorer.vue'
+import ShareManagement from './components/ShareManagement.vue'
 import { useAuth } from './composables/useAuth'
 import { api } from './utils/api'
 
 const { isAuthenticated, user, logout, fetchUserInfo } = useAuth()
 
-type View = 'files' | 'storages' | 'users' | 'groups' | 'monitoring'
+type View = 'files' | 'storages' | 'users' | 'groups' | 'tags' | 'monitoring' | 'shares'
 const currentView = ref<View>('files')
+const isSidebarCollapsed = ref(localStorage.getItem('sidebar_collapsed') === 'true')
+
+const toggleSidebar = () => {
+  isSidebarCollapsed.value = !isSidebarCollapsed.value
+  localStorage.setItem('sidebar_collapsed', isSidebarCollapsed.value.toString())
+}
 
 const storages = ref<any[]>([])
 const loading = ref(true)
@@ -31,7 +43,11 @@ const healthInfo = ref<any>(null)
 
 const fetchHealth = async () => {
   try {
-    healthInfo.value = await api.get<any>('/api/health')
+    const [health, version] = await Promise.all([
+      api.get<any>('/api/health'),
+      api.get<any>('/api/version')
+    ])
+    healthInfo.value = { ...health, ...version }
   } catch (err) {
     console.error('Failed to fetch health info:', err)
   }
@@ -94,11 +110,11 @@ onMounted(async () => {
   <Login v-if="!isAuthenticated" />
 
   <!-- Show main app if authenticated -->
-  <div v-else class="app-container">
+  <div v-else class="app-container" :class="{ 'sidebar-collapsed': isSidebarCollapsed }">
     <aside class="sidebar glass-panel">
       <div class="logo-section">
-        <Cloud class="logo-icon" :size="32" />
-        <h1>Cloud</h1>
+        <Cloud class="logo-icon" :size="28" />
+        <h1 v-if="!isSidebarCollapsed">Cloud</h1>
       </div>
 
       <nav class="main-nav">
@@ -107,18 +123,20 @@ onMounted(async () => {
           class="nav-item"
           :class="{ active: currentView === 'files' }"
           @click.prevent="currentView = 'files'"
+          title="Files"
         >
           <Folder :size="20" />
-          <span>Files</span>
+          <span v-if="!isSidebarCollapsed">Files</span>
         </a>
         <a
           href="#"
           class="nav-item"
           :class="{ active: currentView === 'storages' }"
           @click.prevent="currentView = 'storages'"
+          title="Storages"
         >
           <Database :size="20" />
-          <span>Storages</span>
+          <span v-if="!isSidebarCollapsed">Storages</span>
         </a>
         <a
           v-if="user?.admin"
@@ -126,9 +144,10 @@ onMounted(async () => {
           class="nav-item"
           :class="{ active: currentView === 'users' }"
           @click.prevent="currentView = 'users'"
+          title="Users"
         >
           <Users :size="20" />
-          <span>Users</span>
+          <span v-if="!isSidebarCollapsed">Users</span>
         </a>
         <a
           v-if="user?.admin"
@@ -136,26 +155,54 @@ onMounted(async () => {
           class="nav-item"
           :class="{ active: currentView === 'groups' }"
           @click.prevent="currentView = 'groups'"
+          title="Groups"
         >
           <Users :size="20" />
-          <span>Groups</span>
+          <span v-if="!isSidebarCollapsed">Groups</span>
+        </a>
+        <a
+          href="#"
+          class="nav-item"
+          :class="{ active: currentView === 'tags' }"
+          @click.prevent="currentView = 'tags'"
+          title="Tags"
+        >
+          <TagIcon :size="20" />
+          <span v-if="!isSidebarCollapsed">Tags</span>
+        </a>
+        <a
+          href="#"
+          class="nav-item"
+          :class="{ active: currentView === 'shares' }"
+          @click.prevent="currentView = 'shares'"
+          title="Shares"
+        >
+          <Share2 :size="20" />
+          <span v-if="!isSidebarCollapsed">Shares</span>
         </a>
         <a
           href="#"
           class="nav-item"
           :class="{ active: currentView === 'monitoring' }"
           @click.prevent="currentView = 'monitoring'"
+          title="Monitoring"
         >
           <Activity :size="20" />
-          <span>Monitoring</span>
+          <span v-if="!isSidebarCollapsed">Monitoring</span>
         </a>
       </nav>
 
       <div class="spacer"></div>
 
+      <button class="nav-item collapse-btn" @click="toggleSidebar">
+        <ChevronLeft v-if="!isSidebarCollapsed" :size="20" />
+        <ChevronRight v-else :size="20" />
+        <span v-if="!isSidebarCollapsed">Collapse Sidebar</span>
+      </button>
+
       <div class="nav-item settings">
         <Settings :size="20" />
-        <span>Settings</span>
+        <span v-if="!isSidebarCollapsed">Settings</span>
       </div>
     </aside>
 
@@ -230,6 +277,12 @@ onMounted(async () => {
         <!-- Groups View -->
         <GroupManagement v-else-if="currentView === 'groups' && user?.admin" />
 
+        <!-- Tags View -->
+        <TagManagement v-else-if="currentView === 'tags'" />
+
+        <!-- Shares View -->
+        <ShareManagement v-else-if="currentView === 'shares'" />
+
         <!-- Monitoring View -->
         <template v-else-if="currentView === 'monitoring'">
           <div class="area-header">
@@ -247,7 +300,8 @@ onMounted(async () => {
               </div>
               <p class="description">Core API service status and version information.</p>
               <div class="card-footer">
-                <span class="info">Service: {{ healthInfo.service }}</span>
+                <span class="info">Version: v{{ healthInfo.version || '0.0.0' }}</span>
+                <span class="info" style="margin-left: 10px; opacity: 0.7">({{ healthInfo.commit?.substring(0, 7) || 'unknown' }})</span>
               </div>
             </div>
 
@@ -278,23 +332,35 @@ onMounted(async () => {
 <style scoped>
 .app-container {
   display: grid;
-  grid-template-columns: 260px 1fr;
+  grid-template-columns: 240px 1fr;
   height: 100vh;
-  gap: 20px;
-  padding: 20px;
+  gap: 16px;
+  padding: 16px;
+  transition: grid-template-columns 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.app-container.sidebar-collapsed {
+  grid-template-columns: 80px 1fr;
 }
 
 .sidebar {
   display: flex;
   flex-direction: column;
-  padding: 24px;
+  padding: 20px 12px;
+  overflow: hidden;
 }
 
 .logo-section {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-bottom: 40px;
+  margin-bottom: 32px;
+  padding: 0 12px;
+}
+
+.sidebar-collapsed .logo-section {
+  justify-content: center;
+  padding: 0;
 }
 
 .logo-icon {
@@ -316,11 +382,19 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 12px 16px;
-  border-radius: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
   color: var(--text-secondary);
   text-decoration: none;
   transition: all 0.2s;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.sidebar-collapsed .nav-item {
+  justify-content: center;
+  padding: 12px;
+  gap: 0;
 }
 
 .nav-item:hover, .nav-item.active {
@@ -338,15 +412,31 @@ onMounted(async () => {
   flex: 1;
 }
 
-.settings {
-  margin-top: auto;
+.collapse-btn {
+  border: none;
+  background: none;
+  cursor: pointer;
+  width: 100%;
+  margin-bottom: 8px;
+  color: var(--text-secondary);
+}
+
+.collapse-btn:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-primary);
 }
 
 .main-content {
   display: flex;
   flex-direction: column;
-  gap: 30px;
+  gap: 24px;
   overflow-y: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.main-content::-webkit-scrollbar {
+  display: none;
 }
 
 .top-header {
@@ -364,8 +454,8 @@ onMounted(async () => {
 .user-info {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 8px 16px;
+  gap: 10px;
+  padding: 6px 12px;
 }
 
 .user-details {
@@ -414,8 +504,9 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 16px;
-  width: 400px;
+  padding: 8px 14px;
+  max-width: 320px;
+  flex: 1;
 }
 
 .search-bar input {

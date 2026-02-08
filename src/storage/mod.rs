@@ -1,7 +1,7 @@
 use crate::entity::storage;
 use crate::entity::entry::{self, EntryType};
 use serde::{Deserialize, Serialize};
-use sea_orm::{EntityTrait, QueryFilter, ColumnTrait};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use chrono::TimeZone;
 use std::path::PathBuf;
 use tokio::fs;
@@ -129,11 +129,7 @@ impl Storage {
                 .await?
         } else {
             // Find directory entry first
-            let dir_path = if normalized_path.ends_with('/') {
-                normalized_path.to_string()
-            } else {
-                format!("{}/", normalized_path)
-            };
+            let dir_path = normalized_path.to_string();
 
             let directory = entry::Entity::find()
                 .filter(entry::Column::StorageId.eq(self.model.id))
@@ -236,9 +232,137 @@ impl Storage {
         
         tokio::fs::write(full_path, data).await
     }
+
+    /// Create a new directory
+    #[instrument]
+    pub async fn create_directory(&self, sub_path: &str) -> io::Result<()> {
+        let full_path = self.get_full_path(sub_path);
+        tokio::fs::create_dir_all(full_path).await
+    }
+
+    /// Create an empty file
+    #[instrument]
+    pub async fn create_file(&self, sub_path: &str) -> io::Result<()> {
+        let full_path = self.get_full_path(sub_path);
+        
+        // Ensure parent directory exists
+        if let Some(parent) = full_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        
+        tokio::fs::File::create(full_path).await?;
+        Ok(())
+    }
+
+    /// Rename or move an entry
+    #[instrument]
+    pub async fn rename_entry(&self, old_path: &str, new_path: &str) -> io::Result<()> {
+        let old_full_path = self.get_full_path(old_path);
+        let new_full_path = self.get_full_path(new_path);
+        
+        // Ensure parent directory for the new path exists
+        if let Some(parent) = new_full_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        
+        tokio::fs::rename(old_full_path, new_full_path).await
+    }
+
+    /// Remove an entry (file or directory)
+    #[instrument]
+    pub async fn remove_entry(&self, sub_path: &str) -> io::Result<()> {
+        let full_path = self.get_full_path(sub_path);
+        let metadata = tokio::fs::metadata(&full_path).await?;
+        
+        if metadata.is_dir() {
+            tokio::fs::remove_dir_all(full_path).await
+        } else {
+            tokio::fs::remove_file(full_path).await
+        }
+    }
+
+    /// Get the parent ID for a given sub-path in the database
+    pub async fn get_parent_id(&self, db: &sea_orm::DatabaseConnection, sub_path: &str) -> Option<i32> {
+        let normalized_path = sub_path.trim_matches('/');
+        if normalized_path.is_empty() {
+            return None;
+        }
+
+        let p = normalized_path.trim_end_matches('/');
+        if let Some(last_slash) = p.rfind('/') {
+            let parent_path = &p[..last_slash];
+            entry::Entity::find()
+                .filter(entry::Column::StorageId.eq(self.model.id))
+                .filter(entry::Column::Path.eq(parent_path))
+                .one(db)
+                .await
+                .ok()
+                .flatten()
+                .map(|m| m.id)
+        } else {
+            None
+        }
+    }
+
+    /// Set tags for an entry, creating it if it doesn't exist in the database
+    #[instrument(skip(db, tags))]
+    pub async fn set_tags(&self, db: &sea_orm::DatabaseConnection, sub_path: &str, tags: Vec<i32>) -> Result<i32, sea_orm::DbErr> {
+        let full_path = self.get_full_path(sub_path);
+        
+        if !full_path.exists() {
+            return Err(sea_orm::DbErr::Custom(format!("Path {} not found on disk", sub_path)));
+        }
+        
+        let normalized_path = sub_path.trim_matches('/').to_string();
+
+        // Find entry in database
+        let entry_record = entry::Entity::find()
+            .filter(entry::Column::StorageId.eq(self.model.id))
+            .filter(entry::Column::Path.eq(&normalized_path))
+            .one(db)
+            .await?;
+
+        match entry_record {
+            Some(m) => {
+                // Update existing entry
+                let mut active: entry::ActiveModel = m.into();
+                active.tags = Set(tags);
+                active.update(db).await.map(|m| m.id)
+            }
+            None => {
+                // Create new entry
+                let parent_id = self.get_parent_id(db, &normalized_path).await;
+
+                let metadata = std::fs::metadata(&full_path).map_err(|e| {
+                    sea_orm::DbErr::Custom(format!("Metadata error: {}", e))
+                })?;
+
+                let entry_type = if metadata.is_dir() { EntryType::Directory }
+                                else if metadata.is_file() { EntryType::File }
+                                else { EntryType::Symlink };
+
+                let active = entry::ActiveModel {
+                    storage_id: Set(self.model.id),
+                    user_id: Set(self.model.default_user),
+                    group_id: Set(self.model.default_group),
+                    parent_id: Set(parent_id),
+                    path: Set(normalized_path),
+                    entry_type: Set(entry_type),
+                    size: Set(if metadata.is_file() { Some(metadata.len() as i64) } else { None }),
+                    tags: Set(tags),
+                    modified_at: Set(metadata.modified().ok().map(|t| chrono::DateTime::<chrono::Utc>::from(t).naive_utc())),
+                    created_at: Set(chrono::Utc::now().naive_utc()),
+                    ..Default::default()
+                };
+
+                active.insert(db).await.map(|m| m.id)
+            }
+        }
+    }
 }
 
 mod content_type;
+pub mod thumbnail;
 pub use content_type::determine_content_type;
 
 /// Format file size in human-readable format

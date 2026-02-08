@@ -18,17 +18,8 @@ impl MigrationTrait for Migration {
                             .auto_increment()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(Tag::UserId).integer().not_null())
                     .col(ColumnDef::new(Tag::Name).string().not_null())
                     .col(ColumnDef::new(Tag::Description).string())
-                    .foreign_key(
-                        ForeignKey::create()
-                            .name("fk_tag_user")
-                            .from(Tag::Table, Tag::UserId)
-                            .to(User::Table, User::Id)
-                            .on_delete(ForeignKeyAction::Cascade)
-                            .on_update(ForeignKeyAction::Cascade),
-                    )
                     .to_owned(),
             )
             .await
@@ -45,13 +36,6 @@ impl MigrationTrait for Migration {
 enum Tag {
     Table,
     Id,
-    UserId,
     Name,
     Description,
-}
-
-#[derive(DeriveIden)]
-enum User {
-    Table,
-    Id,
 }

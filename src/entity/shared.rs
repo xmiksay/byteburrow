@@ -9,6 +9,8 @@ pub struct Model {
     pub path_id: i32,
     pub token: Option<String>,
     pub can_write: bool,
+    pub user_ids: Vec<i32>,
+    pub group_ids: Vec<i32>,
     pub expires_at: Option<DateTime>,
     pub created_at: DateTime,
 }
@@ -26,26 +28,6 @@ pub enum Relation {
 impl Related<super::entry::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Path.def()
-    }
-}
-
-impl Related<super::user::Entity> for Entity {
-    fn to() -> RelationDef {
-        super::shared_user::Relation::User.def()
-    }
-
-    fn via() -> Option<RelationDef> {
-        Some(super::shared_user::Relation::Shared.def().rev())
-    }
-}
-
-impl Related<super::group::Entity> for Entity {
-    fn to() -> RelationDef {
-        super::shared_group::Relation::Group.def()
-    }
-
-    fn via() -> Option<RelationDef> {
-        Some(super::shared_group::Relation::Shared.def().rev())
     }
 }
 

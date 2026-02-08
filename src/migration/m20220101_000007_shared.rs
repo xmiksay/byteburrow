@@ -21,6 +21,18 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Shared::PathId).integer().not_null())
                     .col(ColumnDef::new(Shared::Token).string())
                     .col(ColumnDef::new(Shared::CanWrite).boolean().not_null().default(false))
+                    .col(
+                        ColumnDef::new(Shared::UserIds)
+                            .array(ColumnType::Integer)
+                            .not_null()
+                            .default(Expr::cust("ARRAY[]::INTEGER[]")),
+                    )
+                    .col(
+                        ColumnDef::new(Shared::GroupIds)
+                            .array(ColumnType::Integer)
+                            .not_null()
+                            .default(Expr::cust("ARRAY[]::INTEGER[]")),
+                    )
                     .col(ColumnDef::new(Shared::ExpiresAt).timestamp())
                     .col(
                         ColumnDef::new(Shared::CreatedAt)
@@ -55,6 +67,8 @@ enum Shared {
     PathId,
     Token,
     CanWrite,
+    UserIds,
+    GroupIds,
     ExpiresAt,
     CreatedAt,
 }

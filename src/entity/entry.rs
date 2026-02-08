@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 /// Entry type enum - File, Directory, or Symlink
 #[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
-#[sea_orm(rs_type = "String", db_type = "String(StringLen::N(16))")]
+#[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "entry_type_enum")]
 pub enum EntryType {
     #[sea_orm(string_value = "file")]
     File,

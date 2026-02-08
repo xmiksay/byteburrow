@@ -1,16 +1,17 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { Search, ChevronDown, Check, Users as GroupIcon } from 'lucide-vue-next'
+import { Search, ChevronDown, Check, Users as GroupIcon, X } from 'lucide-vue-next'
 import { groupService } from '../services/group'
 import type { Group } from '../types'
 
 const props = defineProps<{
-  modelValue: number
+  modelValue: number | number[]
+  multiple?: boolean
   error?: string
 }>()
 
 const emit = defineEmits<{
-  (e: 'update:modelValue', value: number): void
+  (e: 'update:modelValue', value: number | number[]): void
 }>()
 
 const groups = ref<Group[]>([])
@@ -19,9 +20,17 @@ const isOpen = ref(false)
 const searchQuery = ref('')
 const dropdownRef = ref<HTMLElement | null>(null)
 
-const selectedGroup = computed(() => 
-  groups.value.find(g => g.id === props.modelValue)
-)
+const selectedGroups = computed(() => {
+  if (props.multiple) {
+    const ids = props.modelValue as number[]
+    return groups.value.filter(g => ids.includes(g.id))
+  } else {
+    const id = props.modelValue as number
+    return groups.value.filter(g => g.id === id)
+  }
+})
+
+const selectedGroup = computed(() => selectedGroups.value[0])
 
 const filteredGroups = computed(() => {
   if (!searchQuery.value) return groups.value
@@ -42,9 +51,27 @@ const fetchGroups = async () => {
   }
 }
 
+const isSelected = (groupId: number) => {
+  if (props.multiple) {
+    return (props.modelValue as number[]).includes(groupId)
+  }
+  return props.modelValue === groupId
+}
+
 const selectGroup = (group: Group) => {
-  emit('update:modelValue', group.id)
-  isOpen.value = false
+  if (props.multiple) {
+    const currentValues = [...(props.modelValue as number[])]
+    const index = currentValues.indexOf(group.id)
+    if (index === -1) {
+      currentValues.push(group.id)
+    } else {
+      currentValues.splice(index, 1)
+    }
+    emit('update:modelValue', currentValues)
+  } else {
+    emit('update:modelValue', group.id)
+    isOpen.value = false
+  }
   searchQuery.value = ''
 }
 
@@ -76,11 +103,20 @@ onUnmounted(() => {
       @click="toggleDropdown"
     >
       <div class="selected-value">
-        <template v-if="selectedGroup">
-          <GroupIcon :size="16" class="group-icon" />
-          <span>{{ selectedGroup.name }}</span>
+        <template v-if="selectedGroups.length > 0">
+          <div v-if="multiple" class="chips-container">
+            <div v-for="group in selectedGroups" :key="group.id" class="chip">
+              <GroupIcon :size="14" />
+              <span>{{ group.name }}</span>
+              <X :size="14" class="remove-chip" @click.stop="selectGroup(group)" />
+            </div>
+          </div>
+          <template v-else>
+            <GroupIcon :size="16" class="group-icon" />
+            <span>{{ selectedGroup.name }}</span>
+          </template>
         </template>
-        <span v-else class="placeholder">Select group...</span>
+        <span v-else class="placeholder">Select group(s)...</span>
       </div>
       <ChevronDown :size="18" class="chevron" />
     </div>
@@ -106,14 +142,14 @@ onUnmounted(() => {
             v-for="group in filteredGroups" 
             :key="group.id"
             class="option"
-            :class="{ 'is-selected': group.id === modelValue }"
+            :class="{ 'is-selected': isSelected(group.id) }"
             @click="selectGroup(group)"
           >
             <div class="option-content">
               <span class="option-name">{{ group.name }}</span>
               <span v-if="group.description" class="option-desc">{{ group.description }}</span>
             </div>
-            <Check v-if="group.id === modelValue" :size="16" class="check-icon" />
+            <Check v-if="isSelected(group.id)" :size="16" class="check-icon" />
           </div>
         </template>
         <div v-else class="empty-state">
@@ -163,6 +199,35 @@ onUnmounted(() => {
   align-items: center;
   gap: 8px;
   font-size: 0.875rem;
+  flex-wrap: wrap;
+}
+
+.chips-container {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  background: rgba(59, 130, 246, 0.15);
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  border-radius: 6px;
+  color: var(--accent-color);
+  font-size: 0.75rem;
+}
+
+.remove-chip {
+  cursor: pointer;
+  opacity: 0.7;
+  transition: opacity 0.2s;
+}
+
+.remove-chip:hover {
+  opacity: 1;
 }
 
 .group-icon {
