@@ -1,6 +1,6 @@
 use crate::auth::{Auth, AuthError};
 use crate::entity::user;
-use crate::web::AppState;
+use crate::web::{require_admin, AppState, ErrorResponse};
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
@@ -24,12 +24,6 @@ pub struct LoginRequest {
 pub struct LoginResponse {
     pub token: String,
     pub expires_in_days: i64,
-}
-
-/// Error response
-#[derive(Debug, Serialize)]
-pub struct ErrorResponse {
-    pub error: String,
 }
 
 /// User response (without password)
@@ -165,18 +159,7 @@ async fn me_handler(auth: Auth) -> impl IntoResponse {
 // CRUD Operations (Admin Only)
 // ============================================================================
 
-/// Helper function to check if user is admin
-fn require_admin(auth: &Auth) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    if !auth.user.admin {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse {
-                error: "Admin access required".to_string(),
-            }),
-        ));
-    }
-    Ok(())
-}
+
 
 /// List all users
 /// GET /api/user

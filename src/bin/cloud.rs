@@ -7,7 +7,7 @@ async fn main() {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "cloud=debug,tower_http=debug".into()),
+                .unwrap_or_else(|_| "cloud=debug,tower_http=debug,sea_orm=info,sqlx=warn".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();

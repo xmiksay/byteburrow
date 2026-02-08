@@ -49,6 +49,15 @@ export const api = {
       body: data ? JSON.stringify(data) : undefined,
     }),
 
+  putRaw: <T>(endpoint: string, data: string) =>
+    apiCall<T>(endpoint, {
+      method: 'PUT',
+      body: data,
+      headers: {
+        'Content-Type': 'text/plain',
+      },
+    }),
+
   delete: <T>(endpoint: string) =>
     apiCall<T>(endpoint, { method: 'DELETE' }),
 }

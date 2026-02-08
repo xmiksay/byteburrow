@@ -23,7 +23,7 @@ pub struct Model {
     pub group_id: i32,
     pub parent_id: Option<i32>,
     pub path: String,
-    pub hash: Option<String>,
+    pub hash: Option<Vec<u8>>,
     pub entry_type: EntryType,
     pub size: Option<i64>,
     pub tags: Vec<i32>,

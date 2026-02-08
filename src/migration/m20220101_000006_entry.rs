@@ -31,7 +31,7 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Entry::GroupId).integer().not_null())
                     .col(ColumnDef::new(Entry::ParentId).integer())
                     .col(ColumnDef::new(Entry::Path).string().not_null())
-                    .col(ColumnDef::new(Entry::Hash).string())
+                    .col(ColumnDef::new(Entry::Hash).binary())
                     .col(
                         ColumnDef::new(Entry::EntryType)
                             .enumeration(

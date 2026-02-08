@@ -85,6 +85,20 @@ cloud/
 - Rust (latest stable)
 - PostgreSQL
 - Node.js (for frontend)
+- [nvm](https://github.com/nvm-sh/nvm) (recommended for Node.js version management)
+
+**Node.js Setup with nvm:**
+```bash
+# Install nvm (if not already installed)
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.0/install.sh | bash
+
+# Use the project's Node.js version (if .nvmrc exists)
+nvm use
+
+# Or install and use a specific version
+nvm install --lts
+nvm use --lts
+```
 
 ### Development Setup
 

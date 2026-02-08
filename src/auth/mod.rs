@@ -51,7 +51,16 @@ impl IntoResponse for AuthError {
             AuthError::DbError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Database error"),
         };
 
-        (status, message).into_response()
+        if status == StatusCode::UNAUTHORIZED {
+            (
+                status,
+                [(axum::http::header::WWW_AUTHENTICATE, "Basic realm=\"Cloud\"")],
+                message,
+            )
+                .into_response()
+        } else {
+            (status, message).into_response()
+        }
     }
 }
 

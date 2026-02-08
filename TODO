@@ -1,3 +1,8 @@
+[x] Finish storage on frontend
+[x] Create User and Group Select for frontend and use it on storage endpoint
+[x] Create storage service and use it on frontend
+
+
 Create recursive discovery method
 Add crud operation with files and shares
 Add streaming file content endpoint

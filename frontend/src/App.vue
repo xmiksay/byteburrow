@@ -8,21 +8,34 @@ import {
   Activity,
   Search,
   LogOut,
-  UserCircle
+  UserCircle,
+  Folder
 } from 'lucide-vue-next'
 import Login from './components/Login.vue'
 import UserManagement from './components/UserManagement.vue'
+import StorageManagement from './components/StorageManagement.vue'
+import GroupManagement from './components/GroupManagement.vue'
+import FileExplorer from './components/FileExplorer.vue'
 import { useAuth } from './composables/useAuth'
 import { api } from './utils/api'
 
 const { isAuthenticated, user, logout, fetchUserInfo } = useAuth()
 
-type View = 'storages' | 'users' | 'monitoring'
-const currentView = ref<View>('storages')
+type View = 'files' | 'storages' | 'users' | 'groups' | 'monitoring'
+const currentView = ref<View>('files')
 
 const storages = ref<any[]>([])
 const loading = ref(true)
 const error = ref<string | null>(null)
+const healthInfo = ref<any>(null)
+
+const fetchHealth = async () => {
+  try {
+    healthInfo.value = await api.get<any>('/api/health')
+  } catch (err) {
+    console.error('Failed to fetch health info:', err)
+  }
+}
 
 const fetchData = async () => {
   try {
@@ -50,6 +63,13 @@ const handleLogout = () => {
 watch(isAuthenticated, (authenticated) => {
   if (authenticated) {
     fetchData()
+    if (currentView.value === 'monitoring') fetchHealth()
+  }
+})
+
+watch(currentView, (view) => {
+  if (view === 'monitoring' && isAuthenticated.value) {
+    fetchHealth()
   }
 })
 
@@ -59,6 +79,7 @@ onMounted(async () => {
     const success = await fetchUserInfo()
     if (success) {
       await fetchData()
+      if (currentView.value === 'monitoring') await fetchHealth()
     } else {
       loading.value = false
     }
@@ -84,6 +105,15 @@ onMounted(async () => {
         <a
           href="#"
           class="nav-item"
+          :class="{ active: currentView === 'files' }"
+          @click.prevent="currentView = 'files'"
+        >
+          <Folder :size="20" />
+          <span>Files</span>
+        </a>
+        <a
+          href="#"
+          class="nav-item"
           :class="{ active: currentView === 'storages' }"
           @click.prevent="currentView = 'storages'"
         >
@@ -99,6 +129,16 @@ onMounted(async () => {
         >
           <Users :size="20" />
           <span>Users</span>
+        </a>
+        <a
+          v-if="user?.admin"
+          href="#"
+          class="nav-item"
+          :class="{ active: currentView === 'groups' }"
+          @click.prevent="currentView = 'groups'"
+        >
+          <Users :size="20" />
+          <span>Groups</span>
         </a>
         <a
           href="#"
@@ -141,8 +181,14 @@ onMounted(async () => {
       </header>
 
       <section class="content-area">
+        <!-- Files View -->
+        <FileExplorer v-if="currentView === 'files'" />
+
         <!-- Storages View -->
-        <template v-if="currentView === 'storages'">
+        <StorageManagement v-if="currentView === 'storages' && user?.admin" />
+
+        <!-- Non-admin storage view (read-only) -->
+        <template v-else-if="currentView === 'storages' && !user?.admin">
           <div class="area-header">
             <h2>Storage Locations</h2>
             <p>Displaying all configured storage locations.</p>
@@ -162,7 +208,7 @@ onMounted(async () => {
             <div v-for="storage in storages" :key="storage.id" class="data-card glass-panel fade-in">
               <div class="card-header">
                 <h3>{{ storage.name }}</h3>
-                <span class="id-tag">#{{ storage.id.substring(0, 8) }}</span>
+                <span class="id-tag">#{{ storage.id }}</span>
               </div>
               <p class="description">{{ storage.path }}</p>
               <div class="card-footer">
@@ -173,7 +219,7 @@ onMounted(async () => {
             <div v-if="storages.length === 0" class="empty-state glass-panel fade-in">
               <Database :size="48" style="opacity: 0.3" />
               <p>No storage locations configured.</p>
-              <span class="tip">Add storage locations to see them here.</span>
+              <span class="tip">Contact an administrator to add storage locations.</span>
             </div>
           </div>
         </template>
@@ -181,15 +227,47 @@ onMounted(async () => {
         <!-- Users View -->
         <UserManagement v-else-if="currentView === 'users' && user?.admin" />
 
+        <!-- Groups View -->
+        <GroupManagement v-else-if="currentView === 'groups' && user?.admin" />
+
         <!-- Monitoring View -->
         <template v-else-if="currentView === 'monitoring'">
           <div class="area-header">
-            <h2>Monitoring</h2>
-            <p>System monitoring and analytics.</p>
+            <h2>System Monitoring</h2>
+            <p>Real-time status of system components.</p>
           </div>
-          <div class="empty-state glass-panel">
-            <Activity :size="48" style="opacity: 0.3" />
-            <p>Monitoring features coming soon.</p>
+          
+          <div v-if="healthInfo" class="grid-container">
+            <div class="data-card glass-panel fade-in">
+              <div class="card-header">
+                <h3>Backend Service</h3>
+                <span :class="['status-badge', healthInfo.status === 'ok' ? 'success' : 'danger']">
+                  {{ healthInfo.status.toUpperCase() }}
+                </span>
+              </div>
+              <p class="description">Core API service status and version information.</p>
+              <div class="card-footer">
+                <span class="info">Service: {{ healthInfo.service }}</span>
+              </div>
+            </div>
+
+            <div class="data-card glass-panel fade-in">
+              <div class="card-header">
+                <h3>Database</h3>
+                <span :class="['status-badge', healthInfo.database === 'ok' ? 'success' : 'danger']">
+                  {{ healthInfo.database.toUpperCase() }}
+                </span>
+              </div>
+              <p class="description">Connectivity to the primary data storage.</p>
+              <div class="card-footer">
+                <span class="info">Status: {{ healthInfo.database === 'ok' ? 'Connected' : 'Disconnected' }}</span>
+              </div>
+            </div>
+          </div>
+          
+          <div v-else class="loading-state">
+            <div class="spinner"></div>
+            <p>Fetching system status...</p>
           </div>
         </template>
       </section>
@@ -431,6 +509,23 @@ onMounted(async () => {
   font-size: 0.875rem;
   color: var(--text-secondary);
   max-width: 300px;
+}
+
+.card-footer .info {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.status-badge.success {
+  background: rgba(16, 185, 129, 0.1);
+  color: var(--success-color);
+  border-color: rgba(16, 185, 129, 0.2);
+}
+
+.status-badge.danger {
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--danger-color);
+  border-color: rgba(239, 68, 68, 0.2);
 }
 
 .spinner {

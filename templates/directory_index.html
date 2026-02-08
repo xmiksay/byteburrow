@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>{{ title }}</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            background: #1a1a1a;
+            color: #e0e0e0;
+            margin: 2rem;
+        }
+
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            max-width: 1000px;
+            background: #2d2d2d;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        }
+
+        th,
+        td {
+            text-align: left;
+            padding: 12px 16px;
+            border-bottom: 1px solid #3d3d3d;
+        }
+
+        th {
+            background: #333;
+            color: #fff;
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 0.85rem;
+            letter-spacing: 0.05em;
+        }
+
+        tr:hover {
+            background: #383838;
+        }
+
+        a {
+            color: #4dabf7;
+            text-decoration: none;
+        }
+
+        a:hover {
+            text-decoration: underline;
+        }
+
+        .size {
+            color: #aaa;
+            font-family: monospace;
+        }
+
+        .date {
+            color: #aaa;
+            font-size: 0.9rem;
+        }
+
+        h1 {
+            margin-bottom: 1.5rem;
+            font-weight: 300;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>{{ title }}</h1>
+    <table>
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Size</th>
+                <th>Modified At</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% if path != "" %}
+            <tr>
+                <td><a
+                        href="/api/storage/{{ storage_id }}/list{% if parent_path != "" %}/{{ parent_path }}{% endif %}?format=html">..</a>
+                </td>
+                <td>-</td>
+                <td>-</td>
+            </tr>
+            {% endif %}
+
+            {% for entry in entries %}
+            <tr>
+                <td>
+                    {% if entry.entry_type == "Directory" %}
+                    <a href="/api/storage/{{ storage_id }}/list/{{ entry.path|trim('/') }}?format=html">
+                        {{ entry.path|basename }}/
+                    </a>
+                    {% else %}
+                    <a href="/api/storage/{{ storage_id }}/show/{{ entry.path }}">
+                        {{ entry.path|basename }}
+                    </a>
+                    {% endif %}
+                </td>
+                <td class="size">
+                    {% if entry.size is not none %}
+                    {{ entry.size|format_size }}
+                    {% else %}
+                    -
+                    {% endif %}
+                </td>
+                <td class="date">
+                    {% if entry.modified_at is not none %}
+                    {{ entry.modified_at }}
+                    {% else %}
+                    -
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</body>
+
+</html>
