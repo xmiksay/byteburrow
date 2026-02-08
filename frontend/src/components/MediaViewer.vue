@@ -14,11 +14,12 @@ import TagDialog from './TagDialog.vue'
 import type { Storage, DirectoryEntry, Tag } from '../types'
 import { onMounted } from 'vue'
 
-const { user } = useAuth()
+const { user, token } = useAuth()
 
 const props = defineProps<{
   storage: Storage
   entry: DirectoryEntry
+  shareId?: number | string
 }>()
 
 const emit = defineEmits(['close'])
@@ -34,7 +35,17 @@ const isAudio = computed(() => {
 })
 
 const mediaUrl = computed(() => {
-  return `/api/storage/${props.storage.id}/show/${props.entry.path}`
+  let url = ''
+  if (props.shareId !== undefined) {
+    url = `/api/storage/share/${props.shareId}/show/${props.entry.path}`
+  } else {
+    url = `/api/storage/${props.storage.id}/show/${props.entry.path}`
+  }
+  
+  if (token.value) {
+    return `${url}?token=${token.value}`
+  }
+  return url
 })
 
 const isFullscreen = ref(false)

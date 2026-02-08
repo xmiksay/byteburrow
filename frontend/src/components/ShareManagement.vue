@@ -1,11 +1,14 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { 
   Share2, 
   Trash2, 
   Globe, 
   Users as GroupsIcon, 
-  Clock
+  Clock,
+  Link as LinkIcon,
+  ArrowRight
 } from 'lucide-vue-next'
 import { storageService } from '../services/storage'
 import type { Shared } from '../types'
@@ -16,6 +19,17 @@ const loading = ref(true)
 const error = ref<string | null>(null)
 const selectedShareForEdit = ref<Shared | null>(null)
 const showEditDialog = ref(false)
+const router = useRouter()
+
+const navigateToFolder = (share: Shared) => {
+  router.push({
+    name: 'files',
+    query: {
+      storage_id: share.storage_id,
+      path: share.path
+    }
+  })
+}
 
 const fetchShares = async () => {
   try {
@@ -57,6 +71,18 @@ const openEditDialog = (share: Shared) => {
 
 const handleUpdated = () => {
   fetchShares()
+}
+
+const copyPublicLink = async (token: string) => {
+  const url = `${window.location.origin}/shared/${token}`
+  try {
+    await navigator.clipboard.writeText(url)
+    // Ideally use a toast notification here
+    alert('Public link copied to clipboard')
+  } catch (err) {
+    console.error('Failed to copy link:', err)
+    prompt('Copy this link:', url)
+  }
 }
 
 
@@ -126,10 +152,16 @@ onMounted(fetchShares)
           </div>
         </div>
 
-        <div class="share-actions">
-          <button class="btn-icon" @click="openEditDialog(share)" title="Edit Share">
-            <Share2 :size="18" />
-          </button>
+          <div class="share-actions">
+            <button class="btn-icon" @click="navigateToFolder(share)" title="Go to Folder">
+              <ArrowRight :size="18" />
+            </button>
+            <button v-if="share.token" class="btn-icon" @click="copyPublicLink(share.token)" title="Copy Public Link">
+              <LinkIcon :size="18" />
+            </button>
+            <button class="btn-icon" @click="openEditDialog(share)" title="Edit Share">
+              <Share2 :size="18" />
+            </button>
           <button class="btn-icon danger" @click="revokeShare(share.id)" title="Revoke Share">
             <Trash2 :size="18" />
           </button>

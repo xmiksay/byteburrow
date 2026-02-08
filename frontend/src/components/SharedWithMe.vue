@@ -35,7 +35,7 @@ const selectedMediaFile = ref<DirectoryEntry | null>(null)
 
 // Write operation state
 const showCreateModal = ref(false)
-const createType = ref<'directory' | 'file'>('directory')
+const createType = ref<'Directory' | 'File'>('Directory')
 const newEntryName = ref('')
 const creating = ref(false)
 
@@ -141,7 +141,7 @@ const closeFileViewer = () => {
 }
 
 // Write operations
-const openCreateModal = (type: 'directory' | 'file') => {
+const openCreateModal = (type: 'Directory' | 'File') => {
   createType.value = type
   newEntryName.value = ''
   showCreateModal.value = true
@@ -251,10 +251,10 @@ onMounted(fetchShares)
 
       <!-- Write actions -->
       <div v-if="canWrite" class="write-actions">
-        <button class="btn-icon glass-panel" @click="openCreateModal('directory')" title="New Folder">
+        <button class="btn-icon glass-panel" @click="openCreateModal('Directory')" title="New Folder">
           <FolderPlus :size="18" />
         </button>
-        <button class="btn-icon glass-panel" @click="openCreateModal('file')" title="New File">
+        <button class="btn-icon glass-panel" @click="openCreateModal('File')" title="New File">
           <FilePlus :size="18" />
         </button>
       </div>
@@ -372,7 +372,7 @@ onMounted(fetchShares)
       v-if="selectedMediaFile && selectedShare"
       :storage="mockStorage"
       :entry="selectedMediaFile"
-      :base-url="`/api/storage/share/${selectedShare.id}`"
+      :share-id="selectedShare.id"
       @close="selectedMediaFile = null"
     />
 
@@ -380,7 +380,7 @@ onMounted(fetchShares)
     <div v-if="showCreateModal" class="modal-overlay" @click.self="showCreateModal = false">
       <div class="modal glass-panel">
         <div class="modal-header">
-          <h3>Create {{ createType === 'directory' ? 'Folder' : 'File' }}</h3>
+          <h3>Create {{ createType === 'Directory' ? 'Folder' : 'File' }}</h3>
           <button class="btn-icon close-btn" @click="showCreateModal = false">×</button>
         </div>
         <div class="modal-body">
@@ -388,7 +388,7 @@ onMounted(fetchShares)
           <input 
             v-model="newEntryName" 
             class="form-input" 
-            :placeholder="createType === 'directory' ? 'New folder' : 'filename.txt'"
+            :placeholder="createType === 'Directory' ? 'New folder' : 'filename.txt'"
             @keyup.enter="handleCreate"
           />
         </div>

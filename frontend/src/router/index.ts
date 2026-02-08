@@ -65,6 +65,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: 'Monitoring' }
     },
     {
+        path: '/shared/:token',
+        name: 'public-share',
+        component: () => import('../components/PublicShare.vue'),
+        meta: { title: 'Shared Content', public: true }
+    },
+    {
         // Catch-all route - redirect to files
         path: '/:pathMatch(.*)*',
         redirect: '/files'

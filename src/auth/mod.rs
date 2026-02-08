@@ -103,6 +103,17 @@ impl FromRequestParts<Arc<AppState>> for Auth {
             return Auth::from_basic_auth(&basic, &state.db).await;
         }
 
+        // Try Query Parameter ?token=... for media streaming etc
+        if let Some(query) = parts.uri.query() {
+            for pair in query.split('&') {
+                if let Some((key, value)) = pair.split_once('=') {
+                    if key == "token" {
+                        return Auth::from_token(value, &state.db, user_agent.clone(), ip_address.clone()).await;
+                    }
+                }
+            }
+        }
+
         Err(AuthError::MissingCredentials)
     }
 }

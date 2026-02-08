@@ -14,9 +14,11 @@ import {
   Tag as TagIcon,
   ChevronLeft,
   ChevronRight,
-  Share2
+  Share2,
+  Key
 } from 'lucide-vue-next'
 import Login from './components/Login.vue'
+import ChangePasswordDialog from './components/ChangePasswordDialog.vue'
 import { useAuth } from './composables/useAuth'
 import { api } from './utils/api'
 
@@ -35,8 +37,43 @@ const storages = ref<any[]>([])
 const loading = ref(true)
 const error = ref<string | null>(null)
 const healthInfo = ref<any>(null)
+const showPasswordDialog = ref(false)
+const showUserMenu = ref(false)
+
+// Custom directive for clicking outside
+const vClickOutside = {
+  mounted(el: any, binding: any) {
+    el.clickOutsideEvent = (event: Event) => {
+      if (!(el === event.target || el.contains(event.target))) {
+        binding.value(event)
+      }
+    }
+    document.addEventListener('click', el.clickOutsideEvent)
+  },
+  unmounted(el: any) {
+    document.removeEventListener('click', el.clickOutsideEvent)
+  },
+}
+
+const openPasswordDialog = () => {
+  showPasswordDialog.value = true
+  showUserMenu.value = false
+}
+
+const toggleUserMenu = () => {
+  showUserMenu.value = !showUserMenu.value
+}
+
+const closeUserMenu = () => {
+  showUserMenu.value = false
+}
+
+const onPasswordChangeSuccess = () => {
+  alert('Password changed successfully')
+}
 
 const currentRouteName = computed(() => route.name as string)
+const isPublicRoute = computed(() => route.meta.public === true)
 
 const isNavActive = (name: string) => currentRouteName.value === name
 
@@ -72,6 +109,7 @@ const fetchData = async () => {
 const handleLogout = () => {
   logout()
   storages.value = []
+  showUserMenu.value = false
   router.push('/files')
 }
 
@@ -107,8 +145,13 @@ onMounted(async () => {
 </script>
 
 <template>
+  <!-- Public View (no auth required) -->
+  <div v-if="isPublicRoute" class="public-view-container">
+    <router-view />
+  </div>
+
   <!-- Show login if not authenticated -->
-  <Login v-if="!isAuthenticated" />
+  <Login v-else-if="!isAuthenticated" />
 
   <!-- Show main app if authenticated -->
   <div v-else class="app-container" :class="{ 'sidebar-collapsed': isSidebarCollapsed }">
@@ -217,21 +260,35 @@ onMounted(async () => {
           <input type="text" placeholder="Search..." />
         </div>
 
-        <div class="header-actions">
-          <div class="user-info glass-panel">
-            <UserCircle :size="20" />
-            <div class="user-details">
-              <span class="user-name">{{ user?.name || user?.username }}</span>
-              <span class="user-role">{{ user?.admin ? 'Admin' : 'User' }}</span>
+          <div class="header-actions">
+            <!-- User Menu Dropdown -->
+            <div class="user-menu-container" v-click-outside="closeUserMenu">
+              <div class="user-info glass-panel clickable" @click="toggleUserMenu">
+                <UserCircle :size="20" />
+                <div class="user-details">
+                  <span class="user-name">{{ user?.name || user?.username }}</span>
+                  <span class="user-role">{{ user?.admin ? 'Admin' : 'User' }}</span>
+                </div>
+              </div>
+              
+              <transition name="fade">
+                <div v-if="showUserMenu" class="user-dropdown glass-panel">
+                  <button class="dropdown-item" @click="openPasswordDialog">
+                    <Key :size="16" />
+                    <span>Change Password</span>
+                  </button>
+                  <div class="dropdown-divider"></div>
+                  <button class="dropdown-item danger" @click="handleLogout">
+                    <LogOut :size="16" />
+                    <span>Logout</span>
+                  </button>
+                </div>
+              </transition>
             </div>
           </div>
-          <button class="btn-secondary" @click="handleLogout" title="Logout">
-            <LogOut :size="18" />
-          </button>
-        </div>
-      </header>
+        </header>
 
-      <section class="content-area">
+        <section class="content-area">
         <router-view v-slot="{ Component }">
           <transition name="fade" mode="out-in">
             <component :is="Component" />
@@ -239,6 +296,14 @@ onMounted(async () => {
         </router-view>
       </section>
     </main>
+
+    <ChangePasswordDialog 
+      v-if="showPasswordDialog && user"
+      :user-id="user.id"
+      :user-name="user.username"
+      @close="showPasswordDialog = false"
+      @success="onPasswordChangeSuccess"
+    />
   </div>
 </template>
 
@@ -285,6 +350,7 @@ h1 {
   font-weight: 600;
   background: linear-gradient(135deg, var(--accent-color), #a78bfa);
   -webkit-background-clip: text;
+  background-clip: text;
   -webkit-text-fill-color: transparent;
   white-space: nowrap;
 }
@@ -426,5 +492,71 @@ h1 {
 .fade-enter-from,
 .fade-leave-to {
   opacity: 0;
+}
+
+/* User Menu Dropdown */
+.user-menu-container {
+  position: relative;
+}
+
+.user-info.clickable {
+  cursor: pointer;
+  padding: 8px 16px;
+  border: 1px solid transparent;
+  transition: all 0.2s;
+}
+
+.user-info.clickable:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.user-dropdown {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 8px;
+  width: 200px;
+  background: #1e1e1e;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  overflow: hidden;
+  z-index: 100;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+}
+
+.dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  width: 100%;
+  background: none;
+  border: none;
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.2s;
+  font-size: 0.9rem;
+}
+
+.dropdown-item:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.dropdown-item.danger {
+  color: #ef4444;
+}
+
+.dropdown-item.danger:hover {
+  background: rgba(239, 68, 68, 0.1);
+}
+
+.dropdown-divider {
+  height: 1px;
+  background: var(--border-color);
+  margin: 4px 0;
 }
 </style>

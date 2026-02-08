@@ -36,7 +36,7 @@ marked.use(markedHighlight({
 const props = defineProps<{
   storage: Storage
   entry: DirectoryEntry
-  shareId?: number  // If provided, use share-based access
+  shareId?: number | string  // If provided, use share-based access
   readOnly?: boolean  // Force read-only mode (e.g., share without write permission)
 }>()
 

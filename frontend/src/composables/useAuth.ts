@@ -1,7 +1,7 @@
 import { ref, computed } from 'vue'
 
 export interface User {
-  id: string
+  id: number
   username: string
   name: string
   admin: boolean

@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import { Users, Edit, Trash2, X, Save, UserPlus } from 'lucide-vue-next'
+import { Users, Edit, Trash2, X, Save, UserPlus, Key } from 'lucide-vue-next'
 import { api } from '../utils/api'
+import ChangePasswordDialog from './ChangePasswordDialog.vue'
 
 export interface UserResponse {
   id: number
@@ -38,6 +39,10 @@ const error = ref<string | null>(null)
 const showModal = ref(false)
 const modalMode = ref<'create' | 'edit'>('create')
 const editingUserId = ref<number | null>(null)
+
+// Password Dialog state
+const showPasswordDialog = ref(false)
+const passwordDialogUser = ref<{id: number, name: string} | null>(null)
 
 // Form state
 const formData = ref({
@@ -176,6 +181,11 @@ const deleteUser = async (userId: number, username: string) => {
   }
 }
 
+const openPasswordDialog = (user: UserResponse) => {
+  passwordDialogUser.value = { id: user.id, name: user.name }
+  showPasswordDialog.value = true
+}
+
 onMounted(() => {
   fetchUsers()
 })
@@ -246,6 +256,9 @@ onMounted(() => {
               <div class="actions">
                 <button class="btn-icon" @click="openEditModal(user)" title="Edit user">
                   <Edit :size="16" />
+                </button>
+                <button class="btn-icon" @click="openPasswordDialog(user)" title="Change Password">
+                  <Key :size="16" />
                 </button>
                 <button class="btn-icon danger" @click="deleteUser(user.id, user.username)" title="Delete user">
                   <Trash2 :size="16" />
@@ -349,6 +362,14 @@ onMounted(() => {
         </form>
       </div>
     </div>
+
+    <ChangePasswordDialog 
+      v-if="showPasswordDialog && passwordDialogUser"
+      :user-id="passwordDialogUser.id"
+      :user-name="passwordDialogUser.name"
+      @close="showPasswordDialog = false"
+      @success="showPasswordDialog = false"
+    />
   </div>
 </template>
 

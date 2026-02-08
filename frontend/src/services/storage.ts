@@ -65,19 +65,27 @@ export const storageService = {
         return api.get<any[]>('/api/storage/share/with-me')
     },
 
-    async listShareDirectory(shareId: number, path: string = ''): Promise<DirectoryListingResponse> {
+    async listShareDirectory(shareId: number | string, path: string = ''): Promise<DirectoryListingResponse> {
         const encodedPath = path ? `/${path}` : ''
         return api.get<DirectoryListingResponse>(`/api/storage/share/${shareId}/list${encodedPath}?format=json`)
     },
 
-    async getShareFileContent(shareId: number, path: string): Promise<string> {
+    async getShareFileContent(shareId: number | string, path: string): Promise<string> {
+        const token = localStorage.getItem('auth_token')
+        const headers: Record<string, string> = {}
+        if (token) {
+            headers['Authorization'] = `Bearer ${token}`
+        }
+
         const response = await fetch(`/api/storage/share/${shareId}/show/${path}`, {
-            headers: {
-                'Authorization': `Bearer ${localStorage.getItem('auth_token')}`
-            }
+            headers
         })
         if (!response.ok) throw new Error('Failed to fetch file content')
         return response.text()
+    },
+
+    async getShareInfo(shareId: number | string): Promise<any> {
+        return api.get<any>(`/api/storage/share/${shareId}`)
     },
 
     async getAllShares(): Promise<any[]> {
@@ -93,25 +101,33 @@ export const storageService = {
     },
 
     // Share-based write operations
-    async createShareEntry(shareId: number, path: string, entryType: 'directory' | 'file'): Promise<{ message: string }> {
+    async createShareEntry(shareId: number | string, path: string, entryType: 'Directory' | 'File'): Promise<{ message: string }> {
         return api.post<{ message: string }>(`/api/storage/share/${shareId}/create/${path}`, { entry_type: entryType })
     },
 
-    async renameShareEntry(shareId: number, oldPath: string, newPath: string): Promise<{ message: string }> {
+    async renameShareEntry(shareId: number | string, oldPath: string, newPath: string): Promise<{ message: string }> {
         return api.post<{ message: string }>(`/api/storage/share/${shareId}/rename/${oldPath}`, { new_path: newPath })
     },
 
-    async removeShareEntry(shareId: number, path: string): Promise<{ message: string }> {
+    async removeShareEntry(shareId: number | string, path: string): Promise<{ message: string }> {
         return api.delete<{ message: string }>(`/api/storage/share/${shareId}/remove/${path}`)
     },
 
-    async updateShareFileContent(shareId: number, path: string, content: string): Promise<{ message: string }> {
+    async updateShareFileContent(shareId: number | string, path: string, content: string | Blob): Promise<{ message: string }> {
+        const token = localStorage.getItem('auth_token')
+        const headers: Record<string, string> = {}
+
+        if (typeof content === 'string') {
+            headers['Content-Type'] = 'text/plain'
+        }
+
+        if (token) {
+            headers['Authorization'] = `Bearer ${token}`
+        }
+
         const response = await fetch(`/api/storage/share/${shareId}/update/${path}`, {
             method: 'PUT',
-            headers: {
-                'Authorization': `Bearer ${localStorage.getItem('auth_token')}`,
-                'Content-Type': 'text/plain'
-            },
+            headers,
             body: content
         })
         if (!response.ok) {

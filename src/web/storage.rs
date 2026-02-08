@@ -148,7 +148,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/:id/tags/*path", put(update_entry_tags_handler))
         .route("/:id/share/*path", get(list_shares_handler))
         .route("/:id/share/*path", post(share_entry_handler))
-        .route("/share/:share_id", put(update_share_handler).delete(delete_share_handler))
+        .route("/share/:share_id", get(get_share_info_handler).put(update_share_handler).delete(delete_share_handler))
         // Share-based access routes
         .route("/share/:share_id/list", get(share_list_root_handler))
         .route("/share/:share_id/list/", get(share_list_root_handler))
@@ -1381,11 +1381,23 @@ async fn get_share_context(
         }
     }
     
-    // Verify access - public links (with token) don't require auth, private shares do
-    if share.token.is_none() {
-        // Private share - requires authentication and access check
-        let auth = auth.ok_or_else(|| (StatusCode::UNAUTHORIZED, Json(ErrorResponse { error: "Authentication required for this share".to_string() })))?;
-        verify_share_access(auth, &share, &state.db).await?;
+    // Verify access
+    // If we looked up by ID (numeric), we MUST verify auth/permissions.
+    // If we looked up by token (string), access is granted (public link).
+    
+    let looked_up_by_id = share_identifier.parse::<i32>().is_ok();
+    
+    if looked_up_by_id {
+        // Accessing by ID requires explicit authorization (even if it has a token)
+        let auth_val = auth.ok_or_else(|| (StatusCode::UNAUTHORIZED, Json(ErrorResponse { error: "Authentication required for share access by ID".to_string() })))?;
+        verify_share_access(auth_val, &share, &state.db).await?;
+    } else {
+        // Accessing by token
+        // Ensure the share actually HAS a token (it should if we found it via token query)
+        if share.token.is_none() {
+             return Err((StatusCode::NOT_FOUND, Json(ErrorResponse { error: "Invalid share token".to_string() })));
+        }
+        // Access granted for public token
     }
     
     // Get the entry
@@ -1401,6 +1413,27 @@ async fn get_share_context(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })))?;
     
     Ok((share, entry_model, storage))
+}
+
+// Helper to get share info
+/// GET /api/storage/share/:share_id
+async fn get_share_info_handler(
+    auth: Option<Auth>,
+    AxumPath(share_id): AxumPath<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let (share, entry_model, _) = get_share_context(&share_id, auth.as_ref(), &state).await?;
+    
+    Ok(Json(serde_json::json!({
+        "id": share.id,
+        "token": share.token,
+        "can_write": share.can_write,
+        "path": entry_model.path,
+        "name": std::path::Path::new(&entry_model.path).file_name().and_then(|s| s.to_str()).unwrap_or(&entry_model.path),
+        "entry_type": format!("{:?}", entry_model.entry_type),
+        "expires_at": share.expires_at,
+        "storage_id": entry_model.storage_id
+    })))
 }
 
 /// Share list root handler
@@ -1492,13 +1525,14 @@ async fn share_show_handler(
     auth: Option<Auth>,
     AxumPath((share_id, path)): AxumPath<(String, String)>,
     State(state): State<Arc<AppState>>,
+    req: Request<Body>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     let (_share, entry_model, storage) = get_share_context(&share_id, auth.as_ref(), &state).await?;
     
-    // Calculate full path
+    // Calculate full path (relative to storage root)
     let base_path = entry_model.path.trim_matches('/');
     let sub_path_clean = path.trim_matches('/');
-    let full_path = if base_path.is_empty() {
+    let relative_path = if base_path.is_empty() {
         sub_path_clean.to_string()
     } else if sub_path_clean.is_empty() {
         base_path.to_string()
@@ -1506,21 +1540,43 @@ async fn share_show_handler(
         format!("{}/{}", base_path, sub_path_clean)
     };
     
-    // Open and read file
-    let (mut file, _metadata) = storage.open_file(&full_path).await
-        .map_err(|e| (StatusCode::NOT_FOUND, Json(ErrorResponse { error: format!("File not found: {}", e) })))?;
+    // Security check: prevent path traversal
+    if relative_path.contains("..") {
+        return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "Invalid path: traversal detected".to_string() })));
+    }
     
-    let mut content = Vec::new();
-    file.read_to_end(&mut content).await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: format!("Error reading file: {}", e) })))?;
+    let abs_path = storage.get_full_path(&relative_path);
+
+    if !abs_path.exists() || !abs_path.is_file() {
+         return Err((StatusCode::NOT_FOUND, Json(ErrorResponse { error: "File not found".to_string() })));
+    }
     
-    let content_type = determine_content_type(std::path::Path::new(&full_path), &content);
+    // Detect content type
+    let content_type = match fs::File::open(&abs_path).await {
+        Ok(mut file) => {
+            let mut buffer = [0u8; 1024];
+            let n = file.read(&mut buffer).await.unwrap_or(0);
+            determine_content_type(&abs_path, &buffer[..n])
+        }
+        Err(_) => "application/octet-stream",
+    };
     
-    Ok((
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, content_type)],
-        content
-    ).into_response())
+    // Use tower-http's ServeFile which handles Range requests
+    let mut service = ServeFile::new(&abs_path);
+    
+    // Call the service
+    // Note: ServeFile error type is Infallible in newer versions or io::Error in older?
+    // Based on existing code usage, we assume Infallible if pattern matching empty enum works.
+    let mut res = Service::<Request<Body>>::call(&mut service, req).await.map_err(|e| {
+         match e {} 
+    }).unwrap();
+
+    res.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static(content_type)
+    );
+    
+    Ok(res)
 }
 
 /// Share update handler - update file content

@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
+import { useRoute } from 'vue-router'
 import { 
-  Folder, 
+  Folder,
   File, 
   ChevronRight, 
   ArrowLeft, 
@@ -28,6 +29,7 @@ import MediaViewer from './MediaViewer.vue'
 import ShareDialog from './ShareDialog.vue'
 
 const { user } = useAuth()
+const route = useRoute()
 
 const props = defineProps<{
   initialStorageId?: number
@@ -67,9 +69,19 @@ const pathSegments = computed(() => {
 const fetchStorages = async () => {
   try {
     storages.value = await storageService.getStorages()
-    if (props.initialStorageId) {
-      const found = storages.value.find(s => s.id === props.initialStorageId)
-      if (found) selectStorage(found)
+    
+    // Check for query params first
+    const queryStorageId = route.query.storage_id ? Number(route.query.storage_id) : undefined
+    const queryPath = route.query.path as string || ''
+    
+    const targetStorageId = queryStorageId || props.initialStorageId
+    
+    if (targetStorageId) {
+      const found = storages.value.find(s => s.id === targetStorageId)
+      if (found) {
+        selectStorage(found, queryPath)
+        return
+      }
     } else if (storages.value.length > 0) {
       selectStorage(storages.value[0])
     }
@@ -78,9 +90,9 @@ const fetchStorages = async () => {
   }
 }
 
-const selectStorage = (storage: Storage) => {
+const selectStorage = (storage: Storage, path: string = '') => {
   selectedStorage.value = storage
-  currentPath.value = ''
+  currentPath.value = path
   fetchEntries()
 }
 

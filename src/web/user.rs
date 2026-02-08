@@ -84,6 +84,66 @@ pub fn router() -> Router<Arc<AppState>> {
                 .put(update_user_handler)
                 .delete(delete_user_handler),
         )
+        .route("/:id/password", post(change_password_handler))
+}
+
+/// Change password request
+#[derive(Debug, Deserialize)]
+pub struct ChangePasswordRequest {
+    pub password: String,
+}
+
+/// Change password handler
+/// POST /api/user/:id/password
+async fn change_password_handler(
+    auth: Auth,
+    Path(id): Path<i32>,
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<ChangePasswordRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    // Check permission: user can change own password, admin can change any
+    if auth.user.id != id && !auth.user.admin {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Permission denied".to_string(),
+            }),
+        ));
+    }
+
+    // Find user
+    let user = user::Entity::find_by_id(id)
+        .one(&state.db)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Database error".to_string(),
+                }),
+            )
+        })?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "User not found".to_string(),
+            }),
+        ))?;
+
+    // Update password
+    let mut active_user: user::ActiveModel = user.into();
+    active_user.password = Set(Auth::hash_string(&payload.password));
+
+    active_user.update(&state.db).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+
+    Ok(Json(serde_json::json!({ "message": "Password changed successfully" })))
 }
 
 /// Login endpoint - accepts JSON payload with username/password
