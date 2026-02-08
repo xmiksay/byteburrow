@@ -36,6 +36,8 @@ marked.use(markedHighlight({
 const props = defineProps<{
   storage: Storage
   entry: DirectoryEntry
+  shareId?: number  // If provided, use share-based access
+  readOnly?: boolean  // Force read-only mode (e.g., share without write permission)
 }>()
 
 const emit = defineEmits(['close'])
@@ -47,6 +49,8 @@ const loading = ref(true)
 const saving = ref(false)
 const error = ref<string | null>(null)
 const isFullscreen = ref(false)
+
+const canEdit = computed(() => !props.readOnly)
 
 const isMarkdown = computed(() => {
   return props.entry.path.toLowerCase().endsWith('.md') || props.entry.path.toLowerCase().endsWith('.markdown')
@@ -78,7 +82,12 @@ const fetchContent = async () => {
   try {
     loading.value = true
     error.value = null
-    const text = await storageService.getFileContent(props.storage.id, props.entry.path)
+    let text: string
+    if (props.shareId !== undefined) {
+      text = await storageService.getShareFileContent(props.shareId, props.entry.path)
+    } else {
+      text = await storageService.getFileContent(props.storage.id, props.entry.path)
+    }
     content.value = text
     originalContent.value = text
     // Default to preview mode for all text files if they have content
@@ -91,10 +100,15 @@ const fetchContent = async () => {
 }
 
 const handleSave = async () => {
+  if (!canEdit.value) return
   try {
     saving.value = true
     error.value = null
-    await storageService.updateFileContent(props.storage.id, props.entry.path, content.value)
+    if (props.shareId !== undefined) {
+      await storageService.updateShareFileContent(props.shareId, props.entry.path, content.value)
+    } else {
+      await storageService.updateFileContent(props.storage.id, props.entry.path, content.value)
+    }
     originalContent.value = content.value
   } catch (err: any) {
     error.value = 'Failed to save file: ' + err.message
@@ -163,6 +177,7 @@ onMounted(fetchTags)
               <span>Preview</span>
             </button>
             <button 
+              v-if="canEdit"
               class="mode-btn" 
               :class="{ active: mode === 'edit' }"
               @click="mode = 'edit'"
@@ -172,7 +187,7 @@ onMounted(fetchTags)
             </button>
           </div>
 
-          <button class="btn-primary" :disabled="!isDirty || saving" @click="handleSave">
+          <button v-if="canEdit" class="btn-primary" :disabled="!isDirty || saving" @click="handleSave">
             <Loader2 v-if="saving" :size="16" class="spin" />
             <Save v-else :size="16" />
             <span>{{ saving ? 'Saving...' : 'Save' }}</span>

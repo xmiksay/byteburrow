@@ -128,7 +128,7 @@ const copyToClipboard = (text: string) => {
 
 const getPublicLink = (token: string) => {
   const base = window.location.origin
-  return `${base}/api/storage/shared/${token}`
+  return `${base}/api/storage/share/${token}/list`
 }
 
 const getShareTargetNames = (share: Shared) => {
@@ -297,6 +297,16 @@ onMounted(async () => {
                 >
                   <Share2 :size="14" />
                 </button>
+                <a 
+                  v-if="share.token" 
+                  :href="getPublicLink(share.token)"
+                  target="_blank"
+                  class="btn-icon-sm"
+                  title="Open link"
+                  @click.stop
+                >
+                  <Globe :size="14" />
+                </a>
                 <button 
                   v-if="share.token" 
                   class="btn-icon-sm" 

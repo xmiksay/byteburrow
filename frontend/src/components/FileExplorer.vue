@@ -22,6 +22,7 @@ import { storageService } from '../services/storage'
 import { tagService } from '../services/tag'
 import { useAuth } from '../composables/useAuth'
 import type { Storage, DirectoryEntry, Tag } from '../types'
+import { formatSize, formatDate, getBasename, isViewableAsText, isImage, isMediaFile, getThumbnailUrl, sortEntries } from '../utils/file'
 import FileViewer from './FileViewer.vue'
 import MediaViewer from './MediaViewer.vue'
 import ShareDialog from './ShareDialog.vue'
@@ -110,24 +111,6 @@ const navigateUp = () => {
   navigateTo(parentPath)
 }
 
-const formatSize = (bytes?: number | null) => {
-  if (bytes === undefined || bytes === null) return ''
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  let size = bytes
-  let unitIdx = 0
-  while (size >= 1024 && unitIdx < units.length - 1) {
-    size /= 1024
-    unitIdx++
-  }
-  return unitIdx === 0 ? `${bytes} B` : `${size.toFixed(0)} ${units[unitIdx]}`
-}
-
-const formatDate = (dateStr?: string) => {
-  if (!dateStr) return '-'
-  const date = new Date(dateStr)
-  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: '2-digit' })
-}
-
 const getFileUrl = (entry: DirectoryEntry, mode: 'show' | 'download') => {
   if (!selectedStorage.value) return '#'
   return `/api/storage/${selectedStorage.value.id}/${mode}/${entry.path}`
@@ -180,45 +163,7 @@ onMounted(() => {
   fetchTags()
 })
 
-const sortedEntries = computed(() => {
-  return [...entries.value].sort((a, b) => {
-    if (a.entry_type === 'Directory' && b.entry_type !== 'Directory') return -1
-    if (a.entry_type !== 'Directory' && b.entry_type === 'Directory') return 1
-    return a.path.localeCompare(b.path)
-  })
-})
-
-const getBasename = (path: string) => {
-  return path.split('/').filter(s => s).pop() || path
-}
-
-const isViewableAsText = (path: string) => {
-  const ext = path.split('.').pop()?.toLowerCase()
-  return [
-    'txt', 'md', 'markdown', 'rs', 'js', 'mjs', 'ts', 'tsx', 'jsx', 'json', 
-    'css', 'html', 'htm', 'toml', 'yaml', 'yml', 'xml', 'csv', 'ini',
-    'py', 'java', 'c', 'cpp', 'cc', 'cxx', 'h', 'hpp', 'go', 'sh', 'rb', 
-    'php', 'swift', 'kt', 'kts', 'vue', 'sql'
-  ].includes(ext || '')
-}
-
-const isImage = (path: string) => {
-  const ext = path.split('.').pop()?.toLowerCase() || ''
-  return ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'].includes(ext)
-}
-
-const isMediaFile = (path: string) => {
-  const ext = path.split('.').pop()?.toLowerCase() || ''
-  const isAudio = ['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac'].includes(ext)
-  const isVideo = ['mp4', 'webm', 'ogv', 'mov', 'mkv'].includes(ext)
-  return isAudio || isVideo
-}
-
-const getThumbnailUrl = (entry: DirectoryEntry, size: 'small' | 'large' | 'mini') => {
-  if (!entry.hash || entry.hash.length === 0) return null
-  const hex = Array.from(entry.hash).map(b => b.toString(16).padStart(2, '0')).join('')
-  return `/api/storage/thumbnail/${hex}/${size}`
-}
+const sortedEntries = computed(() => sortEntries(entries.value))
 
 const handleEntryClick = (entry: DirectoryEntry) => {
   if (entry.entry_type === 'Directory' || (entry.entry_type === 'Symlink' && !isMediaFile(entry.path) && !isViewableAsText(entry.path))) {

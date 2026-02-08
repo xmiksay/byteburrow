@@ -61,6 +61,25 @@ export const storageService = {
         return api.get<any[]>(`/api/storage/${storageId}/share/${path}`)
     },
 
+    async getSharesWithMe(): Promise<any[]> {
+        return api.get<any[]>('/api/storage/share/with-me')
+    },
+
+    async listShareDirectory(shareId: number, path: string = ''): Promise<DirectoryListingResponse> {
+        const encodedPath = path ? `/${path}` : ''
+        return api.get<DirectoryListingResponse>(`/api/storage/share/${shareId}/list${encodedPath}?format=json`)
+    },
+
+    async getShareFileContent(shareId: number, path: string): Promise<string> {
+        const response = await fetch(`/api/storage/share/${shareId}/show/${path}`, {
+            headers: {
+                'Authorization': `Bearer ${localStorage.getItem('auth_token')}`
+            }
+        })
+        if (!response.ok) throw new Error('Failed to fetch file content')
+        return response.text()
+    },
+
     async getAllShares(): Promise<any[]> {
         return api.get<any[]>('/api/storage/share')
     },
@@ -71,5 +90,34 @@ export const storageService = {
 
     async deleteShare(shareId: number): Promise<{ message: string }> {
         return api.delete<{ message: string }>(`/api/storage/share/${shareId}`)
+    },
+
+    // Share-based write operations
+    async createShareEntry(shareId: number, path: string, entryType: 'directory' | 'file'): Promise<{ message: string }> {
+        return api.post<{ message: string }>(`/api/storage/share/${shareId}/create/${path}`, { entry_type: entryType })
+    },
+
+    async renameShareEntry(shareId: number, oldPath: string, newPath: string): Promise<{ message: string }> {
+        return api.post<{ message: string }>(`/api/storage/share/${shareId}/rename/${oldPath}`, { new_path: newPath })
+    },
+
+    async removeShareEntry(shareId: number, path: string): Promise<{ message: string }> {
+        return api.delete<{ message: string }>(`/api/storage/share/${shareId}/remove/${path}`)
+    },
+
+    async updateShareFileContent(shareId: number, path: string, content: string): Promise<{ message: string }> {
+        const response = await fetch(`/api/storage/share/${shareId}/update/${path}`, {
+            method: 'PUT',
+            headers: {
+                'Authorization': `Bearer ${localStorage.getItem('auth_token')}`,
+                'Content-Type': 'text/plain'
+            },
+            body: content
+        })
+        if (!response.ok) {
+            const err = await response.json().catch(() => ({ error: 'Failed to update file' }))
+            throw new Error(err.error || 'Failed to update file')
+        }
+        return response.json()
     }
 }

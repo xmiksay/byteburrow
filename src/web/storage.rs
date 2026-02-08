@@ -13,7 +13,7 @@ use axum::{
 };
 use tower::Service;
 use tower_http::services::ServeFile;
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, Set, Condition};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, Set, Condition, sea_query::Expr};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -129,6 +129,7 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(list_storages_handler).post(create_storage_handler))
         .route("/share", get(list_all_user_shares_handler))
+        .route("/share/with-me", get(list_shares_with_me_handler))
         .route(
             "/:id",
             get(get_storage_handler)
@@ -148,6 +149,15 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/:id/share/*path", get(list_shares_handler))
         .route("/:id/share/*path", post(share_entry_handler))
         .route("/share/:share_id", put(update_share_handler).delete(delete_share_handler))
+        // Share-based access routes
+        .route("/share/:share_id/list", get(share_list_root_handler))
+        .route("/share/:share_id/list/", get(share_list_root_handler))
+        .route("/share/:share_id/list/*path", get(share_list_handler))
+        .route("/share/:share_id/show/*path", get(share_show_handler))
+        .route("/share/:share_id/update/*path", put(share_update_handler))
+        .route("/share/:share_id/create/*path", post(share_create_handler))
+        .route("/share/:share_id/rename/*path", post(share_rename_handler))
+        .route("/share/:share_id/remove/*path", delete(share_remove_handler))
         .route("/thumbnail/:hash/:size", get(thumbnail_handler))
 }
 
@@ -1128,6 +1138,45 @@ async fn list_all_user_shares_handler(
     Ok(Json(response))
 }
 
+/// List shares shared with the current user
+/// GET /api/storage/share/with-me
+#[instrument(skip(state, auth))]
+async fn list_shares_with_me_handler(
+    auth: Auth,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<ShareResponse>>, (StatusCode, Json<ErrorResponse>)> {
+    let user_id = auth.user.id;
+    
+    // Find groups the user is in
+    let user_groups = group_user::Entity::find()
+        .filter(group_user::Column::UserId.eq(user_id))
+        .all(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })))?
+        .into_iter()
+        .map(|gu| gu.group_id)
+        .collect::<Vec<i32>>();
+
+    // Query shares where user_ids contains current user OR group_ids contains one of user's groups
+    // We need to use raw SQL or custom expressions for array containment
+    let shares_with_entries = shared::Entity::find()
+        .find_also_related(entry::Entity)
+        .filter(
+            Condition::any()
+                .add(Expr::cust_with_expr("$1 = ANY(user_ids)", user_id))
+                .add(Expr::cust_with_expr("group_ids && $1", user_groups.clone()))
+        )
+        .all(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })))?;
+
+    let response = shares_with_entries.into_iter()
+        .filter_map(|(s, e)| e.map(|entry_model| ShareResponse::from_model(s, entry_model)))
+        .collect();
+
+    Ok(Json(response))
+}
+
 /// Share entry handler
 /// POST /api/storage/:id/share/*path
 #[instrument(skip(state, _auth))]
@@ -1269,3 +1318,367 @@ async fn update_share_handler(
     Ok(Json(ShareResponse::from_model(updated, entry_model)))
 }
 
+/// Helper function to verify share access for the current user
+async fn verify_share_access(
+    auth: &Auth,
+    share: &shared::Model,
+    db: &sea_orm::DatabaseConnection,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let user_id = auth.user.id;
+    
+    // Check if user is in user_ids
+    if share.user_ids.contains(&user_id) {
+        return Ok(());
+    }
+    
+    // Check if user's groups overlap with group_ids
+    let user_groups = group_user::Entity::find()
+        .filter(group_user::Column::UserId.eq(user_id))
+        .all(db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })))?
+        .into_iter()
+        .map(|gu| gu.group_id)
+        .collect::<Vec<i32>>();
+    
+    for gid in &share.group_ids {
+        if user_groups.contains(gid) {
+            return Ok(());
+        }
+    }
+    
+    Err((StatusCode::FORBIDDEN, Json(ErrorResponse { error: "Access denied to this share".to_string() })))
+}
+
+/// Helper to get share, entry, and storage for share-based access
+/// The share_identifier can be either a numeric ID or a token string
+async fn get_share_context(
+    share_identifier: &str,
+    auth: Option<&Auth>,
+    state: &AppState,
+) -> Result<(shared::Model, entry::Model, StorageWrapper), (StatusCode, Json<ErrorResponse>)> {
+    // Try to parse as numeric ID first, otherwise treat as token
+    let share = if let Ok(share_id) = share_identifier.parse::<i32>() {
+        shared::Entity::find_by_id(share_id)
+            .one(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })))?
+    } else {
+        // Treat as token
+        shared::Entity::find()
+            .filter(shared::Column::Token.eq(share_identifier))
+            .one(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })))?
+    };
+    
+    let share = share.ok_or_else(|| (StatusCode::NOT_FOUND, Json(ErrorResponse { error: "Share not found".to_string() })))?;
+    
+    // Check expiration
+    if let Some(expires_at) = share.expires_at {
+        if expires_at < chrono::Utc::now().naive_utc() {
+            return Err((StatusCode::GONE, Json(ErrorResponse { error: "Share has expired".to_string() })));
+        }
+    }
+    
+    // Verify access - public links (with token) don't require auth, private shares do
+    if share.token.is_none() {
+        // Private share - requires authentication and access check
+        let auth = auth.ok_or_else(|| (StatusCode::UNAUTHORIZED, Json(ErrorResponse { error: "Authentication required for this share".to_string() })))?;
+        verify_share_access(auth, &share, &state.db).await?;
+    }
+    
+    // Get the entry
+    let entry_model = entry::Entity::find_by_id(share.path_id)
+        .one(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(ErrorResponse { error: "Shared entry not found".to_string() })))?;
+    
+    // Get the storage
+    let storage = StorageWrapper::find_by_id(&state.db, entry_model.storage_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })))?;
+    
+    Ok((share, entry_model, storage))
+}
+
+/// Share list root handler
+/// GET /api/storage/share/:share_id/list
+#[instrument(skip(state, auth))]
+async fn share_list_root_handler(
+    auth: Option<Auth>,
+    AxumPath(share_id): AxumPath<String>,
+    Query(query): Query<ListDirQuery>,
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    share_list_impl(auth, share_id, String::new(), query, state).await
+}
+
+/// Share list handler
+/// GET /api/storage/share/:share_id/list/*path
+#[instrument(skip(state, auth))]
+async fn share_list_handler(
+    auth: Option<Auth>,
+    AxumPath((share_id, path)): AxumPath<(String, String)>,
+    Query(query): Query<ListDirQuery>,
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    share_list_impl(auth, share_id, path, query, state).await
+}
+
+async fn share_list_impl(
+    auth: Option<Auth>,
+    share_id: String,
+    sub_path: String,
+    query: ListDirQuery,
+    state: Arc<AppState>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let (share, entry_model, storage) = get_share_context(&share_id, auth.as_ref(), &state).await?;
+    
+    // Calculate full path relative to storage
+    let base_path = entry_model.path.trim_matches('/');
+    let sub_path_clean = sub_path.trim_matches('/');
+    let full_path = if base_path.is_empty() {
+        sub_path_clean.to_string()
+    } else if sub_path_clean.is_empty() {
+        base_path.to_string()
+    } else {
+        format!("{}/{}", base_path, sub_path_clean)
+    };
+    
+    // List directory
+    let entries = storage.list_directory(&state.db, &full_path).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: format!("Error listing directory: {}", e) })))?;
+    
+    // Transform entries to have paths relative to the share's base path
+    let relative_entries: Vec<_> = entries.into_iter().map(|mut entry| {
+        // Remove the base path prefix from entry path
+        let entry_path = entry.path.trim_matches('/');
+        let relative_path = if base_path.is_empty() {
+            entry_path.to_string()
+        } else if entry_path.starts_with(base_path) {
+            entry_path[base_path.len()..].trim_start_matches('/').to_string()
+        } else {
+            entry_path.to_string()
+        };
+        entry.path = relative_path;
+        entry
+    }).collect();
+    
+    let format = query.format.as_deref().unwrap_or("json");
+    
+    match format {
+        "html" => {
+            let html = generate_directory_index(&state, entry_model.storage_id, &sub_path_clean, &relative_entries)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() })))?;
+            Ok(Html(html).into_response())
+        }
+        _ => {
+            Ok(Json(serde_json::json!({
+                "share_id": share.id,
+                "storage_id": entry_model.storage_id,
+                "path": sub_path_clean,
+                "entries": relative_entries,
+            })).into_response())
+        }
+    }
+}
+
+/// Share show handler - get file content
+/// GET /api/storage/share/:share_id/show/*path
+#[instrument(skip(state, auth))]
+async fn share_show_handler(
+    auth: Option<Auth>,
+    AxumPath((share_id, path)): AxumPath<(String, String)>,
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let (_share, entry_model, storage) = get_share_context(&share_id, auth.as_ref(), &state).await?;
+    
+    // Calculate full path
+    let base_path = entry_model.path.trim_matches('/');
+    let sub_path_clean = path.trim_matches('/');
+    let full_path = if base_path.is_empty() {
+        sub_path_clean.to_string()
+    } else if sub_path_clean.is_empty() {
+        base_path.to_string()
+    } else {
+        format!("{}/{}", base_path, sub_path_clean)
+    };
+    
+    // Open and read file
+    let (mut file, _metadata) = storage.open_file(&full_path).await
+        .map_err(|e| (StatusCode::NOT_FOUND, Json(ErrorResponse { error: format!("File not found: {}", e) })))?;
+    
+    let mut content = Vec::new();
+    file.read_to_end(&mut content).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: format!("Error reading file: {}", e) })))?;
+    
+    let content_type = determine_content_type(std::path::Path::new(&full_path), &content);
+    
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, content_type)],
+        content
+    ).into_response())
+}
+
+/// Share update handler - update file content
+/// PUT /api/storage/share/:share_id/update/*path
+#[instrument(skip(state, auth, body))]
+async fn share_update_handler(
+    auth: Option<Auth>,
+    AxumPath((share_id, path)): AxumPath<(String, String)>,
+    State(state): State<Arc<AppState>>,
+    body: axum::body::Bytes,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let (share, entry_model, storage) = get_share_context(&share_id, auth.as_ref(), &state).await?;
+    
+    // Check write permission
+    if !share.can_write {
+        return Err((StatusCode::FORBIDDEN, Json(ErrorResponse { error: "This share does not allow write access".to_string() })));
+    }
+    
+    // Calculate full path
+    let base_path = entry_model.path.trim_matches('/');
+    let sub_path_clean = path.trim_matches('/');
+    let full_path = if base_path.is_empty() {
+        sub_path_clean.to_string()
+    } else if sub_path_clean.is_empty() {
+        base_path.to_string()
+    } else {
+        format!("{}/{}", base_path, sub_path_clean)
+    };
+    
+    // Save the file
+    storage.save_file(&full_path, &body).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: format!("Error saving file: {}", e) })))?;
+    
+    Ok(Json(serde_json::json!({
+        "message": "File updated successfully",
+    })))
+}
+
+/// Share create handler - create file or folder
+/// POST /api/storage/share/:share_id/create/*path
+#[instrument(skip(state, auth))]
+async fn share_create_handler(
+    auth: Option<Auth>,
+    AxumPath((share_id, path)): AxumPath<(String, String)>,
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<CreateEntryRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let (share, entry_model, storage) = get_share_context(&share_id, auth.as_ref(), &state).await?;
+    
+    // Check write permission
+    if !share.can_write {
+        return Err((StatusCode::FORBIDDEN, Json(ErrorResponse { error: "This share does not allow write access".to_string() })));
+    }
+    
+    // Calculate full path
+    let base_path = entry_model.path.trim_matches('/');
+    let sub_path_clean = path.trim_matches('/');
+    let full_path = if base_path.is_empty() {
+        sub_path_clean.to_string()
+    } else if sub_path_clean.is_empty() {
+        base_path.to_string()
+    } else {
+        format!("{}/{}", base_path, sub_path_clean)
+    };
+    
+    // Create the entry
+    match payload.entry_type {
+        EntryType::Directory => {
+            storage.create_directory(&full_path).await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: format!("Error creating directory: {}", e) })))?;
+        }
+        EntryType::File => {
+            storage.create_file(&full_path).await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: format!("Error creating file: {}", e) })))?;
+        }
+        _ => return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "Unsupported entry type".to_string() }))),
+    }
+    
+    Ok(Json(serde_json::json!({
+        "message": "Entry created successfully",
+    })))
+}
+
+/// Share rename handler - rename file or folder
+/// POST /api/storage/share/:share_id/rename/*path
+#[instrument(skip(state, auth))]
+async fn share_rename_handler(
+    auth: Option<Auth>,
+    AxumPath((share_id, path)): AxumPath<(String, String)>,
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<RenameEntryRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let (share, entry_model, storage) = get_share_context(&share_id, auth.as_ref(), &state).await?;
+    
+    // Check write permission
+    if !share.can_write {
+        return Err((StatusCode::FORBIDDEN, Json(ErrorResponse { error: "This share does not allow write access".to_string() })));
+    }
+    
+    // Calculate full paths
+    let base_path = entry_model.path.trim_matches('/');
+    let sub_path_clean = path.trim_matches('/');
+    let old_full_path = if base_path.is_empty() {
+        sub_path_clean.to_string()
+    } else if sub_path_clean.is_empty() {
+        base_path.to_string()
+    } else {
+        format!("{}/{}", base_path, sub_path_clean)
+    };
+    
+    // New path is relative to share, so we need to add base_path
+    let new_sub_path = payload.new_path.trim_matches('/');
+    let new_full_path = if base_path.is_empty() {
+        new_sub_path.to_string()
+    } else {
+        format!("{}/{}", base_path, new_sub_path)
+    };
+    
+    // Rename the entry
+    storage.rename_entry(&old_full_path, &new_full_path).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: format!("Error renaming entry: {}", e) })))?;
+    
+    Ok(Json(serde_json::json!({
+        "message": "Entry renamed successfully",
+    })))
+}
+
+/// Share remove handler - delete file or folder
+/// DELETE /api/storage/share/:share_id/remove/*path
+#[instrument(skip(state, auth))]
+async fn share_remove_handler(
+    auth: Option<Auth>,
+    AxumPath((share_id, path)): AxumPath<(String, String)>,
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let (share, entry_model, storage) = get_share_context(&share_id, auth.as_ref(), &state).await?;
+    
+    // Check write permission
+    if !share.can_write {
+        return Err((StatusCode::FORBIDDEN, Json(ErrorResponse { error: "This share does not allow write access".to_string() })));
+    }
+    
+    // Calculate full path
+    let base_path = entry_model.path.trim_matches('/');
+    let sub_path_clean = path.trim_matches('/');
+    let full_path = if base_path.is_empty() {
+        sub_path_clean.to_string()
+    } else if sub_path_clean.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "Cannot delete share root".to_string() })));
+    } else {
+        format!("{}/{}", base_path, sub_path_clean)
+    };
+    
+    // Remove the entry
+    storage.remove_entry(&full_path).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: format!("Error removing entry: {}", e) })))?;
+    
+    Ok(Json(serde_json::json!({
+        "message": "Entry removed successfully",
+    })))
+}
