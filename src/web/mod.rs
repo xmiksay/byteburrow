@@ -6,6 +6,7 @@ pub mod ws;
 
 use crate::auth::Auth;
 use crate::config::Config;
+use crate::job::JobSender;
 use crate::storage::format_size;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Json, Router};
 use minijinja::Environment;
@@ -41,9 +42,10 @@ pub struct AppState {
     pub db: DatabaseConnection,
     pub config: Config,
     pub jinja: Environment<'static>,
+    pub job_sender: JobSender,
 }
 
-pub async fn run(config: Config, db: DatabaseConnection) {
+pub async fn run(config: Config, db: DatabaseConnection, job_sender: JobSender) {
     let mut jinja = Environment::new();
     jinja
         .add_template(
@@ -71,10 +73,12 @@ pub async fn run(config: Config, db: DatabaseConnection) {
             .to_string()
     });
 
+
     let state = Arc::new(AppState {
         db,
         config: config.clone(),
         jinja,
+        job_sender,
     });
 
     let index_path = PathBuf::from(&config.frontend_dist).join("index.html");

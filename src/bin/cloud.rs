@@ -1,4 +1,4 @@
-use cloud::{db_connect, config::Config};
+use cloud::{db_connect, config::Config, job::JobRunner};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
@@ -18,5 +18,10 @@ async fn main() {
         .await
         .expect("Failed to connect to database");
 
-    cloud::web::run(config, db).await;
+    let (job_runner, job_sender) = JobRunner::new(db.clone());
+
+    tokio::select! {
+        _ = job_runner.run() => tracing::warn!("Job runner exited"),
+        _ = cloud::web::run(config, db, job_sender) => tracing::warn!("Web server exited"),
+    }
 }
