@@ -17,7 +17,8 @@ import {
   Save,
   Link,
   Tag as TagIcon,
-  Share2
+  Share2,
+  Hash
 } from 'lucide-vue-next'
 import { storageService } from '../services/storage'
 import { tagService } from '../services/tag'
@@ -247,6 +248,15 @@ const handleModalSubmit = async () => {
   }
 }
 
+const triggerHash = async (entry: DirectoryEntry) => {
+  if (!selectedStorage.value) return
+  try {
+    await storageService.triggerHash(selectedStorage.value.id, entry.path)
+  } catch (err: any) {
+    alert('Failed to trigger hash: ' + err.message)
+  }
+}
+
 const deleteEntry = async (entry: DirectoryEntry) => {
   if (!confirm(`Are you sure you want to delete ${getBasename(entry.path)}?`)) return
   if (!selectedStorage.value) return
@@ -364,6 +374,9 @@ const deleteEntry = async (entry: DirectoryEntry) => {
               </button>
               <button v-if="user?.admin" class="btn-icon-sm" @click="openTagsModal(entry)" title="Manage Tags">
                 <TagIcon :size="16" />
+              </button>
+              <button v-if="entry.entry_type !== 'Directory'" class="btn-icon-sm" @click="triggerHash(entry)" title="Calculate Hash">
+                <Hash :size="16" />
               </button>
               <button class="btn-icon-sm share" @click="openShareModal(entry)" title="Share">
                 <Share2 :size="16" />

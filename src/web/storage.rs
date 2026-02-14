@@ -146,6 +146,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/:id/rename/*path", post(rename_entry_handler))
         .route("/:id/remove/*path", delete(remove_entry_handler))
         .route("/:id/tags/*path", put(update_entry_tags_handler))
+        .route("/:id/hash/*path", post(trigger_hash_handler))
         .route("/:id/share/*path", get(list_shares_handler))
         .route("/:id/share/*path", post(share_entry_handler))
         .route("/share/:share_id", get(get_share_info_handler).put(update_share_handler).delete(delete_share_handler))
@@ -1772,4 +1773,24 @@ async fn share_tags_handler(
         })?;
 
     Ok(Json(serde_json::json!({ "id": entry_id, "message": "Tags updated successfully" })))
+}
+
+/// Trigger hash calculation job for a file
+/// POST /api/storage/:id/hash/*path
+async fn trigger_hash_handler(
+    auth: Auth,
+    AxumPath((storage_id, path)): AxumPath<(i32, String)>,
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    require_admin(&auth)?;
+
+    state.job_sender.send(crate::job::Job::CalculateHash {
+        storage_id,
+        path: path.trim_matches('/').to_string(),
+    }).map_err(|e| {
+        tracing::error!("Failed to send job: {}", e);
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Failed to queue job".to_string() }))
+    })?;
+
+    Ok(Json(serde_json::json!({ "message": "Hash calculation queued" })))
 }

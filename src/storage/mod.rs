@@ -2,7 +2,7 @@ use crate::entity::storage;
 use crate::entity::entry::{self, EntryType};
 use serde::{Deserialize, Serialize};
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
-use chrono::TimeZone;
+use chrono::{TimeZone, Utc};
 use std::path::PathBuf;
 use tokio::fs;
 use std::io;
@@ -43,8 +43,8 @@ impl From<entry::Model> for DirectoryEntry {
             entry_type: model.entry_type,
             size: model.size,
             tags: model.tags,
-            modified_at: model.modified_at.map(|dt| chrono::Utc.from_utc_datetime(&dt)),
-            created_at: chrono::Utc.from_utc_datetime(&model.created_at),
+            modified_at: model.modified_at.map(|dt| Utc.from_utc_datetime(&dt)),
+            created_at: Utc.from_utc_datetime(&model.created_at),
         }
     }
 }
@@ -332,7 +332,7 @@ impl Storage {
             size: Set(None),
             tags: Set(Vec::new()),
             modified_at: Set(modified_at),
-            created_at: Set(chrono::Utc::now().naive_utc()),
+            created_at: Set(Utc::now().naive_utc()),
             ..Default::default()
         };
 
@@ -340,63 +340,64 @@ impl Storage {
         Ok(inserted.id)
     }
 
-    /// Set tags for an entry, creating it if it doesn't exist in the database
-    #[instrument(skip(db, tags))]
-    pub async fn set_tags(&self, db: &sea_orm::DatabaseConnection, sub_path: &str, tags: Vec<i32>) -> Result<i32> {
-        let full_path = self.get_full_path(sub_path);
+    /// Find or create a database entry for a given sub-path
+    #[instrument(skip(self, db))]
+    pub async fn ensure_entry(&self, db: &sea_orm::DatabaseConnection, sub_path: &str) -> Result<entry::Model> {
+        let normalized_path = sub_path.trim_matches('/').to_string();
+        let full_path = self.get_full_path(&normalized_path);
 
         anyhow::ensure!(full_path.exists(), "Path {} not found on disk", sub_path);
 
-        let normalized_path = sub_path.trim_matches('/').to_string();
-
-        // Find entry in database
-        let entry_record = entry::Entity::find()
+        let existing = entry::Entity::find()
             .filter(entry::Column::StorageId.eq(self.model.id))
             .filter(entry::Column::Path.eq(&normalized_path))
             .one(db)
             .await?;
 
-        match entry_record {
-            Some(m) => {
-                // Update existing entry
-                let mut active: entry::ActiveModel = m.into();
-                active.tags = Set(tags);
-                Ok(active.update(db).await?.id)
-            }
-            None => {
-                // Create new entry
-                let parent_id = if normalized_path.contains('/') {
-                    Some(self.get_parent_id(db, &normalized_path).await?)
-                } else {
-                    None
-                };
-                let metadata = std::fs::metadata(&full_path)?;
-
-                let entry_type = if metadata.is_dir() { EntryType::Directory }
-                                else if metadata.is_file() { EntryType::File }
-                                else { EntryType::Symlink };
-
-                let active = entry::ActiveModel {
-                    storage_id: Set(self.model.id),
-                    user_id: Set(self.model.default_user),
-                    group_id: Set(self.model.default_group),
-                    parent_id: Set(parent_id),
-                    path: Set(normalized_path),
-                    entry_type: Set(entry_type),
-                    size: Set(if metadata.is_file() { Some(metadata.len() as i64) } else { None }),
-                    tags: Set(tags),
-                    modified_at: Set(metadata.modified().ok().map(|t| chrono::DateTime::<chrono::Utc>::from(t).naive_utc())),
-                    created_at: Set(chrono::Utc::now().naive_utc()),
-                    ..Default::default()
-                };
-
-                Ok(active.insert(db).await?.id)
-            }
+        if let Some(model) = existing {
+            return Ok(model);
         }
+
+        let parent_id = if normalized_path.contains('/') {
+            Some(self.get_parent_id(db, &normalized_path).await?)
+        } else {
+            None
+        };
+        let metadata = std::fs::metadata(&full_path)?;
+
+        let entry_type = if metadata.is_dir() { EntryType::Directory }
+                        else if metadata.is_file() { EntryType::File }
+                        else { EntryType::Symlink };
+
+        let active = entry::ActiveModel {
+            storage_id: Set(self.model.id),
+            user_id: Set(self.model.default_user),
+            group_id: Set(self.model.default_group),
+            parent_id: Set(parent_id),
+            path: Set(normalized_path),
+            entry_type: Set(entry_type),
+            size: Set(if metadata.is_file() { Some(metadata.len() as i64) } else { None }),
+            tags: Set(Vec::new()),
+            modified_at: Set(metadata.modified().ok().map(|t| chrono::DateTime::<chrono::Utc>::from(t).naive_utc())),
+            created_at: Set(Utc::now().naive_utc()),
+            ..Default::default()
+        };
+
+        Ok(active.insert(db).await?)
+    }
+
+    /// Set tags for an entry, creating it if it doesn't exist in the database
+    #[instrument(skip(db, tags))]
+    pub async fn set_tags(&self, db: &sea_orm::DatabaseConnection, sub_path: &str, tags: Vec<i32>) -> Result<i32> {
+        let model = self.ensure_entry(db, sub_path).await?;
+        let mut active: entry::ActiveModel = model.into();
+        active.tags = Set(tags);
+        Ok(active.update(db).await?.id)
     }
 }
 
 mod content_type;
+mod hash;
 pub mod thumbnail;
 pub use content_type::determine_content_type;
 

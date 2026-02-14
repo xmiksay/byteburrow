@@ -1,10 +1,8 @@
 use std::sync::Arc;
-use sea_orm::{DatabaseConnection, EntityTrait, ColumnTrait, QueryFilter, ActiveModelTrait, Set};
-use sha2::{Sha256, Digest};
+use sea_orm::DatabaseConnection;
 use tokio::sync::mpsc;
 use tracing::{info, error, instrument};
 
-use crate::entity::entry;
 use crate::storage::Storage;
 
 #[derive(Debug)]
@@ -36,39 +34,15 @@ impl JobRunner {
         info!("Job runner stopped");
     }
 
+    #[instrument(skip(self))]
     async fn process(&self, job: Job) -> anyhow::Result<()> {
         match job {
             Job::CalculateHash { storage_id, path } => {
-                self.calculate_hash(storage_id, &path).await
-            }
-        }
-    }
-
-    #[instrument(skip(self))]
-    async fn calculate_hash(&self, storage_id: i32, path: &str) -> anyhow::Result<()> {
-        let storage = Storage::find_by_id(&self.db, storage_id).await?;
-        let full_path = storage.get_full_path(path);
-
-        let data = tokio::fs::read(&full_path).await?;
-        let hash = Sha256::digest(&data).to_vec();
-
-        let normalized_path = path.trim_matches('/').to_string();
-
-        let record = entry::Entity::find()
-            .filter(entry::Column::StorageId.eq(storage_id))
-            .filter(entry::Column::Path.eq(&normalized_path))
-            .one(self.db.as_ref())
-            .await?;
-
-        match record {
-            Some(model) => {
-                let mut active: entry::ActiveModel = model.into();
-                active.hash = Set(Some(hash.clone()));
-                active.update(self.db.as_ref()).await?;
-                info!(path, hash = hex::encode(&hash), "Hash updated");
-            }
-            None => {
-                info!(path, "Entry not in DB, skipping hash update");
+                let storage = Storage::find_by_id(&self.db, storage_id).await?;
+                let (updated, hash) = storage.calculate_hash(self.db.as_ref(), &path).await?;
+                if updated {
+                    info!(path = &path, hash = hex::encode(&hash), "Hash updated");
+                }
             }
         }
 

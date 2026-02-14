@@ -53,6 +53,10 @@ export const storageService = {
         return api.put<{ message: string }>(`/api/storage/${storageId}/tags/${path}`, { tags })
     },
 
+    async triggerHash(storageId: number, path: string): Promise<{ message: string }> {
+        return api.post<{ message: string }>(`/api/storage/${storageId}/hash/${path}`)
+    },
+
     async shareEntry(storageId: number, path: string, data: any): Promise<any> {
         return api.post<any>(`/api/storage/${storageId}/share/${path}`, data)
     },
