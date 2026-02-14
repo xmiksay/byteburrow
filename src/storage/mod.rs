@@ -6,6 +6,7 @@ use chrono::TimeZone;
 use std::path::PathBuf;
 use tokio::fs;
 use std::io;
+use anyhow::Result;
 use tracing::instrument;
 
 #[derive(Debug)]
@@ -281,38 +282,71 @@ impl Storage {
         }
     }
 
-    /// Get the parent ID for a given sub-path in the database
-    pub async fn get_parent_id(&self, db: &sea_orm::DatabaseConnection, sub_path: &str) -> Option<i32> {
-        let normalized_path = sub_path.trim_matches('/');
-        if normalized_path.is_empty() {
-            return None;
+    /// Get or create the parent directory entry for a given sub-path.
+    /// Returns the parent's ID. For paths without a `/`, returns the ID of
+    /// the entry matching `sub_path` itself (treated as root-level directory).
+    /// Recursively creates ancestor entries as needed.
+    pub async fn get_parent_id(&self, db: &sea_orm::DatabaseConnection, sub_path: &str) -> Result<i32> {
+        let target_path = sub_path.trim_matches('/');
+
+        // Determine the directory path we need to resolve
+        let dir_path = match target_path.rfind('/') {
+            Some(pos) => &target_path[..pos],
+            None => target_path,
+        };
+
+        // Check if the directory entry already exists in DB
+        let existing = entry::Entity::find()
+            .filter(entry::Column::StorageId.eq(self.model.id))
+            .filter(entry::Column::Path.eq(dir_path))
+            .one(db)
+            .await?;
+
+        if let Some(m) = existing {
+            return Ok(m.id);
         }
 
-        let p = normalized_path.trim_end_matches('/');
-        if let Some(last_slash) = p.rfind('/') {
-            let parent_path = &p[..last_slash];
-            entry::Entity::find()
-                .filter(entry::Column::StorageId.eq(self.model.id))
-                .filter(entry::Column::Path.eq(parent_path))
-                .one(db)
-                .await
-                .ok()
-                .flatten()
-                .map(|m| m.id)
+        // Recursively ensure the parent of this directory exists
+        let parent_id = if let Some(pos) = dir_path.rfind('/') {
+            let ancestor_path = &dir_path[..pos];
+            Some(Box::pin(self.get_parent_id(db, ancestor_path)).await?)
         } else {
             None
-        }
+        };
+
+        // Gather metadata from the filesystem if available
+        let full_path = self.get_full_path(dir_path);
+        let modified_at = tokio::fs::metadata(&full_path)
+            .await
+            .ok()
+            .and_then(|meta| meta.modified().ok())
+            .map(|t| chrono::DateTime::<chrono::Utc>::from(t).naive_utc());
+
+        let active = entry::ActiveModel {
+            storage_id: Set(self.model.id),
+            user_id: Set(self.model.default_user),
+            group_id: Set(self.model.default_group),
+            parent_id: Set(parent_id),
+            path: Set(dir_path.to_string()),
+            entry_type: Set(EntryType::Directory),
+            size: Set(None),
+            tags: Set(Vec::new()),
+            modified_at: Set(modified_at),
+            created_at: Set(chrono::Utc::now().naive_utc()),
+            ..Default::default()
+        };
+
+        let inserted = active.insert(db).await?;
+        Ok(inserted.id)
     }
 
     /// Set tags for an entry, creating it if it doesn't exist in the database
     #[instrument(skip(db, tags))]
-    pub async fn set_tags(&self, db: &sea_orm::DatabaseConnection, sub_path: &str, tags: Vec<i32>) -> Result<i32, sea_orm::DbErr> {
+    pub async fn set_tags(&self, db: &sea_orm::DatabaseConnection, sub_path: &str, tags: Vec<i32>) -> Result<i32> {
         let full_path = self.get_full_path(sub_path);
-        
-        if !full_path.exists() {
-            return Err(sea_orm::DbErr::Custom(format!("Path {} not found on disk", sub_path)));
-        }
-        
+
+        anyhow::ensure!(full_path.exists(), "Path {} not found on disk", sub_path);
+
         let normalized_path = sub_path.trim_matches('/').to_string();
 
         // Find entry in database
@@ -327,15 +361,16 @@ impl Storage {
                 // Update existing entry
                 let mut active: entry::ActiveModel = m.into();
                 active.tags = Set(tags);
-                active.update(db).await.map(|m| m.id)
+                Ok(active.update(db).await?.id)
             }
             None => {
                 // Create new entry
-                let parent_id = self.get_parent_id(db, &normalized_path).await;
-
-                let metadata = std::fs::metadata(&full_path).map_err(|e| {
-                    sea_orm::DbErr::Custom(format!("Metadata error: {}", e))
-                })?;
+                let parent_id = if normalized_path.contains('/') {
+                    Some(self.get_parent_id(db, &normalized_path).await?)
+                } else {
+                    None
+                };
+                let metadata = std::fs::metadata(&full_path)?;
 
                 let entry_type = if metadata.is_dir() { EntryType::Directory }
                                 else if metadata.is_file() { EntryType::File }
@@ -355,7 +390,7 @@ impl Storage {
                     ..Default::default()
                 };
 
-                active.insert(db).await.map(|m| m.id)
+                Ok(active.insert(db).await?.id)
             }
         }
     }

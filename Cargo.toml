@@ -29,6 +29,7 @@ sha2 = { workspace = true }
 tower = { workspace = true }
 axum-extra = { workspace = true, features = ["typed-header"] }
 chrono = { workspace = true }
+anyhow = "1"
 getrandom = "0.4.1"
 hex = "0.4.3"
 minijinja = { version = "2.15.1", features = ["loader"] }

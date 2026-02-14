@@ -17,14 +17,20 @@ const routes: RouteRecordRaw[] = [
         redirect: '/files'
     },
     {
-        path: '/files',
+        path: '/files/:storageId?/:path(.*)?',
         name: 'files',
         component: FileExplorer,
         meta: { title: 'Files' }
     },
     {
-        path: '/shared',
+        path: '/shared/:shareId(\\d+)/:path(.*)?',
         name: 'shared',
+        component: SharedWithMe,
+        meta: { title: 'Shared with Me' }
+    },
+    {
+        path: '/shared',
+        name: 'shared-root',
         component: SharedWithMe,
         meta: { title: 'Shared with Me' }
     },

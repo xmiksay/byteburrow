@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
 import { 
   Folder, 
   File, 
@@ -16,8 +16,10 @@ import {
   Edit2,
   Trash2,
   X,
-  Save
+  Save,
+  Tag as TagIcon
 } from 'lucide-vue-next'
+import { useRoute, useRouter } from 'vue-router'
 import { storageService } from '../services/storage'
 import { tagService } from '../services/tag'
 import type { DirectoryEntry, Shared, Storage, Tag } from '../types'
@@ -25,6 +27,9 @@ import { formatSize, formatDate, getBasename, isViewableAsText, isImage, isMedia
 import MediaViewer from './MediaViewer.vue'
 import FileViewer from './FileViewer.vue'
 import TagDialog from './TagDialog.vue'
+
+const route = useRoute()
+const router = useRouter()
 
 const shares = ref<Shared[]>([])
 const selectedShare = ref<Shared | null>(null)
@@ -71,8 +76,22 @@ const fetchShares = async () => {
     loading.value = true
     error.value = null
     shares.value = await storageService.getSharesWithMe()
-    if (shares.value.length > 0 && !selectedShare.value) {
-      selectShare(shares.value[0])
+
+    const routeShareId = route.params.shareId ? Number(route.params.shareId) : undefined
+    const routePath = (route.params.path as string) || ''
+
+    if (routeShareId) {
+      const found = shares.value.find(s => s.id === routeShareId)
+      if (found) {
+        selectedShare.value = found
+        currentPath.value = routePath
+        fetchEntries()
+        return
+      }
+    }
+
+    if (shares.value.length > 0) {
+      router.replace({ name: 'shared', params: { shareId: shares.value[0].id, path: '' } })
     }
   } catch (err: any) {
     error.value = 'Failed to load shares: ' + err.message
@@ -82,9 +101,7 @@ const fetchShares = async () => {
 }
 
 const selectShare = (share: Shared) => {
-  selectedShare.value = share
-  currentPath.value = ''
-  fetchEntries()
+  router.push({ name: 'shared', params: { shareId: share.id, path: '' } })
 }
 
 const fetchEntries = async () => {
@@ -103,8 +120,8 @@ const fetchEntries = async () => {
 }
 
 const navigateTo = (path: string) => {
-  currentPath.value = path
-  fetchEntries()
+  if (!selectedShare.value) return
+  router.push({ name: 'shared', params: { shareId: selectedShare.value.id, path } })
 }
 
 const navigateUp = () => {
@@ -113,6 +130,28 @@ const navigateUp = () => {
   const parentPath = segments.slice(0, -1).join('/')
   navigateTo(parentPath)
 }
+
+// React to route changes (back/forward navigation, programmatic pushes)
+watch(
+  () => [route.params.shareId, route.params.path],
+  ([newShareId, newPath]) => {
+    if (route.name !== 'shared') return
+    const id = newShareId ? Number(newShareId) : undefined
+    const path = (newPath as string) || ''
+
+    if (id && id !== selectedShare.value?.id) {
+      const found = shares.value.find(s => s.id === id)
+      if (found) {
+        selectedShare.value = found
+        currentPath.value = path
+        fetchEntries()
+      }
+    } else if (path !== currentPath.value) {
+      currentPath.value = path
+      fetchEntries()
+    }
+  }
+)
 
 const getFileUrl = (entry: DirectoryEntry, mode: 'show' | 'download') => {
   if (!selectedShare.value) return '#'
@@ -254,7 +293,7 @@ onMounted(() => {
     <div class="explorer-header">
       <div class="share-selector glass-panel">
         <Share2 :size="18" />
-        <select v-model="selectedShare" @change="selectShare(selectedShare!)" class="share-select">
+        <select v-model="selectedShare" @change="selectedShare && selectShare(selectedShare)" class="share-select">
           <option v-for="s in shares" :key="s.id" :value="s">{{ getShareLabel(s) }}</option>
         </select>
         <div v-if="selectedShare" class="share-meta">
@@ -420,10 +459,10 @@ onMounted(() => {
 
     <!-- Tags Dialog -->
     <TagDialog
-      v-if="showTagsModal && entryForTags"
+      v-if="showTagsModal && entryForTags && selectedShare"
       :storage="mockStorage"
       :entry="entryForTags"
-      :share-id="selectedShare?.id"
+      :share-id="selectedShare.id"
       @close="showTagsModal = false"
       @updated="handleTagsUpdated"
     />

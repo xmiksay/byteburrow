@@ -158,6 +158,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/share/:share_id/create/*path", post(share_create_handler))
         .route("/share/:share_id/rename/*path", post(share_rename_handler))
         .route("/share/:share_id/remove/*path", delete(share_remove_handler))
+        .route("/share/:share_id/tags/*path", put(share_tags_handler))
         .route("/thumbnail/:hash/:size", get(thumbnail_handler))
 }
 
@@ -1737,4 +1738,38 @@ async fn share_remove_handler(
     Ok(Json(serde_json::json!({
         "message": "Entry removed successfully",
     })))
+}
+
+/// Share tags handler - update tags on an entry within a share
+/// PUT /api/storage/share/:share_id/tags/*path
+#[instrument(skip(state, auth))]
+async fn share_tags_handler(
+    auth: Option<Auth>,
+    AxumPath((share_id, path)): AxumPath<(String, String)>,
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<UpdateEntryTagsRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let (share, entry_model, storage) = get_share_context(&share_id, auth.as_ref(), &state).await?;
+
+    if !share.can_write {
+        return Err((StatusCode::FORBIDDEN, Json(ErrorResponse { error: "This share does not allow write access".to_string() })));
+    }
+
+    let base_path = entry_model.path.trim_matches('/');
+    let sub_path_clean = path.trim_matches('/');
+    let full_path = if base_path.is_empty() {
+        sub_path_clean.to_string()
+    } else if sub_path_clean.is_empty() {
+        base_path.to_string()
+    } else {
+        format!("{}/{}", base_path, sub_path_clean)
+    };
+
+    let entry_id = storage.set_tags(&state.db, &full_path, payload.tags).await
+        .map_err(|e| {
+            tracing::error!("Failed to set tags: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() }))
+        })?;
+
+    Ok(Json(serde_json::json!({ "id": entry_id, "message": "Tags updated successfully" })))
 }

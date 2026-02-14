@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
-import { useRoute } from 'vue-router'
+import { ref, onMounted, computed, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { 
   Folder,
   File, 
@@ -30,10 +30,7 @@ import ShareDialog from './ShareDialog.vue'
 
 const { user } = useAuth()
 const route = useRoute()
-
-const props = defineProps<{
-  initialStorageId?: number
-}>()
+const router = useRouter()
 
 const storages = ref<Storage[]>([])
 const selectedStorage = ref<Storage | null>(null)
@@ -69,31 +66,31 @@ const pathSegments = computed(() => {
 const fetchStorages = async () => {
   try {
     storages.value = await storageService.getStorages()
-    
-    // Check for query params first
-    const queryStorageId = route.query.storage_id ? Number(route.query.storage_id) : undefined
-    const queryPath = route.query.path as string || ''
-    
-    const targetStorageId = queryStorageId || props.initialStorageId
-    
-    if (targetStorageId) {
-      const found = storages.value.find(s => s.id === targetStorageId)
+
+    const routeStorageId = route.params.storageId ? Number(route.params.storageId) : undefined
+    const routePath = (route.params.path as string) || ''
+
+    if (routeStorageId) {
+      const found = storages.value.find(s => s.id === routeStorageId)
       if (found) {
-        selectStorage(found, queryPath)
+        selectedStorage.value = found
+        currentPath.value = routePath
+        fetchEntries()
         return
       }
-    } else if (storages.value.length > 0) {
-      selectStorage(storages.value[0])
+    }
+
+    if (storages.value.length > 0) {
+      // Redirect to first storage URL
+      router.replace({ name: 'files', params: { storageId: storages.value[0].id, path: '' } })
     }
   } catch (err: any) {
     error.value = 'Failed to load storages: ' + err.message
   }
 }
 
-const selectStorage = (storage: Storage, path: string = '') => {
-  selectedStorage.value = storage
-  currentPath.value = path
-  fetchEntries()
+const selectStorage = (storage: Storage) => {
+  router.push({ name: 'files', params: { storageId: storage.id, path: '' } })
 }
 
 const fetchEntries = async () => {
@@ -112,8 +109,8 @@ const fetchEntries = async () => {
 }
 
 const navigateTo = (path: string) => {
-  currentPath.value = path
-  fetchEntries()
+  if (!selectedStorage.value) return
+  router.push({ name: 'files', params: { storageId: selectedStorage.value.id, path } })
 }
 
 const navigateUp = () => {
@@ -122,6 +119,28 @@ const navigateUp = () => {
   const parentPath = segments.slice(0, -1).join('/')
   navigateTo(parentPath)
 }
+
+// React to route changes (back/forward navigation, programmatic pushes)
+watch(
+  () => [route.params.storageId, route.params.path],
+  ([newStorageId, newPath]) => {
+    if (route.name !== 'files') return
+    const id = newStorageId ? Number(newStorageId) : undefined
+    const path = (newPath as string) || ''
+
+    if (id && id !== selectedStorage.value?.id) {
+      const found = storages.value.find(s => s.id === id)
+      if (found) {
+        selectedStorage.value = found
+        currentPath.value = path
+        fetchEntries()
+      }
+    } else if (path !== currentPath.value) {
+      currentPath.value = path
+      fetchEntries()
+    }
+  }
+)
 
 const getFileUrl = (entry: DirectoryEntry, mode: 'show' | 'download') => {
   if (!selectedStorage.value) return '#'
@@ -246,7 +265,7 @@ const deleteEntry = async (entry: DirectoryEntry) => {
     <div class="explorer-header">
       <div class="storage-selector glass-panel">
         <HardDrive :size="18" />
-        <select v-model="selectedStorage" @change="selectStorage(selectedStorage!)" class="storage-select">
+        <select v-model="selectedStorage" @change="selectedStorage && selectStorage(selectedStorage)" class="storage-select">
           <option v-for="s in storages" :key="s.id" :value="s">{{ s.name }}</option>
         </select>
       </div>
