@@ -11,23 +11,24 @@ use axum::{
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use utoipa::ToSchema;
 
 /// Login request payload
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct LoginRequest {
     pub username: String,
     pub password: String,
 }
 
 /// Login response
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct LoginResponse {
     pub token: String,
     pub expires_in_days: i64,
 }
 
 /// User response (without password)
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct UserResponse {
     pub id: i32,
     pub name: String,
@@ -51,7 +52,7 @@ impl From<user::Model> for UserResponse {
 }
 
 /// Create user request
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateUserRequest {
     pub name: String,
     pub description: Option<String>,
@@ -62,7 +63,7 @@ pub struct CreateUserRequest {
 }
 
 /// Update user request
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdateUserRequest {
     pub name: Option<String>,
     pub description: Option<String>,
@@ -88,13 +89,25 @@ pub fn router() -> Router<Arc<AppState>> {
 }
 
 /// Change password request
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct ChangePasswordRequest {
     pub password: String,
 }
 
 /// Change password handler
 /// POST /api/user/:id/password
+#[utoipa::path(
+    post,
+    path = "/api/user/{id}/password",
+    params(("id" = i32, Path, description = "User ID")),
+    request_body = ChangePasswordRequest,
+    responses(
+        (status = 200, description = "Password changed successfully"),
+        (status = 403, description = "Permission denied", body = ErrorResponse),
+        (status = 404, description = "User not found", body = ErrorResponse),
+    ),
+    security(("bearer" = []))
+)]
 async fn change_password_handler(
     auth: Auth,
     Path(id): Path<i32>,
@@ -148,6 +161,16 @@ async fn change_password_handler(
 
 /// Login endpoint - accepts JSON payload with username/password
 /// POST /api/user/login
+#[utoipa::path(
+    post,
+    path = "/api/user/login",
+    request_body = LoginRequest,
+    responses(
+        (status = 200, description = "Login successful", body = LoginResponse),
+        (status = 401, description = "Invalid credentials", body = ErrorResponse),
+        (status = 403, description = "User disabled", body = ErrorResponse),
+    )
+)]
 async fn login_handler(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
@@ -206,6 +229,14 @@ async fn login_handler(
 
 /// Me endpoint - returns current user info
 /// GET /api/user/me
+#[utoipa::path(
+    get,
+    path = "/api/user/me",
+    responses(
+        (status = 200, description = "Current user info"),
+    ),
+    security(("bearer" = []))
+)]
 async fn me_handler(auth: Auth) -> impl IntoResponse {
     Json(serde_json::json!({
         "id": auth.user.id,
@@ -223,6 +254,15 @@ async fn me_handler(auth: Auth) -> impl IntoResponse {
 
 /// List all users
 /// GET /api/user
+#[utoipa::path(
+    get,
+    path = "/api/user",
+    responses(
+        (status = 200, description = "List of all users", body = Vec<UserResponse>),
+        (status = 403, description = "Admin access required", body = ErrorResponse),
+    ),
+    security(("bearer" = []))
+)]
 async fn list_users_handler(
     auth: Auth,
     State(state): State<Arc<AppState>>,
@@ -247,6 +287,17 @@ async fn list_users_handler(
 
 /// Get user by ID
 /// GET /api/user/:id
+#[utoipa::path(
+    get,
+    path = "/api/user/{id}",
+    params(("id" = i32, Path, description = "User ID")),
+    responses(
+        (status = 200, description = "User found", body = UserResponse),
+        (status = 403, description = "Admin access required", body = ErrorResponse),
+        (status = 404, description = "User not found", body = ErrorResponse),
+    ),
+    security(("bearer" = []))
+)]
 async fn get_user_handler(
     auth: Auth,
     Path(user_id): Path<i32>,
@@ -278,6 +329,17 @@ async fn get_user_handler(
 
 /// Create new user
 /// POST /api/user
+#[utoipa::path(
+    post,
+    path = "/api/user",
+    request_body = CreateUserRequest,
+    responses(
+        (status = 200, description = "User created", body = UserResponse),
+        (status = 403, description = "Admin access required", body = ErrorResponse),
+        (status = 409, description = "Username already exists", body = ErrorResponse),
+    ),
+    security(("bearer" = []))
+)]
 async fn create_user_handler(
     auth: Auth,
     State(state): State<Arc<AppState>>,
@@ -337,6 +399,19 @@ async fn create_user_handler(
 
 /// Update user
 /// PUT /api/user/:id
+#[utoipa::path(
+    put,
+    path = "/api/user/{id}",
+    params(("id" = i32, Path, description = "User ID")),
+    request_body = UpdateUserRequest,
+    responses(
+        (status = 200, description = "User updated", body = UserResponse),
+        (status = 403, description = "Admin access required", body = ErrorResponse),
+        (status = 404, description = "User not found", body = ErrorResponse),
+        (status = 409, description = "Username already exists", body = ErrorResponse),
+    ),
+    security(("bearer" = []))
+)]
 async fn update_user_handler(
     auth: Auth,
     Path(user_id): Path<i32>,
@@ -429,6 +504,18 @@ async fn update_user_handler(
 
 /// Delete user
 /// DELETE /api/user/:id
+#[utoipa::path(
+    delete,
+    path = "/api/user/{id}",
+    params(("id" = i32, Path, description = "User ID")),
+    responses(
+        (status = 200, description = "User deleted"),
+        (status = 400, description = "Cannot delete own account", body = ErrorResponse),
+        (status = 403, description = "Admin access required", body = ErrorResponse),
+        (status = 404, description = "User not found", body = ErrorResponse),
+    ),
+    security(("bearer" = []))
+)]
 async fn delete_user_handler(
     auth: Auth,
     Path(user_id): Path<i32>,

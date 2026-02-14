@@ -2,7 +2,18 @@ use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
 /// Entry type enum - File, Directory, or Symlink
-#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    EnumIter,
+    DeriveActiveEnum,
+    Serialize,
+    Deserialize,
+    utoipa::ToSchema,
+)]
 #[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "entry_type_enum")]
 pub enum EntryType {
     #[sea_orm(string_value = "file")]
@@ -51,11 +62,7 @@ pub enum Relation {
         to = "super::group::Column::Id"
     )]
     Group,
-    #[sea_orm(
-        belongs_to = "Entity",
-        from = "Column::ParentId",
-        to = "Column::Id"
-    )]
+    #[sea_orm(belongs_to = "Entity", from = "Column::ParentId", to = "Column::Id")]
     Parent,
 }
 

@@ -1,6 +1,5 @@
 use anyhow::Result;
-use chrono::Timelike;
-use sea_orm::{ActiveModelTrait, Set, TryFromU64};
+use sea_orm::{ActiveModelTrait, Set};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 use tracing::{info, instrument};

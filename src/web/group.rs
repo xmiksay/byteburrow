@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// Group response
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct GroupResponse {
     pub id: i32,
     pub name: String,
@@ -30,14 +30,14 @@ impl From<group::Model> for GroupResponse {
 }
 
 /// Create group request
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateGroupRequest {
     pub name: String,
     pub description: Option<String>,
 }
 
 /// Update group request
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateGroupRequest {
     pub name: Option<String>,
     pub description: Option<String>,
@@ -57,30 +57,47 @@ pub fn router() -> Router<Arc<AppState>> {
 
 /// List all groups
 /// GET /api/group
+#[utoipa::path(
+    get,
+    path = "/api/group",
+    responses(
+        (status = 200, description = "List of all groups", body = Vec<GroupResponse>),
+        (status = 403, description = "Admin access required", body = ErrorResponse),
+    ),
+    security(("bearer" = []))
+)]
 async fn list_groups_handler(
     auth: Auth,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<GroupResponse>>, (StatusCode, Json<ErrorResponse>)> {
     require_admin(&auth)?;
 
-    let groups = group::Entity::find()
-        .all(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Database error".to_string(),
-                }),
-            )
-        })?;
+    let groups = group::Entity::find().all(&state.db).await.map_err(|e| {
+        tracing::error!("Database error: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Database error".to_string(),
+            }),
+        )
+    })?;
 
     Ok(Json(groups.into_iter().map(GroupResponse::from).collect()))
 }
 
 /// Get group by ID
 /// GET /api/group/:id
+#[utoipa::path(
+    get,
+    path = "/api/group/{id}",
+    params(("id" = i32, Path, description = "Group ID")),
+    responses(
+        (status = 200, description = "Group found", body = GroupResponse),
+        (status = 403, description = "Admin access required", body = ErrorResponse),
+        (status = 404, description = "Group not found", body = ErrorResponse),
+    ),
+    security(("bearer" = []))
+)]
 async fn get_group_handler(
     auth: Auth,
     Path(group_id): Path<i32>,
@@ -112,6 +129,17 @@ async fn get_group_handler(
 
 /// Create new group
 /// POST /api/group
+#[utoipa::path(
+    post,
+    path = "/api/group",
+    request_body = CreateGroupRequest,
+    responses(
+        (status = 200, description = "Group created", body = GroupResponse),
+        (status = 403, description = "Admin access required", body = ErrorResponse),
+        (status = 409, description = "Group already exists", body = ErrorResponse),
+    ),
+    security(("bearer" = []))
+)]
 async fn create_group_handler(
     auth: Auth,
     State(state): State<Arc<AppState>>,
@@ -164,6 +192,19 @@ async fn create_group_handler(
 
 /// Update group
 /// PUT /api/group/:id
+#[utoipa::path(
+    put,
+    path = "/api/group/{id}",
+    params(("id" = i32, Path, description = "Group ID")),
+    request_body = UpdateGroupRequest,
+    responses(
+        (status = 200, description = "Group updated", body = GroupResponse),
+        (status = 403, description = "Admin access required", body = ErrorResponse),
+        (status = 404, description = "Group not found", body = ErrorResponse),
+        (status = 409, description = "Group name already exists", body = ErrorResponse),
+    ),
+    security(("bearer" = []))
+)]
 async fn update_group_handler(
     auth: Auth,
     Path(group_id): Path<i32>,
@@ -244,6 +285,18 @@ async fn update_group_handler(
 
 /// Delete group
 /// DELETE /api/group/:id
+#[utoipa::path(
+    delete,
+    path = "/api/group/{id}",
+    params(("id" = i32, Path, description = "Group ID")),
+    responses(
+        (status = 200, description = "Group deleted"),
+        (status = 403, description = "Admin access required", body = ErrorResponse),
+        (status = 404, description = "Group not found", body = ErrorResponse),
+        (status = 409, description = "Cannot delete group with users", body = ErrorResponse),
+    ),
+    security(("bearer" = []))
+)]
 async fn delete_group_handler(
     auth: Auth,
     Path(group_id): Path<i32>,

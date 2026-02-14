@@ -35,6 +35,8 @@ hex = "0.4.3"
 minijinja = { version = "2.15.1", features = ["loader"] }
 tokio-util = { version = "0.7", features = ["io"] }
 http-body-util = "0.1"
+utoipa = { version = "5.4.0", features = ["axum_extras", "chrono"] }
+utoipa-swagger-ui = { version = "8.1.0", features = ["axum"] }
 
 [workspace.package]
 version = "0.0.1"
@@ -43,7 +45,7 @@ description = "Cloud system"
 documentation = "https://gitlab.com/xmiksay/cloud#"
 
 [workspace.dependencies]
-axum = { version = "0.7" }
+axum = { version = "0.7.9" }
 tokio = { version = "1.0" }
 sea-orm = { version = "1.0" }
 serde = { version = "1.0" }
@@ -55,9 +57,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3" }
 futures-util = "0.3"
 sea-orm-migration = { version = "1.0", features = ["runtime-tokio-rustls", "sqlx-postgres"] }
-uuid = { version = "1.1" }
+uuid = { version = "1.21.0" }
 base64 = "0.22"
 sha2 = "0.10"
 tower = "0.4"
-axum-extra = "0.9"
+axum-extra = "0.9.6"
 chrono = "0.4"

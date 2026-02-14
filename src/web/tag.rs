@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// Tag response
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct TagResponse {
     pub id: i32,
     pub name: String,
@@ -30,14 +30,14 @@ impl From<tag::Model> for TagResponse {
 }
 
 /// Create tag request
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateTagRequest {
     pub name: String,
     pub description: Option<String>,
 }
 
 /// Update tag request
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateTagRequest {
     pub name: Option<String>,
     pub description: Option<String>,
@@ -57,6 +57,13 @@ pub fn router() -> Router<Arc<AppState>> {
 
 /// List all tags for the current user
 /// GET /api/tag
+#[utoipa::path(
+    get,
+    path = "/api/tag",
+    responses(
+        (status = 200, description = "List of all tags", body = Vec<TagResponse>),
+    )
+)]
 async fn list_tags_handler(
     _auth: Option<Auth>,
     State(state): State<Arc<AppState>>,
@@ -76,6 +83,15 @@ async fn list_tags_handler(
 
 /// Get tag by ID (only if it belongs to the user)
 /// GET /api/tag/:id
+#[utoipa::path(
+    get,
+    path = "/api/tag/{id}",
+    params(("id" = i32, Path, description = "Tag ID")),
+    responses(
+        (status = 200, description = "Tag found", body = TagResponse),
+        (status = 404, description = "Tag not found", body = ErrorResponse),
+    )
+)]
 async fn get_tag_handler(
     _auth: Option<Auth>,
     Path(tag_id): Path<i32>,
@@ -105,6 +121,17 @@ async fn get_tag_handler(
 
 /// Create new tag
 /// POST /api/tag
+#[utoipa::path(
+    post,
+    path = "/api/tag",
+    request_body = CreateTagRequest,
+    responses(
+        (status = 200, description = "Tag created", body = TagResponse),
+        (status = 403, description = "Admin access required", body = ErrorResponse),
+        (status = 409, description = "Tag already exists", body = ErrorResponse),
+    ),
+    security(("bearer" = []))
+)]
 async fn create_tag_handler(
     auth: Auth,
     State(state): State<Arc<AppState>>,
@@ -157,6 +184,19 @@ async fn create_tag_handler(
 
 /// Update tag
 /// PUT /api/tag/:id
+#[utoipa::path(
+    put,
+    path = "/api/tag/{id}",
+    params(("id" = i32, Path, description = "Tag ID")),
+    request_body = UpdateTagRequest,
+    responses(
+        (status = 200, description = "Tag updated", body = TagResponse),
+        (status = 403, description = "Admin access required", body = ErrorResponse),
+        (status = 404, description = "Tag not found", body = ErrorResponse),
+        (status = 409, description = "Tag name already exists", body = ErrorResponse),
+    ),
+    security(("bearer" = []))
+)]
 async fn update_tag_handler(
     auth: Auth,
     Path(tag_id): Path<i32>,
@@ -237,6 +277,17 @@ async fn update_tag_handler(
 
 /// Delete tag
 /// DELETE /api/tag/:id
+#[utoipa::path(
+    delete,
+    path = "/api/tag/{id}",
+    params(("id" = i32, Path, description = "Tag ID")),
+    responses(
+        (status = 200, description = "Tag deleted"),
+        (status = 403, description = "Admin access required", body = ErrorResponse),
+        (status = 404, description = "Tag not found", body = ErrorResponse),
+    ),
+    security(("bearer" = []))
+)]
 async fn delete_tag_handler(
     auth: Auth,
     Path(tag_id): Path<i32>,

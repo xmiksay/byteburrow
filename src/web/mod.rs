@@ -18,9 +18,14 @@ use tower_http::{
     services::{ServeDir, ServeFile},
     trace::TraceLayer,
 };
+use utoipa::{
+    openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme},
+    Modify, OpenApi,
+};
+use utoipa_swagger_ui::SwaggerUi;
 
 /// Error response
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ErrorResponse {
     pub error: String,
 }
@@ -43,6 +48,93 @@ pub struct AppState {
     pub config: Config,
     pub jinja: Environment<'static>,
     pub job_sender: JobSender,
+}
+
+/// OpenAPI documentation
+#[derive(OpenApi)]
+#[openapi(
+    paths(
+        // User endpoints
+        user::login_handler,
+        user::me_handler,
+        user::list_users_handler,
+        user::get_user_handler,
+        user::create_user_handler,
+        user::update_user_handler,
+        user::delete_user_handler,
+        user::change_password_handler,
+        // Group endpoints
+        group::list_groups_handler,
+        group::get_group_handler,
+        group::create_group_handler,
+        group::update_group_handler,
+        group::delete_group_handler,
+        // Tag endpoints
+        tag::list_tags_handler,
+        tag::get_tag_handler,
+        tag::create_tag_handler,
+        tag::update_tag_handler,
+        tag::delete_tag_handler,
+        // Storage endpoints
+        storage::list_storages_handler,
+        storage::get_storage_handler,
+        storage::create_storage_handler,
+        storage::update_storage_handler,
+        storage::delete_storage_handler,
+    ),
+    components(
+        schemas(
+            ErrorResponse,
+            user::LoginRequest,
+            user::LoginResponse,
+            user::UserResponse,
+            user::CreateUserRequest,
+            user::UpdateUserRequest,
+            user::ChangePasswordRequest,
+            group::GroupResponse,
+            group::CreateGroupRequest,
+            group::UpdateGroupRequest,
+            tag::TagResponse,
+            tag::CreateTagRequest,
+            tag::UpdateTagRequest,
+            storage::ListDirQuery,
+            storage::StorageResponse,
+            storage::CreateStorageRequest,
+            storage::UpdateStorageRequest,
+            storage::CreateEntryRequest,
+            storage::RenameEntryRequest,
+            storage::UpdateEntryTagsRequest,
+            storage::ShareEntryRequest,
+            storage::ShareResponse,
+            crate::entity::entry::EntryType,
+        )
+    ),
+    modifiers(&SecurityAddon),
+    tags(
+        (name = "user", description = "User management endpoints"),
+        (name = "group", description = "Group management endpoints"),
+        (name = "tag", description = "Tag management endpoints"),
+        (name = "storage", description = "Storage management endpoints"),
+    )
+)]
+struct ApiDoc;
+
+struct SecurityAddon;
+
+impl Modify for SecurityAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        if let Some(components) = openapi.components.as_mut() {
+            components.add_security_scheme(
+                "bearer",
+                SecurityScheme::Http(
+                    HttpBuilder::new()
+                        .scheme(HttpAuthScheme::Bearer)
+                        .bearer_format("JWT")
+                        .build(),
+                ),
+            )
+        }
+    }
 }
 
 pub async fn run(config: Config, db: DatabaseConnection, job_sender: JobSender) {
@@ -73,7 +165,6 @@ pub async fn run(config: Config, db: DatabaseConnection, job_sender: JobSender) 
             .to_string()
     });
 
-
     let state = Arc::new(AppState {
         db,
         config: config.clone(),
@@ -93,12 +184,18 @@ pub async fn run(config: Config, db: DatabaseConnection, job_sender: JobSender) 
         .nest("/storage", storage::router())
         .nest("/tag", tag::router());
 
-    let app = Router::new()
-        .nest("/api", api_router)
-        .nest_service(
-            "/",
-            ServeDir::new(&config.frontend_dist).fallback(ServeFile::new(index_path)),
-        )
+    let app = Router::new().nest("/api", api_router).nest_service(
+        "/",
+        ServeDir::new(&config.frontend_dist).fallback(ServeFile::new(index_path)),
+    );
+
+    // Merge Swagger UI - convert explicitly with type annotation
+    let swagger_router = Router::<Arc<AppState>>::from(
+        SwaggerUi::new("/swagger-ui").url("/api-doc/openapi.json", ApiDoc::openapi()),
+    );
+
+    let app = app
+        .merge(swagger_router)
         .layer(tower_http::cors::CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state);
