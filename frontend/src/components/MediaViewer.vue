@@ -26,7 +26,7 @@ const emit = defineEmits(['close'])
 
 const isVideo = computed(() => {
   const ext = props.entry.path.split('.').pop()?.toLowerCase() || ''
-  return ['mp4', 'webm', 'ogv', 'mov', 'mkv'].includes(ext)
+  return ['mp4', 'webm', 'ogv', 'mov', 'mkv', 'avi', 'mpg', 'mpeg'].includes(ext)
 })
 
 const isAudio = computed(() => {

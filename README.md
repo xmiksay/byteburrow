@@ -75,6 +75,15 @@ npm run build # For production
 npm run dev   # For development
 ```
 
+### Cross-Compilation (Turris Omnia)
+To compile the project for Turris Omnia (ARMv7, musl):
+1. Ensure `cross` is installed: `cargo install cross`
+2. Run the compilation command:
+```bash
+cross build --target armv7-unknown-linux-musleabihf --release
+```
+The binary will be available at `target/armv7-unknown-linux-musleabihf/release/cloud`.
+
 ## 🏗️ Architecture
 
 The system is designed with a clear separation of concerns:

@@ -1,13 +1,15 @@
 pub mod group;
 pub mod storage;
+pub mod tag;
 pub mod user;
 pub mod ws;
-pub mod tag;
 
 use crate::auth::Auth;
 use crate::config::Config;
-use axum::{extract::State, response::IntoResponse, http::StatusCode, routing::get, Json, Router};
-use sea_orm::{DatabaseConnection, ConnectionTrait, Statement};
+use crate::storage::format_size;
+use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Json, Router};
+use minijinja::Environment;
+use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -15,8 +17,6 @@ use tower_http::{
     services::{ServeDir, ServeFile},
     trace::TraceLayer,
 };
-use minijinja::Environment;
-use crate::storage::format_size;
 
 /// Error response
 #[derive(Debug, Serialize)]
@@ -45,16 +45,19 @@ pub struct AppState {
 
 pub async fn run(config: Config, db: DatabaseConnection) {
     let mut jinja = Environment::new();
-    jinja.set_loader(minijinja::path_loader("templates"));
-    
+    jinja
+        .add_template(
+            "directory_index.html",
+            include_str!("../../templates/directory_index.html"),
+        )
+        .unwrap();
+
     // Add filters
-    jinja.add_filter("format_size", |bytes: i64| {
-        format_size(bytes)
-    });
-    
+    jinja.add_filter("format_size", |bytes: i64| format_size(bytes));
+
     jinja.add_filter("format_datetime", |dt: String| {
         // This is a bit hacky because minijinja's Value doesn't easily pass chrono types
-        // unless we use custom Object. For now, we'll assume it's passed as ISO string or 
+        // unless we use custom Object. For now, we'll assume it's passed as ISO string or
         // handle the type in the filter if possible.
         // Actually, minijinja can handle Serialized chrono types as strings or ints.
         dt
@@ -67,7 +70,7 @@ pub async fn run(config: Config, db: DatabaseConnection) {
             .unwrap_or(&path)
             .to_string()
     });
-    
+
     let state = Arc::new(AppState {
         db,
         config: config.clone(),
@@ -103,11 +106,14 @@ pub async fn run(config: Config, db: DatabaseConnection) {
     axum::serve(listener, app).await.unwrap();
 }
 
-
 /// Health check endpoint (no auth required)
 pub async fn health_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let db_backend = state.db.get_database_backend();
-    let db_status = match state.db.execute(Statement::from_string(db_backend, "SELECT 1")).await {
+    let db_status = match state
+        .db
+        .execute(Statement::from_string(db_backend, "SELECT 1"))
+        .await
+    {
         Ok(_) => "ok",
         Err(e) => {
             tracing::error!("Health check database error: {}", e);

@@ -32,6 +32,8 @@ chrono = { workspace = true }
 getrandom = "0.4.1"
 hex = "0.4.3"
 minijinja = { version = "2.15.1", features = ["loader"] }
+tokio-util = { version = "0.7", features = ["io"] }
+http-body-util = "0.1"
 
 [workspace.package]
 version = "0.0.1"

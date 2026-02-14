@@ -8,6 +8,7 @@ import type { Tag, DirectoryEntry, Storage } from '../types'
 const props = defineProps<{
   storage: Storage
   entry: DirectoryEntry
+  shareId?: number | string
 }>()
 
 const emit = defineEmits(['close', 'updated'])
@@ -32,11 +33,19 @@ const fetchTags = async () => {
 const handleTagsSubmit = async () => {
   try {
     submitting.value = true
-    await storageService.updateEntryTags(
-      props.storage.id,
-      props.entry.path,
-      selectedEntryTags.value
-    )
+    if (props.shareId !== undefined) {
+      await storageService.updateShareEntryTags(
+        props.shareId,
+        props.entry.path,
+        selectedEntryTags.value
+      )
+    } else {
+      await storageService.updateEntryTags(
+        props.storage.id,
+        props.entry.path,
+        selectedEntryTags.value
+      )
+    }
     emit('updated', [...selectedEntryTags.value])
     emit('close')
   } catch (err: any) {

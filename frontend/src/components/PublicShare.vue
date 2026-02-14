@@ -16,11 +16,14 @@ import {
   Plus,
   Upload,
   Edit2,
-  Trash2
+  Trash2,
+  Tag as TagIcon
 } from 'lucide-vue-next'
 import { storageService } from '../services/storage'
+import { tagService } from '../services/tag'
 import FileViewer from './FileViewer.vue'
 import MediaViewer from './MediaViewer.vue'
+import TagDialog from './TagDialog.vue'
 import type { DirectoryEntry, Storage } from '../types'
 
 const route = useRoute()
@@ -31,6 +34,9 @@ const error = ref<string | null>(null)
 const shareInfo = ref<any>(null)
 const entries = ref<DirectoryEntry[]>([])
 const currentPath = ref('')
+const allTags = ref<any[]>([])
+const entryForTags = ref<DirectoryEntry | null>(null)
+const showTagsModal = ref(false)
 
 // Viewers
 const selectedFile = ref<DirectoryEntry | null>(null)
@@ -93,12 +99,38 @@ const fetchShareInfo = async () => {
     loading.value = true
     shareInfo.value = await storageService.getShareInfo(token)
     
-    // Initial fetch of contents
-    await fetchContents('')
+    // Fetch tags and contents
+    await Promise.all([
+      fetchTags(),
+      fetchContents('')
+    ])
   } catch (err: any) {
     error.value = err.message || 'Failed to load shared content'
   } finally {
     loading.value = false
+  }
+}
+
+const fetchTags = async () => {
+  try {
+    allTags.value = await tagService.getTags()
+  } catch (err: any) {
+    console.error('Failed to fetch tags:', err)
+  }
+}
+
+const getTagName = (tagId: number) => {
+  return allTags.value.find(t => t.id === tagId)?.name || `Tag ${tagId}`
+}
+
+const openTagsModal = (entry: DirectoryEntry) => {
+  entryForTags.value = entry
+  showTagsModal.value = true
+}
+
+const handleTagsUpdated = (newTags: number[]) => {
+  if (entryForTags.value) {
+    entryForTags.value.tags = newTags
   }
 }
 
@@ -318,7 +350,12 @@ onMounted(() => {
               >
                 <td class="name-cell">
                   <component :is="getIcon(entry)" :size="20" class="file-icon" />
-                  <span>{{ getBasename(entry.path) }}</span>
+                  <span class="entry-name">{{ getBasename(entry.path) }}</span>
+                  <div class="entry-tags" v-if="entry.tags?.length">
+                    <span v-for="tagId in entry.tags" :key="tagId" class="tag-pill">
+                      {{ getTagName(tagId) }}
+                    </span>
+                  </div>
                 </td>
                 <td class="size-cell">{{ entry.entry_type === 'File' ? formatSize(entry.size) : '-' }}</td>
                 <td class="date-cell">{{ formatDate(entry.modified_at || entry.created_at) }}</td>
@@ -334,6 +371,9 @@ onMounted(() => {
                   <template v-if="canWrite">
                     <button class="btn-icon" @click.stop="handleRename(entry)" title="Rename" :disabled="isWriting">
                       <Edit2 :size="16" />
+                    </button>
+                    <button class="btn-icon" @click.stop="openTagsModal(entry)" title="Manage Tags" :disabled="isWriting">
+                      <TagIcon :size="16" />
                     </button>
                     <button class="btn-icon danger" @click.stop="handleDelete(entry)" title="Delete" :disabled="isWriting">
                       <Trash2 :size="16" />
@@ -364,6 +404,16 @@ onMounted(() => {
       :entry="selectedMediaFile"
       :share-id="token"
       @close="selectedMediaFile = null"
+    />
+
+    <!-- Tags Dialog -->
+    <TagDialog
+      v-if="showTagsModal && entryForTags"
+      :storage="mockStorage"
+      :entry="entryForTags"
+      :share-id="token"
+      @close="showTagsModal = false"
+      @updated="handleTagsUpdated"
     />
   </div>
 </template>
@@ -526,6 +576,32 @@ td {
 
 .file-icon {
   color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.entry-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 300px;
+}
+
+.entry-tags {
+  display: flex;
+  gap: 4px;
+  overflow: hidden;
+  mask-image: linear-gradient(to right, black 85%, transparent 100%);
+  margin-left: 8px;
+}
+
+.tag-pill {
+  font-size: 0.65rem;
+  padding: 2px 6px;
+  background: rgba(59, 130, 246, 0.15);
+  color: var(--accent-color);
+  border-radius: 4px;
+  white-space: nowrap;
+  border: 1px solid rgba(59, 130, 246, 0.2);
 }
 
 .size-cell, .date-cell {

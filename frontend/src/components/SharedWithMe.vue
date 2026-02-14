@@ -19,10 +19,12 @@ import {
   Save
 } from 'lucide-vue-next'
 import { storageService } from '../services/storage'
-import type { DirectoryEntry, Shared, Storage } from '../types'
+import { tagService } from '../services/tag'
+import type { DirectoryEntry, Shared, Storage, Tag } from '../types'
 import { formatSize, formatDate, getBasename, isViewableAsText, isImage, isMediaFile, getThumbnailUrl, sortEntries } from '../utils/file'
 import MediaViewer from './MediaViewer.vue'
 import FileViewer from './FileViewer.vue'
+import TagDialog from './TagDialog.vue'
 
 const shares = ref<Shared[]>([])
 const selectedShare = ref<Shared | null>(null)
@@ -32,6 +34,8 @@ const loading = ref(false)
 const error = ref<string | null>(null)
 const selectedFile = ref<DirectoryEntry | null>(null)
 const selectedMediaFile = ref<DirectoryEntry | null>(null)
+const entryForTags = ref<DirectoryEntry | null>(null)
+const showTagsModal = ref(false)
 
 // Write operation state
 const showCreateModal = ref(false)
@@ -213,7 +217,36 @@ const handleDelete = async () => {
   }
 }
 
-onMounted(fetchShares)
+// Tags logic
+const allTags = ref<Tag[]>([])
+
+const fetchTags = async () => {
+  try {
+    allTags.value = await tagService.getTags()
+  } catch (err: any) {
+    console.error('Failed to fetch tags:', err)
+  }
+}
+
+const getTagName = (tagId: number) => {
+  return allTags.value.find(t => t.id === tagId)?.name || `Tag ${tagId}`
+}
+
+const openTagsModal = (entry: DirectoryEntry) => {
+  entryForTags.value = entry
+  showTagsModal.value = true
+}
+
+const handleTagsUpdated = (newTags: number[]) => {
+  if (entryForTags.value) {
+    entryForTags.value.tags = newTags
+  }
+}
+
+onMounted(() => {
+  fetchShares()
+  fetchTags()
+})
 </script>
 
 <template>
@@ -325,6 +358,12 @@ onMounted(fetchShares)
               </button>
             </template>
             <span v-else class="entry-name">{{ getBasename(entry.path) }}</span>
+            
+            <div class="entry-tags" v-if="entry.tags?.length">
+              <span v-for="tagId in entry.tags" :key="tagId" class="tag-pill">
+                {{ getTagName(tagId) }}
+              </span>
+            </div>
           </div>
           <div class="col-size">{{ formatSize(entry.size) }}</div>
           <div class="col-date">{{ formatDate(entry.modified_at) }}</div>
@@ -341,6 +380,9 @@ onMounted(fetchShares)
               <template v-if="canWrite">
                 <button class="btn-icon-sm" @click.stop="startRename(entry)" title="Rename">
                   <Edit2 :size="16" />
+                </button>
+                <button class="btn-icon-sm" @click.stop="openTagsModal(entry)" title="Manage Tags">
+                  <TagIcon :size="16" />
                 </button>
                 <button class="btn-icon-sm danger" @click.stop="confirmDelete(entry)" title="Delete">
                   <Trash2 :size="16" />
@@ -374,6 +416,16 @@ onMounted(fetchShares)
       :entry="selectedMediaFile"
       :share-id="selectedShare.id"
       @close="selectedMediaFile = null"
+    />
+
+    <!-- Tags Dialog -->
+    <TagDialog
+      v-if="showTagsModal && entryForTags"
+      :storage="mockStorage"
+      :entry="entryForTags"
+      :share-id="selectedShare?.id"
+      @close="showTagsModal = false"
+      @updated="handleTagsUpdated"
     />
 
     <!-- Create Modal -->
@@ -602,6 +654,25 @@ onMounted(fetchShares)
   font-weight: 500;
   flex: 0 1 auto;
   min-width: 0;
+}
+
+.entry-tags {
+  display: flex;
+  gap: 4px;
+  overflow: hidden;
+  mask-image: linear-gradient(to right, black 85%, transparent 100%);
+  flex: 1;
+  min-width: 0;
+}
+
+.tag-pill {
+  font-size: 0.65rem;
+  padding: 2px 6px;
+  background: rgba(59, 130, 246, 0.15);
+  color: var(--accent-color);
+  border-radius: 4px;
+  white-space: nowrap;
+  border: 1px solid rgba(59, 130, 246, 0.2);
 }
 
 .entry-icon.folder { color: #f59e0b; }

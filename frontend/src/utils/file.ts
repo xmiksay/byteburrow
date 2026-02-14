@@ -58,7 +58,7 @@ export const isImage = (path: string): boolean => {
 export const isMediaFile = (path: string): boolean => {
     const ext = path.split('.').pop()?.toLowerCase() || ''
     const isAudio = ['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac'].includes(ext)
-    const isVideo = ['mp4', 'webm', 'ogv', 'mov', 'mkv'].includes(ext)
+    const isVideo = ['mp4', 'webm', 'ogv', 'mov', 'mkv', 'avi', 'mpg'].includes(ext)
     return isAudio || isVideo
 }
 

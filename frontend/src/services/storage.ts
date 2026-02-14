@@ -135,5 +135,9 @@ export const storageService = {
             throw new Error(err.error || 'Failed to update file')
         }
         return response.json()
+    },
+
+    async updateShareEntryTags(shareId: number | string, path: string, tags: number[]): Promise<{ message: string }> {
+        return api.put<{ message: string }>(`/api/storage/share/${shareId}/tags/${path}`, { tags })
     }
 }

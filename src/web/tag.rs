@@ -58,21 +58,18 @@ pub fn router() -> Router<Arc<AppState>> {
 /// List all tags for the current user
 /// GET /api/tag
 async fn list_tags_handler(
-    _auth: Auth,
+    _auth: Option<Auth>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<TagResponse>>, (StatusCode, Json<ErrorResponse>)> {
-    let tags = tag::Entity::find()
-        .all(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Database error".to_string(),
-                }),
-            )
-        })?;
+    let tags = tag::Entity::find().all(&state.db).await.map_err(|e| {
+        tracing::error!("Database error: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Database error".to_string(),
+            }),
+        )
+    })?;
 
     Ok(Json(tags.into_iter().map(TagResponse::from).collect()))
 }
@@ -80,7 +77,7 @@ async fn list_tags_handler(
 /// Get tag by ID (only if it belongs to the user)
 /// GET /api/tag/:id
 async fn get_tag_handler(
-    _auth: Auth,
+    _auth: Option<Auth>,
     Path(tag_id): Path<i32>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<TagResponse>, (StatusCode, Json<ErrorResponse>)> {
