@@ -7,7 +7,7 @@ use crate::storage::{
 use crate::web::{require_admin, AppState, ErrorResponse};
 use axum::{
     body::Body,
-    extract::{Path as AxumPath, Query, State},
+    extract::{Path as AxumPath, State},
     http::{header, Request, StatusCode},
     response::{Html, IntoResponse},
     routing::{delete, get, post, put},
@@ -27,12 +27,6 @@ use tower::Service;
 use tower_http::services::ServeFile;
 use tracing::instrument;
 
-/// Directory listing query parameters
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
-pub struct ListDirQuery {
-    /// Output format: "json" or "html" (default: json)
-    format: Option<String>,
-}
 
 /// Storage response
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -143,6 +137,9 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/:id/list", get(list_directory_root_handler))
         .route("/:id/list/", get(list_directory_root_handler))
         .route("/:id/list/*path", get(list_directory_handler))
+        .route("/:id/index", get(directory_index_root_handler))
+        .route("/:id/index/", get(directory_index_root_handler))
+        .route("/:id/index/*path", get(directory_index_handler))
         .route("/:id/show/*path", get(get_file_content_handler))
         .route("/:id/update/*path", put(update_file_content_handler))
         .route("/:id/raw/*path", get(download_file_handler))
@@ -163,6 +160,9 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/share/:share_id/list", get(share_list_root_handler))
         .route("/share/:share_id/list/", get(share_list_root_handler))
         .route("/share/:share_id/list/*path", get(share_list_handler))
+        .route("/share/:share_id/index", get(share_index_root_handler))
+        .route("/share/:share_id/index/", get(share_index_root_handler))
+        .route("/share/:share_id/index/*path", get(share_index_handler))
         .route("/share/:share_id/show/*path", get(share_show_handler))
         .route("/share/:share_id/update/*path", put(share_update_handler))
         .route("/share/:share_id/create/*path", post(share_create_handler))
@@ -707,10 +707,126 @@ async fn list_storages_handler(
 async fn list_directory_root_handler(
     auth: Auth,
     AxumPath(storage_id): AxumPath<i32>,
-    query: Query<ListDirQuery>,
     state: State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    list_directory_handler(auth, AxumPath((storage_id, String::new())), query, state).await
+    list_directory_handler(auth, AxumPath((storage_id, String::new())), state).await
+}
+
+/// Directory index root handler - serves Kodi-compatible directory listing
+async fn directory_index_root_handler(
+    _auth: Auth,
+    AxumPath(storage_id): AxumPath<i32>,
+    State(state): State<Arc<AppState>>,
+    req: Request<Body>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    directory_index_impl(storage_id, String::new(), state, req).await
+}
+
+/// Directory index handler - serves Kodi-compatible directory listing or file content
+#[instrument(skip(state, _auth, req))]
+async fn directory_index_handler(
+    _auth: Auth,
+    AxumPath((storage_id, path)): AxumPath<(i32, String)>,
+    State(state): State<Arc<AppState>>,
+    req: Request<Body>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    directory_index_impl(storage_id, path, state, req).await
+}
+
+async fn directory_index_impl(
+    storage_id: i32,
+    path: String,
+    state: Arc<AppState>,
+    req: Request<Body>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let storage = StorageWrapper::find_by_id(&state.db, storage_id)
+        .await
+        .map_err(|e| {
+            if matches!(e, sea_orm::DbErr::RecordNotFound(_)) {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorResponse {
+                        error: format!("Storage {} not found", storage_id),
+                    }),
+                )
+            } else {
+                tracing::error!("Database error: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Database error".to_string(),
+                    }),
+                )
+            }
+        })?;
+
+    let normalized_path = path.trim_matches('/');
+    let full_path = storage.get_full_path(normalized_path);
+
+    // If it's a file, serve it directly with content-type
+    if full_path.is_file() {
+        let content_type = match fs::File::open(&full_path).await {
+            Ok(mut file) => {
+                let mut buffer = [0u8; 1024];
+                let n = file.read(&mut buffer).await.unwrap_or(0);
+                determine_content_type(&full_path, &buffer[..n])
+            }
+            Err(_) => "application/octet-stream",
+        };
+
+        let mut service = ServeFile::new(full_path);
+        let mut res = Service::<Request<Body>>::call(&mut service, req)
+            .await
+            .map_err(|e| match e {})
+            .unwrap();
+
+        res.headers_mut().insert(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static(content_type),
+        );
+
+        return Ok(res.into_response());
+    }
+
+    // It's a directory - list entries and return HTML
+    let entries = storage
+        .list_directory(&state.db, normalized_path)
+        .await
+        .map_err(|e| {
+            tracing::error!("Storage error: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Error listing directory: {}", e),
+                }),
+            )
+        })?;
+
+    entries
+        .iter()
+        .filter(|e| e.hash.is_none() && e.entry_type == EntryType::File)
+        .for_each(|e| {
+            state
+                .job_sender
+                .send(crate::job::Job::CheckFile {
+                    storage_id: e.storage_id,
+                    path: e.path.clone(),
+                })
+                .unwrap();
+        });
+
+    let html = generate_directory_index(&state, storage_id, normalized_path, &entries).map_err(
+        |e| {
+            tracing::error!("Template error: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal server error".to_string(),
+                }),
+            )
+        },
+    )?;
+    Ok(Html(html).into_response())
 }
 
 #[instrument(skip(state, _auth, req))]
@@ -998,7 +1114,6 @@ async fn remove_entry_handler(
 async fn list_directory_handler(
     _auth: Auth,
     AxumPath((id, path)): AxumPath<(i32, String)>,
-    Query(query): Query<ListDirQuery>,
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     tracing::info!("Listing directory for storage {} at path {}", id, path);
@@ -1051,34 +1166,13 @@ async fn list_directory_handler(
                 .unwrap();
         });
 
-    // Determine output format
-    let format = query.format.as_deref().unwrap_or("json");
     let normalized_path = path.trim_matches('/');
 
-    match format {
-        "html" => {
-            let html =
-                generate_directory_index(&state, id, normalized_path, &entries).map_err(|e| {
-                    tracing::error!("Template error: {}", e);
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse {
-                            error: "Internal server error".to_string(),
-                        }),
-                    )
-                })?;
-            Ok(Html(html).into_response())
-        }
-        _ => {
-            // Default to JSON
-            Ok(Json(serde_json::json!({
-                "storage_id": id,
-                "path": normalized_path,
-                "entries": entries,
-            }))
-            .into_response())
-        }
-    }
+    Ok(Json(serde_json::json!({
+        "storage_id": id,
+        "path": normalized_path,
+        "entries": entries,
+    })))
 }
 
 /// Generate HTML directory index
@@ -1824,10 +1918,9 @@ async fn get_share_info_handler(
 async fn share_list_root_handler(
     auth: Option<Auth>,
     AxumPath(share_id): AxumPath<String>,
-    Query(query): Query<ListDirQuery>,
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    share_list_impl(auth, share_id, String::new(), query, state).await
+    share_list_impl(auth, share_id, String::new(), state).await
 }
 
 /// Share list handler
@@ -1836,17 +1929,15 @@ async fn share_list_root_handler(
 async fn share_list_handler(
     auth: Option<Auth>,
     AxumPath((share_id, path)): AxumPath<(String, String)>,
-    Query(query): Query<ListDirQuery>,
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    share_list_impl(auth, share_id, path, query, state).await
+    share_list_impl(auth, share_id, path, state).await
 }
 
 async fn share_list_impl(
     auth: Option<Auth>,
     share_id: String,
     sub_path: String,
-    query: ListDirQuery,
     state: Arc<AppState>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     let (share, entry_model, storage) = get_share_context(&share_id, auth.as_ref(), &state).await?;
@@ -1908,34 +1999,142 @@ async fn share_list_impl(
         })
         .collect();
 
-    let format = query.format.as_deref().unwrap_or("json");
+    Ok(Json(serde_json::json!({
+        "share_id": share.id,
+        "storage_id": entry_model.storage_id,
+        "path": sub_path_clean,
+        "entries": relative_entries,
+    })))
+}
 
-    match format {
-        "html" => {
-            let html = generate_directory_index(
-                &state,
-                entry_model.storage_id,
-                &sub_path_clean,
-                &relative_entries,
-            )
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: e.to_string(),
-                    }),
-                )
-            })?;
-            Ok(Html(html).into_response())
-        }
-        _ => Ok(Json(serde_json::json!({
-            "share_id": share.id,
-            "storage_id": entry_model.storage_id,
-            "path": sub_path_clean,
-            "entries": relative_entries,
-        }))
-        .into_response()),
+/// Share index root handler - Kodi-compatible directory listing for shares
+async fn share_index_root_handler(
+    auth: Option<Auth>,
+    AxumPath(share_id): AxumPath<String>,
+    State(state): State<Arc<AppState>>,
+    req: Request<Body>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    share_index_impl(auth, share_id, String::new(), state, req).await
+}
+
+/// Share index handler - Kodi-compatible directory listing or file serving for shares
+#[instrument(skip(state, auth, req))]
+async fn share_index_handler(
+    auth: Option<Auth>,
+    AxumPath((share_id, path)): AxumPath<(String, String)>,
+    State(state): State<Arc<AppState>>,
+    req: Request<Body>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    share_index_impl(auth, share_id, path, state, req).await
+}
+
+async fn share_index_impl(
+    auth: Option<Auth>,
+    share_id: String,
+    sub_path: String,
+    state: Arc<AppState>,
+    req: Request<Body>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let (_share, entry_model, storage) =
+        get_share_context(&share_id, auth.as_ref(), &state).await?;
+
+    let base_path = entry_model.path.trim_matches('/');
+    let sub_path_clean = sub_path.trim_matches('/');
+    let full_path = if base_path.is_empty() {
+        sub_path_clean.to_string()
+    } else if sub_path_clean.is_empty() {
+        base_path.to_string()
+    } else {
+        format!("{}/{}", base_path, sub_path_clean)
+    };
+
+    let abs_path = storage.get_full_path(&full_path);
+
+    // If it's a file, serve it directly
+    if abs_path.is_file() {
+        let content_type = match fs::File::open(&abs_path).await {
+            Ok(mut file) => {
+                let mut buffer = [0u8; 1024];
+                let n = file.read(&mut buffer).await.unwrap_or(0);
+                determine_content_type(&abs_path, &buffer[..n])
+            }
+            Err(_) => "application/octet-stream",
+        };
+
+        let mut service = ServeFile::new(&abs_path);
+        let mut res = Service::<Request<Body>>::call(&mut service, req)
+            .await
+            .map_err(|e| match e {})
+            .unwrap();
+
+        res.headers_mut().insert(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static(content_type),
+        );
+
+        return Ok(res.into_response());
     }
+
+    // It's a directory - list entries and return HTML
+    let entries = storage
+        .list_directory(&state.db, &full_path)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Error listing directory: {}", e),
+                }),
+            )
+        })?;
+
+    entries
+        .iter()
+        .filter(|e| e.hash.is_none() && e.entry_type == EntryType::File)
+        .for_each(|e| {
+            state
+                .job_sender
+                .send(crate::job::Job::CheckFile {
+                    storage_id: e.storage_id,
+                    path: e.path.clone(),
+                })
+                .unwrap();
+        });
+
+    // Transform entries to have paths relative to the share's base path
+    let relative_entries: Vec<_> = entries
+        .into_iter()
+        .map(|mut entry| {
+            let entry_path = entry.path.trim_matches('/');
+            let relative_path = if base_path.is_empty() {
+                entry_path.to_string()
+            } else if entry_path.starts_with(base_path) {
+                entry_path[base_path.len()..]
+                    .trim_start_matches('/')
+                    .to_string()
+            } else {
+                entry_path.to_string()
+            };
+            entry.path = relative_path;
+            entry
+        })
+        .collect();
+
+    let html = generate_directory_index(
+        &state,
+        entry_model.storage_id,
+        sub_path_clean,
+        &relative_entries,
+    )
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+    Ok(Html(html).into_response())
 }
 
 /// Share show handler - get file content

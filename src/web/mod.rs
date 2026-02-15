@@ -97,7 +97,6 @@ pub struct AppState {
             tag::TagResponse,
             tag::CreateTagRequest,
             tag::UpdateTagRequest,
-            storage::ListDirQuery,
             storage::StorageResponse,
             storage::CreateStorageRequest,
             storage::UpdateStorageRequest,
