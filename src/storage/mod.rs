@@ -1,12 +1,12 @@
-use crate::entity::storage;
 use crate::entity::entry::{self, EntryType};
-use serde::{Deserialize, Serialize};
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+use crate::entity::storage;
+use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+use serde::{Deserialize, Serialize};
+use std::io;
 use std::path::PathBuf;
 use tokio::fs;
-use std::io;
-use anyhow::Result;
 use tracing::instrument;
 
 #[derive(Debug)]
@@ -24,9 +24,9 @@ pub struct DirectoryEntry {
     pub path: String,
     pub hash: Option<Vec<u8>>,
     pub entry_type: EntryType,
-    pub size: Option<i64>,
+    pub size: i64,
     pub tags: Vec<i32>,
-    pub modified_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub modified_at: chrono::DateTime<chrono::Utc>,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -43,7 +43,7 @@ impl From<entry::Model> for DirectoryEntry {
             entry_type: model.entry_type,
             size: model.size,
             tags: model.tags,
-            modified_at: model.modified_at.map(|dt| Utc.from_utc_datetime(&dt)),
+            modified_at: Utc.from_utc_datetime(&model.modified_at),
             created_at: Utc.from_utc_datetime(&model.created_at),
         }
     }
@@ -56,9 +56,14 @@ impl Storage {
 
     /// Find a storage by ID in the database
     #[instrument(skip(db))]
-    pub async fn find_by_id(db: &sea_orm::DatabaseConnection, id: i32) -> Result<Self, sea_orm::DbErr> {
+    pub async fn find_by_id(
+        db: &sea_orm::DatabaseConnection,
+        id: i32,
+    ) -> Result<Self, sea_orm::DbErr> {
         let model = storage::Entity::find_by_id(id).one(db).await?;
-        model.map(Self::new).ok_or_else(|| sea_orm::DbErr::RecordNotFound(format!("Storage with id {} not found", id)))
+        model.map(Self::new).ok_or_else(|| {
+            sea_orm::DbErr::RecordNotFound(format!("Storage with id {} not found", id))
+        })
     }
 
     /// List directory contents from the filesystem for a given subpath within the storage
@@ -66,7 +71,7 @@ impl Storage {
     pub async fn list_directory_fs(&self, sub_path: &str) -> io::Result<Vec<DirectoryEntry>> {
         let base_path = PathBuf::from(&self.model.path);
         let mut full_path = base_path.clone();
-        
+
         // Sanitize sub_path to prevent path traversal
         let sanitized_path = sub_path.trim_start_matches('/');
         if !sanitized_path.is_empty() {
@@ -79,16 +84,19 @@ impl Storage {
         while let Some(entry) = read_dir.next_entry().await? {
             let path = entry.path();
             let metadata = entry.metadata().await?;
-            
+
             // Get relative path as string
-            let relative_path = path.strip_prefix(&base_path)
+            let relative_path = path
+                .strip_prefix(&base_path)
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
                 .to_string_lossy()
                 .into_owned();
 
-            let modified_at = metadata.modified().ok().map(|t| {
-                chrono::DateTime::<chrono::Utc>::from(t)
-            });
+            let modified_at = metadata
+                .modified()
+                .ok()
+                .map(|t| chrono::DateTime::<chrono::Utc>::from(t))
+                .unwrap();
 
             let entry_type = if metadata.is_dir() {
                 EntryType::Directory
@@ -107,10 +115,10 @@ impl Storage {
                 path: relative_path,
                 hash: None, // Will be calculated if needed
                 entry_type,
-                size: if metadata.is_file() { Some(metadata.len() as i64) } else { None },
+                size: metadata.len().try_into().unwrap(),
                 tags: Vec::new(),
+                created_at: modified_at.clone(),
                 modified_at,
-                created_at: chrono::Utc::now(),
             });
         }
 
@@ -118,9 +126,13 @@ impl Storage {
     }
 
     /// List directory contents from the database for a given subpath within the storage
-    pub async fn list_directory_db(&self, db: &sea_orm::DatabaseConnection, sub_path: &str) -> Result<Vec<DirectoryEntry>, sea_orm::DbErr> {
+    pub async fn list_directory_db(
+        &self,
+        db: &sea_orm::DatabaseConnection,
+        sub_path: &str,
+    ) -> Result<Vec<DirectoryEntry>, sea_orm::DbErr> {
         let normalized_path = sub_path.trim_matches('/');
-        
+
         let entries = if normalized_path.is_empty() {
             // Root directory
             entry::Entity::find()
@@ -158,19 +170,25 @@ impl Storage {
     }
 
     /// List directory contents by merging filesystem and database state
-    pub async fn list_directory(&self, db: &sea_orm::DatabaseConnection, sub_path: &str) -> Result<Vec<DirectoryEntry>, sea_orm::DbErr> {
-        let fs_entries = self.list_directory_fs(sub_path).await
+    pub async fn list_directory(
+        &self,
+        db: &sea_orm::DatabaseConnection,
+        sub_path: &str,
+    ) -> Result<Vec<DirectoryEntry>, sea_orm::DbErr> {
+        let fs_entries = self
+            .list_directory_fs(sub_path)
+            .await
             .map_err(|e| sea_orm::DbErr::Custom(format!("Filesystem error: {}", e)))?;
-        
+
         let db_entries = self.list_directory_db(db, sub_path).await?;
-        
+
         let mut db_map: std::collections::HashMap<String, DirectoryEntry> = db_entries
             .into_iter()
             .map(|e| (e.path.clone(), e))
             .collect();
-            
+
         let mut result = Vec::new();
-        
+
         for mut fs_entry in fs_entries {
             if let Some(db_entry) = db_map.remove(&fs_entry.path) {
                 // Entry exists in both FS and DB
@@ -179,7 +197,7 @@ impl Storage {
                 fs_entry.hash = db_entry.hash;
                 fs_entry.user_id = db_entry.user_id;
                 fs_entry.group_id = db_entry.group_id;
-                
+
                 result.push(fs_entry);
             } else {
                 // Entry exists only in FS
@@ -187,12 +205,12 @@ impl Storage {
                 result.push(fs_entry);
             }
         }
-        
+
         // Any remaining entries in db_map exist only in DB
         for (path, _) in db_map {
             tracing::info!("Extra file in DB (not in FS): {}", path);
         }
-        
+
         Ok(result)
     }
 
@@ -209,15 +227,18 @@ impl Storage {
 
     /// Open a file and return its handle and metadata
     #[instrument]
-    pub async fn open_file(&self, sub_path: &str) -> io::Result<(tokio::fs::File, std::fs::Metadata)> {
+    pub async fn open_file(
+        &self,
+        sub_path: &str,
+    ) -> io::Result<(tokio::fs::File, std::fs::Metadata)> {
         let full_path = self.get_full_path(sub_path);
         let file = tokio::fs::File::open(&full_path).await?;
         let metadata = file.metadata().await?;
-        
+
         if metadata.is_dir() {
             return Err(io::Error::new(io::ErrorKind::Other, "Path is a directory"));
         }
-        
+
         Ok((file, metadata))
     }
 
@@ -225,12 +246,12 @@ impl Storage {
     #[instrument(skip(data))]
     pub async fn save_file(&self, sub_path: &str, data: &[u8]) -> io::Result<()> {
         let full_path = self.get_full_path(sub_path);
-        
+
         // Ensure parent directory exists
         if let Some(parent) = full_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        
+
         tokio::fs::write(full_path, data).await
     }
 
@@ -245,12 +266,12 @@ impl Storage {
     #[instrument]
     pub async fn create_file(&self, sub_path: &str) -> io::Result<()> {
         let full_path = self.get_full_path(sub_path);
-        
+
         // Ensure parent directory exists
         if let Some(parent) = full_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        
+
         tokio::fs::File::create(full_path).await?;
         Ok(())
     }
@@ -260,12 +281,12 @@ impl Storage {
     pub async fn rename_entry(&self, old_path: &str, new_path: &str) -> io::Result<()> {
         let old_full_path = self.get_full_path(old_path);
         let new_full_path = self.get_full_path(new_path);
-        
+
         // Ensure parent directory for the new path exists
         if let Some(parent) = new_full_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        
+
         tokio::fs::rename(old_full_path, new_full_path).await
     }
 
@@ -274,7 +295,7 @@ impl Storage {
     pub async fn remove_entry(&self, sub_path: &str) -> io::Result<()> {
         let full_path = self.get_full_path(sub_path);
         let metadata = tokio::fs::metadata(&full_path).await?;
-        
+
         if metadata.is_dir() {
             tokio::fs::remove_dir_all(full_path).await
         } else {
@@ -286,7 +307,11 @@ impl Storage {
     /// Returns the parent's ID. For paths without a `/`, returns the ID of
     /// the entry matching `sub_path` itself (treated as root-level directory).
     /// Recursively creates ancestor entries as needed.
-    pub async fn get_parent_id(&self, db: &sea_orm::DatabaseConnection, sub_path: &str) -> Result<i32> {
+    pub async fn get_parent_id(
+        &self,
+        db: &sea_orm::DatabaseConnection,
+        sub_path: &str,
+    ) -> Result<i32> {
         let target_path = sub_path.trim_matches('/');
 
         // Determine the directory path we need to resolve
@@ -320,7 +345,8 @@ impl Storage {
             .await
             .ok()
             .and_then(|meta| meta.modified().ok())
-            .map(|t| chrono::DateTime::<chrono::Utc>::from(t).naive_utc());
+            .map(|t| chrono::DateTime::<chrono::Utc>::from(t).naive_utc())
+            .unwrap();
 
         let active = entry::ActiveModel {
             storage_id: Set(self.model.id),
@@ -329,7 +355,7 @@ impl Storage {
             parent_id: Set(parent_id),
             path: Set(dir_path.to_string()),
             entry_type: Set(EntryType::Directory),
-            size: Set(None),
+            size: Set(0),
             tags: Set(Vec::new()),
             modified_at: Set(modified_at),
             created_at: Set(Utc::now().naive_utc()),
@@ -342,7 +368,11 @@ impl Storage {
 
     /// Find or create a database entry for a given sub-path
     #[instrument(skip(self, db))]
-    pub async fn ensure_entry(&self, db: &sea_orm::DatabaseConnection, sub_path: &str) -> Result<entry::Model> {
+    pub async fn ensure_entry(
+        &self,
+        db: &sea_orm::DatabaseConnection,
+        sub_path: &str,
+    ) -> Result<entry::Model> {
         let normalized_path = sub_path.trim_matches('/').to_string();
         let full_path = self.get_full_path(&normalized_path);
 
@@ -365,9 +395,13 @@ impl Storage {
         };
         let metadata = std::fs::metadata(&full_path)?;
 
-        let entry_type = if metadata.is_dir() { EntryType::Directory }
-                        else if metadata.is_file() { EntryType::File }
-                        else { EntryType::Symlink };
+        let entry_type = if metadata.is_dir() {
+            EntryType::Directory
+        } else if metadata.is_file() {
+            EntryType::File
+        } else {
+            EntryType::Symlink
+        };
 
         let active = entry::ActiveModel {
             storage_id: Set(self.model.id),
@@ -376,9 +410,13 @@ impl Storage {
             parent_id: Set(parent_id),
             path: Set(normalized_path),
             entry_type: Set(entry_type),
-            size: Set(if metadata.is_file() { Some(metadata.len() as i64) } else { None }),
+            size: Set(metadata.len().try_into()?),
             tags: Set(Vec::new()),
-            modified_at: Set(metadata.modified().ok().map(|t| chrono::DateTime::<chrono::Utc>::from(t).naive_utc())),
+            modified_at: Set(metadata
+                .modified()
+                .ok()
+                .map(|t| chrono::DateTime::<chrono::Utc>::from(t).naive_utc())
+                .unwrap()),
             created_at: Set(Utc::now().naive_utc()),
             ..Default::default()
         };
@@ -388,7 +426,12 @@ impl Storage {
 
     /// Set tags for an entry, creating it if it doesn't exist in the database
     #[instrument(skip(db, tags))]
-    pub async fn set_tags(&self, db: &sea_orm::DatabaseConnection, sub_path: &str, tags: Vec<i32>) -> Result<i32> {
+    pub async fn set_tags(
+        &self,
+        db: &sea_orm::DatabaseConnection,
+        sub_path: &str,
+        tags: Vec<i32>,
+    ) -> Result<i32> {
         let model = self.ensure_entry(db, sub_path).await?;
         let mut active: entry::ActiveModel = model.into();
         active.tags = Set(tags);

@@ -29,18 +29,16 @@ impl Storage {
 
         // Skip if DB record already has a hash and is not older than FS
         if model.hash.is_some() {
-            if let Some(db_modified) = model.modified_at {
-                if (fs_modified - db_modified).num_seconds() < 1 {
-                    info!(path = sub_path, "Hash up-to-date, skipping");
-                    return Ok((false, model.hash.unwrap()));
-                } else {
-                    info!(
-                        "Hash is calcuated, file is newer: {:?} {:?} {}",
-                        db_modified,
-                        fs_modified,
-                        fs_modified - db_modified
-                    );
-                }
+            if (fs_modified - model.modified_at).num_seconds() < 1 {
+                info!(path = sub_path, "Hash up-to-date, skipping");
+                return Ok((false, model.hash.unwrap()));
+            } else {
+                info!(
+                    "Hash is calcuated, file is newer: {:?} {:?} {}",
+                    model.modified_at,
+                    fs_modified,
+                    fs_modified - model.modified_at
+                );
             }
         }
 
@@ -58,7 +56,7 @@ impl Storage {
 
         let mut active: entry::ActiveModel = model.into();
         active.hash = Set(Some(hash.clone()));
-        active.modified_at = Set(Some(fs_modified));
+        active.modified_at = Set(fs_modified);
         active.update(db).await?;
         info!(path = sub_path, hash = hex::encode(&hash), "Hash updated");
 

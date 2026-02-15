@@ -36,9 +36,9 @@ pub struct Model {
     pub path: String,
     pub hash: Option<Vec<u8>>,
     pub entry_type: EntryType,
-    pub size: Option<i64>,
+    pub size: i64,
     pub tags: Vec<i32>,
-    pub modified_at: Option<DateTime>,
+    pub modified_at: DateTime,
     pub created_at: DateTime,
 }
 

@@ -44,7 +44,7 @@ impl MigrationTrait for Migration {
                             )
                             .not_null(),
                     )
-                    .col(ColumnDef::new(Entry::Size).big_integer())
+                    .col(ColumnDef::new(Entry::Size).big_integer().not_null())
                     .col(
                         ColumnDef::new(Entry::Tags)
                             .array(ColumnType::Integer)
