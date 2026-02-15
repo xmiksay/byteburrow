@@ -1038,6 +1038,19 @@ async fn list_directory_handler(
             )
         })?;
 
+    entries
+        .iter()
+        .filter(|e| e.hash.is_none() && e.entry_type == EntryType::File)
+        .for_each(|e| {
+            state
+                .job_sender
+                .send(crate::job::Job::CheckFile {
+                    storage_id: e.storage_id,
+                    path: e.path.clone(),
+                })
+                .unwrap();
+        });
+
     // Determine output format
     let format = query.format.as_deref().unwrap_or("json");
     let normalized_path = path.trim_matches('/');
@@ -1861,6 +1874,19 @@ async fn share_list_impl(
                 }),
             )
         })?;
+
+    entries
+        .iter()
+        .filter(|e| e.hash.is_none() && e.entry_type == EntryType::File)
+        .for_each(|e| {
+            state
+                .job_sender
+                .send(crate::job::Job::CheckFile {
+                    storage_id: e.storage_id,
+                    path: e.path.clone(),
+                })
+                .unwrap();
+        });
 
     // Transform entries to have paths relative to the share's base path
     let relative_entries: Vec<_> = entries

@@ -49,6 +49,16 @@ const loading = ref(true)
 const saving = ref(false)
 const error = ref<string | null>(null)
 const isFullscreen = ref(false)
+const editorRef = ref<HTMLTextAreaElement | null>(null)
+const previewRef = ref<HTMLElement | null>(null)
+
+const syncScroll = () => {
+  if (!editorRef.value || !previewRef.value) return
+  const editor = editorRef.value
+  const preview = previewRef.value
+  const ratio = editor.scrollTop / (editor.scrollHeight - editor.clientHeight)
+  preview.scrollTop = ratio * (preview.scrollHeight - preview.clientHeight)
+}
 
 const canEdit = computed(() => !props.readOnly)
 
@@ -230,11 +240,31 @@ onMounted(fetchTags)
                v-html="highlightedContent">
           </div>
 
-          <!-- Edit Mode -->
+          <!-- Edit Mode: Markdown Split View -->
+          <div v-else-if="isMarkdown" class="split-editor">
+            <div class="split-editor-pane">
+              <textarea
+                ref="editorRef"
+                v-model="content"
+                class="content-editor"
+                placeholder="Start typing..."
+                spellcheck="false"
+                @scroll="syncScroll"
+              ></textarea>
+            </div>
+            <div class="split-divider"></div>
+            <div
+              ref="previewRef"
+              class="split-preview-pane markdown-body"
+              v-html="highlightedContent"
+            ></div>
+          </div>
+
+          <!-- Edit Mode: Plain textarea for non-markdown -->
           <div v-else class="editor-container">
-            <textarea 
-              v-model="content" 
-              class="content-editor" 
+            <textarea
+              v-model="content"
+              class="content-editor"
               placeholder="Start typing..."
               spellcheck="false"
             ></textarea>
@@ -457,6 +487,29 @@ onMounted(fetchTags)
 
 .error-icon {
   color: #ef4444;
+}
+
+.split-editor {
+  height: 100%;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  overflow: hidden;
+}
+
+.split-editor-pane {
+  height: 100%;
+  overflow: hidden;
+}
+
+.split-divider {
+  width: 1px;
+  background: var(--border-color);
+}
+
+.split-preview-pane {
+  height: 100%;
+  overflow-y: auto;
+  padding: 32px;
 }
 
 .editor-container {
