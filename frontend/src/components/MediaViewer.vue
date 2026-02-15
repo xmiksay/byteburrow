@@ -12,6 +12,7 @@ import { tagService } from '../services/tag'
 import { useAuth } from '../composables/useAuth'
 import TagDialog from './TagDialog.vue'
 import type { Storage, DirectoryEntry, Tag } from '../types'
+import { isVideo as isVideoFile, isAudio as isAudioFile, getBasename, getThumbnailUrl } from '../utils/file'
 import { onMounted } from 'vue'
 
 const { user, token } = useAuth()
@@ -24,15 +25,8 @@ const props = defineProps<{
 
 const emit = defineEmits(['close'])
 
-const isVideo = computed(() => {
-  const ext = props.entry.path.split('.').pop()?.toLowerCase() || ''
-  return ['mp4', 'webm', 'ogv', 'mov', 'mkv', 'avi', 'mpg', 'mpeg'].includes(ext)
-})
-
-const isAudio = computed(() => {
-  const ext = props.entry.path.split('.').pop()?.toLowerCase() || ''
-  return ['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac'].includes(ext)
-})
+const isVideo = computed(() => isVideoFile(props.entry.path))
+const isAudio = computed(() => isAudioFile(props.entry.path))
 
 const mediaUrl = computed(() => {
   let url = ''
@@ -52,16 +46,6 @@ const isFullscreen = ref(false)
 
 const toggleFullscreen = () => {
   isFullscreen.value = !isFullscreen.value
-}
-
-const getBasename = (path: string) => {
-  return path.split('/').filter(s => s).pop() || path
-}
-
-const getThumbnailUrl = (entry: DirectoryEntry, size: 'small' | 'large' | 'mini') => {
-  if (!entry.hash || entry.hash.length === 0) return null
-  const hex = Array.from(entry.hash).map(b => b.toString(16).padStart(2, '0')).join('')
-  return `/api/storage/thumbnail/${hex}/${size}`
 }
 
 // Tags logic

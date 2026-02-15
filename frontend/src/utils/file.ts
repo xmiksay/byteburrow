@@ -53,13 +53,26 @@ export const isImage = (path: string): boolean => {
 }
 
 /**
+ * Check if file is a video
+ */
+export const isVideo = (path: string): boolean => {
+    const ext = path.split('.').pop()?.toLowerCase() || ''
+    return ['mp4', 'webm', 'ogv', 'mov', 'mkv', 'avi', 'mpg', 'mpeg', 'wmv', 'flv'].includes(ext)
+}
+
+/**
+ * Check if file is audio
+ */
+export const isAudio = (path: string): boolean => {
+    const ext = path.split('.').pop()?.toLowerCase() || ''
+    return ['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac'].includes(ext)
+}
+
+/**
  * Check if file is audio or video
  */
 export const isMediaFile = (path: string): boolean => {
-    const ext = path.split('.').pop()?.toLowerCase() || ''
-    const isAudio = ['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac'].includes(ext)
-    const isVideo = ['mp4', 'webm', 'ogv', 'mov', 'mkv', 'avi', 'mpg'].includes(ext)
-    return isAudio || isVideo
+    return isAudio(path) || isVideo(path)
 }
 
 /**

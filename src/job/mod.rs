@@ -52,7 +52,12 @@ impl JobRunner {
                 }
             }
 
-            Job::ChangedHash(hash) => {}
+            Job::ChangedHash(hash) => {
+                // Create thumbnail if image
+
+                // Detect faces if images
+                // Recognise person if faces detected
+            }
         }
 
         Ok(())
