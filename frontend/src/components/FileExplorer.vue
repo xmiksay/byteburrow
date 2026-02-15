@@ -94,6 +94,12 @@ const selectStorage = (storage: Storage) => {
   router.push({ name: 'files', params: { storageId: storage.id, path: '' } })
 }
 
+const onStorageSelect = (event: Event) => {
+  const id = Number((event.target as HTMLSelectElement).value)
+  const storage = storages.value.find(s => s.id === id)
+  if (storage) selectStorage(storage)
+}
+
 const fetchEntries = async () => {
   if (!selectedStorage.value) return
   
@@ -275,8 +281,8 @@ const deleteEntry = async (entry: DirectoryEntry) => {
     <div class="explorer-header">
       <div class="storage-selector glass-panel">
         <HardDrive :size="18" />
-        <select v-model="selectedStorage" @change="selectedStorage && selectStorage(selectedStorage)" class="storage-select">
-          <option v-for="s in storages" :key="s.id" :value="s">{{ s.name }}</option>
+        <select :value="selectedStorage?.id" @change="onStorageSelect($event)" class="storage-select">
+          <option v-for="s in storages" :key="s.id" :value="s.id">{{ s.name }}</option>
         </select>
       </div>
 

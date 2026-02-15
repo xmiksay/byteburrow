@@ -104,6 +104,12 @@ const selectShare = (share: Shared) => {
   router.push({ name: 'shared', params: { shareId: share.id, path: '' } })
 }
 
+const onShareSelect = (event: Event) => {
+  const id = Number((event.target as HTMLSelectElement).value)
+  const share = shares.value.find(s => s.id === id)
+  if (share) selectShare(share)
+}
+
 const fetchEntries = async () => {
   if (!selectedShare.value) return
   
@@ -293,8 +299,8 @@ onMounted(() => {
     <div class="explorer-header">
       <div class="share-selector glass-panel">
         <Share2 :size="18" />
-        <select v-model="selectedShare" @change="selectedShare && selectShare(selectedShare)" class="share-select">
-          <option v-for="s in shares" :key="s.id" :value="s">{{ getShareLabel(s) }}</option>
+        <select :value="selectedShare?.id" @change="onShareSelect($event)" class="share-select">
+          <option v-for="s in shares" :key="s.id" :value="s.id">{{ getShareLabel(s) }}</option>
         </select>
         <div v-if="selectedShare" class="share-meta">
           <span v-if="selectedShare.can_write" class="permission write" title="Write Access">

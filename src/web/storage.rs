@@ -2269,7 +2269,7 @@ async fn trigger_hash_handler(
 
     state
         .job_sender
-        .send(crate::job::Job::CalculateHash {
+        .send(crate::job::Job::CheckFile {
             storage_id,
             path: path.trim_matches('/').to_string(),
         })
