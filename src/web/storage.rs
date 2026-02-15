@@ -2035,8 +2035,20 @@ async fn share_index_impl(
     state: Arc<AppState>,
     req: Request<Body>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let (_share, entry_model, storage) =
-        get_share_context(&share_id, auth.as_ref(), &state).await?;
+    let ctx = get_share_context(&share_id, auth.as_ref(), &state).await;
+    // If auth is required (numeric share ID) but missing, return proper basic auth challenge
+    let (_share, entry_model, storage) = match ctx {
+        Ok(ctx) => ctx,
+        Err((StatusCode::UNAUTHORIZED, _)) => {
+            return Ok((
+                StatusCode::UNAUTHORIZED,
+                [(header::WWW_AUTHENTICATE, "Basic realm=\"Cloud\"")],
+                "Authentication required",
+            )
+                .into_response());
+        }
+        Err(e) => return Err(e),
+    };
 
     let base_path = entry_model.path.trim_matches('/');
     let sub_path_clean = sub_path.trim_matches('/');
