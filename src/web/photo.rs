@@ -76,7 +76,7 @@ async fn list_photos(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<PhotoResponse>>, (StatusCode, Json<ErrorResponse>)> {
     let photos = photo::Entity::find()
-        .order_by_desc(photo::Column::Date)
+        .filter(photo::Column::Date.is_null())
         .all(&state.db)
         .await
         .map_err(db_error)?;

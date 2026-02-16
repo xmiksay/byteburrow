@@ -36,7 +36,7 @@ const routes: RouteRecordRaw[] = [
         meta: { title: 'Shared with Me' }
     },
     {
-        path: '/photos',
+        path: '/photos/:year?/:month?/:day?',
         name: 'photos',
         component: PhotoLibrary,
         meta: { title: 'Photos' }

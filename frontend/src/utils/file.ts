@@ -72,7 +72,7 @@ export const isAudio = (path: string): boolean => {
  * Check if file is audio or video
  */
 export const isMediaFile = (path: string): boolean => {
-    return isAudio(path) || isVideo(path)
+    return isImage(path) || isAudio(path) || isVideo(path)
 }
 
 /**

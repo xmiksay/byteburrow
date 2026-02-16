@@ -1,18 +1,19 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { 
-  X, 
-  Maximize2, 
+import {
+  X,
+  Maximize2,
   Minimize2,
   Music,
   Video,
+  ImageIcon,
   Tag as TagIcon
 } from 'lucide-vue-next'
 import { tagService } from '../services/tag'
 import { useAuth } from '../composables/useAuth'
 import TagDialog from './TagDialog.vue'
 import type { Storage, DirectoryEntry, Tag } from '../types'
-import { isVideo as isVideoFile, isAudio as isAudioFile, getBasename, getThumbnailUrl } from '../utils/file'
+import { isVideo as isVideoFile, isAudio as isAudioFile, isImage as isImageFile, getBasename, getThumbnailUrl } from '../utils/file'
 import { onMounted } from 'vue'
 
 const { user, token } = useAuth()
@@ -27,6 +28,7 @@ const emit = defineEmits(['close'])
 
 const isVideo = computed(() => isVideoFile(props.entry.path))
 const isAudio = computed(() => isAudioFile(props.entry.path))
+const isImg = computed(() => isImageFile(props.entry.path))
 
 const mediaUrl = computed(() => {
   let url = ''
@@ -73,7 +75,8 @@ onMounted(fetchTags)
       <header class="viewer-header">
         <div class="file-info">
           <Video v-if="isVideo" :size="20" class="file-icon" />
-          <Music v-else :size="20" class="file-icon" />
+          <Music v-else-if="isAudio" :size="20" class="file-icon" />
+          <ImageIcon v-else :size="20" class="file-icon" />
           <div class="file-meta">
             <h3>{{ getBasename(entry.path) }}</h3>
             <span class="path-label">{{ entry.path }}</span>
@@ -91,7 +94,7 @@ onMounted(fetchTags)
             <TagIcon :size="20" />
           </button>
 
-          <button v-if="isVideo" class="btn-icon" @click="toggleFullscreen" :title="isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'">
+          <button v-if="isVideo || isImg" class="btn-icon" @click="toggleFullscreen" :title="isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'">
             <Minimize2 v-if="isFullscreen" :size="20" />
             <Maximize2 v-else :size="20" />
           </button>
@@ -103,8 +106,12 @@ onMounted(fetchTags)
       </header>
 
       <div class="viewer-body">
-        <div v-if="isVideo" class="video-wrapper">
-          <video 
+        <div v-if="isImg" class="image-wrapper">
+          <img :src="mediaUrl" :alt="getBasename(entry.path)" class="image-viewer" />
+        </div>
+
+        <div v-else-if="isVideo" class="video-wrapper">
+          <video
             ref="videoRef"
             :src="mediaUrl"
             class="video-player"
@@ -134,7 +141,7 @@ onMounted(fetchTags)
 
       <footer class="viewer-footer">
         <div class="media-stats">
-          <span>{{ isVideo ? 'Video' : 'Audio' }} Player</span>
+          <span>{{ isVideo ? 'Video' : isAudio ? 'Audio' : 'Image' }} Viewer</span>
           <span class="divider"></span>
           <span>{{ entry.size ? (entry.size / (1024 * 1024)).toFixed(2) + ' MB' : '' }}</span>
         </div>
@@ -269,6 +276,21 @@ onMounted(fetchTags)
   background: #000;
   position: relative;
   overflow: hidden;
+}
+
+.image-wrapper {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.image-viewer {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
 }
 
 .video-wrapper {

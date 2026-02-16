@@ -1,24 +1,53 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { Camera, ChevronLeft, ChevronRight, Calendar, MapPin, X } from 'lucide-vue-next'
 import { photoService } from '../services/photo'
 import type { Photo } from '../types'
 import { getBasename } from '../utils/file'
 
+const route = useRoute()
+const router = useRouter()
+
 const photos = ref<Photo[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
 
-// Date navigation
-const now = new Date()
-const selectedYear = ref(now.getFullYear())
+// Date navigation — synced with route params
+const selectedYear = ref<number | null>(null)
 const selectedMonth = ref<number | null>(null)
 const selectedDay = ref<number | null>(null)
+
+const initFromRoute = () => {
+  const y = route.params.year ? parseInt(route.params.year as string) : null
+  const m = route.params.month ? parseInt(route.params.month as string) : null
+  const d = route.params.day ? parseInt(route.params.day as string) : null
+  selectedYear.value = y && !isNaN(y) ? y : null
+  selectedMonth.value = m && !isNaN(m) ? m : null
+  selectedDay.value = d && !isNaN(d) ? d : null
+}
+
+initFromRoute()
+
+const pushRoute = () => {
+  const params: Record<string, string> = {}
+  if (selectedYear.value !== null) {
+    params.year = String(selectedYear.value)
+    if (selectedMonth.value !== null) {
+      params.month = String(selectedMonth.value)
+      if (selectedDay.value !== null) {
+        params.day = String(selectedDay.value)
+      }
+    }
+  }
+  router.replace({ name: 'photos', params })
+}
 
 // Lightbox
 const lightboxPhoto = ref<Photo | null>(null)
 
 const dateLabel = computed(() => {
+  if (selectedYear.value === null) return 'All Photos'
   if (selectedDay.value !== null && selectedMonth.value !== null) {
     const d = new Date(selectedYear.value, selectedMonth.value - 1, selectedDay.value)
     return d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
@@ -34,7 +63,9 @@ const fetchPhotos = async () => {
   try {
     loading.value = true
     error.value = null
-    if (selectedDay.value !== null && selectedMonth.value !== null) {
+    if (selectedYear.value === null) {
+      photos.value = await photoService.listAll()
+    } else if (selectedDay.value !== null && selectedMonth.value !== null) {
       photos.value = await photoService.listByDay(selectedYear.value, selectedMonth.value, selectedDay.value)
     } else if (selectedMonth.value !== null) {
       photos.value = await photoService.listByMonth(selectedYear.value, selectedMonth.value)
@@ -58,29 +89,78 @@ const originalUrl = (photo: Photo) => {
 }
 
 const prevYear = () => {
+  if (selectedYear.value === null) return
   selectedYear.value--
   selectedMonth.value = null
   selectedDay.value = null
+  pushRoute()
 }
 
 const nextYear = () => {
+  if (selectedYear.value === null) return
   selectedYear.value++
   selectedMonth.value = null
   selectedDay.value = null
+  pushRoute()
+}
+
+const showAll = () => {
+  selectedYear.value = null
+  selectedMonth.value = null
+  selectedDay.value = null
+  pushRoute()
+}
+
+const clearYear = () => {
+  showAll()
+}
+
+const selectYear = (year: number) => {
+  selectedYear.value = year
+  selectedMonth.value = null
+  selectedDay.value = null
+  pushRoute()
 }
 
 const selectMonth = (month: number) => {
   selectedMonth.value = month
   selectedDay.value = null
+  pushRoute()
 }
 
 const clearMonth = () => {
   selectedMonth.value = null
   selectedDay.value = null
+  pushRoute()
 }
 
 const clearDay = () => {
   selectedDay.value = null
+  pushRoute()
+}
+
+// HTML5 date picker sync
+const dateInputValue = computed(() => {
+  if (selectedYear.value === null) return ''
+  const y = String(selectedYear.value).padStart(4, '0')
+  if (selectedMonth.value === null) return `${y}-01-01`
+  const m = String(selectedMonth.value).padStart(2, '0')
+  if (selectedDay.value === null) return `${y}-${m}-01`
+  const d = String(selectedDay.value).padStart(2, '0')
+  return `${y}-${m}-${d}`
+})
+
+const onDateInput = (e: Event) => {
+  const val = (e.target as HTMLInputElement).value
+  if (!val) {
+    showAll()
+    return
+  }
+  const parts = val.split('-')
+  selectedYear.value = parseInt(parts[0])
+  selectedMonth.value = parseInt(parts[1])
+  selectedDay.value = parseInt(parts[2])
+  pushRoute()
 }
 
 const openLightbox = (photo: Photo) => {
@@ -146,6 +226,20 @@ const photosByDate = computed(() => {
   return groups
 })
 
+// Available years from current photos (for year picker when showing all)
+const availableYears = computed(() => {
+  const years = new Set<number>()
+  for (const p of photos.value) {
+    if (p.date) {
+      const parts = p.date.split('-')
+      if (parts.length >= 1) {
+        years.add(parseInt(parts[0]))
+      }
+    }
+  }
+  return Array.from(years).sort((a, b) => b - a)
+})
+
 // Available months from current photos (for month picker)
 const availableMonths = computed(() => {
   const months = new Set<number>()
@@ -174,6 +268,12 @@ watch([selectedYear, selectedMonth, selectedDay], () => {
   fetchPhotos()
 })
 
+// Sync state when navigating back/forward
+watch(() => route.params, () => {
+  if (route.name !== 'photos') return
+  initFromRoute()
+})
+
 onMounted(() => {
   fetchPhotos()
   window.addEventListener('keydown', onKeydown)
@@ -188,14 +288,20 @@ onUnmounted(() => {
   <div class="photo-library">
     <div class="library-header">
       <div class="date-nav glass-panel">
-        <button class="btn-icon" @click="prevYear" title="Previous Year">
+        <button class="btn-icon" @click="prevYear" :disabled="selectedYear === null" title="Previous Year">
           <ChevronLeft :size="18" />
         </button>
 
         <div class="date-breadcrumbs">
-          <span class="date-segment" :class="{ clickable: selectedMonth !== null }" @click="clearMonth">
-            {{ selectedYear }}
+          <span class="date-segment" :class="{ clickable: selectedYear !== null }" @click="clearYear">
+            All
           </span>
+          <template v-if="selectedYear !== null">
+            <ChevronRight :size="14" class="date-sep" />
+            <span class="date-segment" :class="{ clickable: selectedMonth !== null }" @click="clearMonth">
+              {{ selectedYear }}
+            </span>
+          </template>
           <template v-if="selectedMonth !== null">
             <ChevronRight :size="14" class="date-sep" />
             <span class="date-segment" :class="{ clickable: selectedDay !== null }" @click="clearDay">
@@ -208,12 +314,28 @@ onUnmounted(() => {
           </template>
         </div>
 
-        <button class="btn-icon" @click="nextYear" title="Next Year">
+        <button class="btn-icon" @click="nextYear" :disabled="selectedYear === null" title="Next Year">
           <ChevronRight :size="18" />
+        </button>
+
+        <label class="date-picker-btn" title="Pick a date">
+          <Calendar :size="16" />
+          <input type="date" :value="dateInputValue" @input="onDateInput" class="date-input" />
+        </label>
+      </div>
+
+      <div v-if="selectedYear === null && availableYears.length > 0" class="month-picker glass-panel">
+        <button
+          v-for="y in availableYears"
+          :key="y"
+          class="month-btn"
+          @click="selectYear(y)"
+        >
+          {{ y }}
         </button>
       </div>
 
-      <div v-if="selectedMonth === null && availableMonths.length > 0" class="month-picker glass-panel">
+      <div v-if="selectedYear !== null && selectedMonth === null && availableMonths.length > 0" class="month-picker glass-panel">
         <button
           v-for="m in availableMonths"
           :key="m"
@@ -366,9 +488,37 @@ onUnmounted(() => {
   align-items: center;
 }
 
-.btn-icon:hover {
+.btn-icon:hover:not(:disabled) {
   color: var(--text-primary);
   background: rgba(255, 255, 255, 0.05);
+}
+
+.btn-icon:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.date-picker-btn {
+  display: flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-left: 1px solid var(--border-color);
+  margin-left: 4px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  position: relative;
+}
+
+.date-picker-btn:hover {
+  color: var(--accent-color);
+}
+
+.date-input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  width: 100%;
+  cursor: pointer;
 }
 
 .month-picker {
