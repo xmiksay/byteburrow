@@ -17,7 +17,8 @@ import {
   Trash2,
   X,
   Save,
-  Tag as TagIcon
+  Tag as TagIcon,
+  Search
 } from 'lucide-vue-next'
 import { useRoute, useRouter } from 'vue-router'
 import { storageService } from '../services/storage'
@@ -164,7 +165,17 @@ const getFileUrl = (entry: DirectoryEntry, mode: 'show' | 'download') => {
   return `/api/storage/share/${selectedShare.value.id}/${mode}/${entry.path}`
 }
 
-const sortedEntries = computed(() => sortEntries(entries.value))
+const sortedEntries = computed(() => {
+  let result = entries.value
+  const nameQuery = filterName.value.trim().toLowerCase()
+  if (nameQuery) {
+    result = result.filter(e => getBasename(e.path).toLowerCase().includes(nameQuery))
+  }
+  if (filterTags.value.length > 0) {
+    result = result.filter(e => filterTags.value.every(t => e.tags.includes(t)))
+  }
+  return sortEntries(result)
+})
 
 const getShareLabel = (share: Shared) => {
   const basename = share.path ? getBasename(share.path) : 'Root'
@@ -262,6 +273,19 @@ const handleDelete = async () => {
   }
 }
 
+// Filter state
+const filterName = ref('')
+const filterTags = ref<number[]>([])
+
+const toggleFilterTag = (tagId: number) => {
+  const idx = filterTags.value.indexOf(tagId)
+  if (idx === -1) {
+    filterTags.value.push(tagId)
+  } else {
+    filterTags.value.splice(idx, 1)
+  }
+}
+
 // Tags logic
 const allTags = ref<Tag[]>([])
 
@@ -335,6 +359,29 @@ onMounted(() => {
         <button class="btn-icon glass-panel" @click="openCreateModal('File')" title="New File">
           <FilePlus :size="18" />
         </button>
+      </div>
+    </div>
+
+    <div v-if="entries.length > 0 || allTags.length > 0" class="filter-bar glass-panel">
+      <div class="filter-input-wrapper">
+        <Search :size="16" class="filter-input-icon" />
+        <input
+          v-model="filterName"
+          type="text"
+          class="filter-input"
+          placeholder="Filter by name..."
+        />
+      </div>
+      <div v-if="allTags.length > 0" class="filter-tags">
+        <span
+          v-for="tag in allTags"
+          :key="tag.id"
+          class="filter-tag"
+          :class="{ active: filterTags.includes(tag.id) }"
+          @click="toggleFilterTag(tag.id)"
+        >
+          {{ tag.name }}
+        </span>
       </div>
     </div>
 
@@ -437,9 +484,15 @@ onMounted(() => {
           </div>
         </div>
 
-        <div v-if="entries.length === 0 && !loading" class="empty-directory">
-          <Folder :size="48" style="opacity: 0.2" />
-          <p>This directory is empty</p>
+        <div v-if="sortedEntries.length === 0 && !loading" class="empty-directory">
+          <template v-if="entries.length === 0">
+            <Folder :size="48" style="opacity: 0.2" />
+            <p>This directory is empty</p>
+          </template>
+          <template v-else>
+            <Search :size="48" style="opacity: 0.2" />
+            <p>No matching files</p>
+          </template>
         </div>
       </div>
     </div>
@@ -633,6 +686,71 @@ onMounted(() => {
 
 .write-actions .btn-icon {
   padding: 8px;
+}
+
+/* Filter bar */
+.filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+}
+
+.filter-input-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 180px;
+}
+
+.filter-input-icon {
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.filter-input {
+  background: none;
+  border: none;
+  color: var(--text-primary);
+  outline: none;
+  font-size: 0.8125rem;
+  width: 100%;
+}
+
+.filter-input::placeholder {
+  color: var(--text-secondary);
+  opacity: 0.6;
+}
+
+.filter-tags {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  overflow: hidden;
+}
+
+.filter-tag {
+  font-size: 0.65rem;
+  padding: 2px 8px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-secondary);
+  border-radius: 4px;
+  border: 1px solid var(--border-color);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.2s;
+  user-select: none;
+}
+
+.filter-tag:hover {
+  background: rgba(59, 130, 246, 0.08);
+  color: var(--text-primary);
+}
+
+.filter-tag.active {
+  background: rgba(59, 130, 246, 0.15);
+  color: var(--accent-color);
+  border-color: rgba(59, 130, 246, 0.3);
 }
 
 .explorer-content {

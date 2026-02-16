@@ -45,10 +45,17 @@ impl JobRunner {
     async fn process(&self, job: Job) -> anyhow::Result<()> {
         match job {
             Job::CheckFile { storage_id, path } => {
-                let storage = Storage::find_by_id(&self.db, storage_id).await?;
-                let (updated, hash) = storage.calculate_hash(self.db.as_ref(), &path).await?;
-                if updated {
-                    info!(path = &path, hash = hex::encode(&hash), "Hash updated");
+                // TODO: make this configurable
+                if !path.contains(".git")
+                    && !path.contains(".cache")
+                    && !path.contains("node_nodules")
+                {
+                    let storage = Storage::find_by_id(&self.db, storage_id).await?;
+                    // Path must be file
+                    let (updated, hash) = storage.calculate_hash(self.db.as_ref(), &path).await?;
+                    if updated {
+                        info!(path = &path, hash = hex::encode(&hash), "Hash updated");
+                    }
                 }
             }
 
