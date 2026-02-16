@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Camera, ChevronLeft, ChevronRight, Calendar, MapPin, X } from 'lucide-vue-next'
+import { Camera, ChevronLeft, ChevronRight, Calendar, MapPin, X, RefreshCw } from 'lucide-vue-next'
 import { photoService } from '../services/photo'
+import { useAuth } from '../composables/useAuth'
 import type { Photo } from '../types'
 import { getBasename } from '../utils/file'
+
+const { user } = useAuth()
 
 const route = useRoute()
 const router = useRouter()
@@ -14,6 +17,7 @@ const loading = ref(false)
 const error = ref<string | null>(null)
 
 // Date navigation — synced with route params
+const now = new Date()
 const selectedYear = ref<number | null>(null)
 const selectedMonth = ref<number | null>(null)
 const selectedDay = ref<number | null>(null)
@@ -27,7 +31,13 @@ const initFromRoute = () => {
   selectedDay.value = d && !isNaN(d) ? d : null
 }
 
-initFromRoute()
+// Default to current year/month when navigating to /photos with no params
+if (!route.params.year) {
+  selectedYear.value = now.getFullYear()
+  selectedMonth.value = now.getMonth() + 1
+} else {
+  initFromRoute()
+}
 
 const pushRoute = () => {
   const params: Record<string, string> = {}
@@ -169,6 +179,20 @@ const openLightbox = (photo: Photo) => {
 
 const closeLightbox = () => {
   lightboxPhoto.value = null
+}
+
+const regenerating = ref(false)
+
+const regenerateThumbnail = async () => {
+  if (!lightboxPhoto.value || regenerating.value) return
+  regenerating.value = true
+  try {
+    await photoService.regenerateThumbnail(lightboxPhoto.value.hash)
+  } catch (err: any) {
+    console.error('Failed to regenerate thumbnail:', err)
+  } finally {
+    regenerating.value = false
+  }
 }
 
 // Flat list of all photos for prev/next navigation
@@ -391,9 +415,14 @@ onUnmounted(() => {
 
     <!-- Lightbox -->
     <div v-if="lightboxPhoto" class="lightbox-overlay" @click.self="closeLightbox">
-      <button class="lightbox-close" @click="closeLightbox">
-        <X :size="24" />
-      </button>
+      <div class="lightbox-top-actions">
+        <button v-if="user?.admin" class="lightbox-action" :class="{ spinning: regenerating }" @click="regenerateThumbnail" title="Regenerate Thumbnail">
+          <RefreshCw :size="20" />
+        </button>
+        <button class="lightbox-close" @click="closeLightbox">
+          <X :size="24" />
+        </button>
+      </div>
       <button v-if="lightboxIndex > 0" class="lightbox-nav lightbox-prev" @click="prevPhoto">
         <ChevronLeft :size="28" />
       </button>
@@ -659,22 +688,35 @@ onUnmounted(() => {
   padding: 40px;
 }
 
-.lightbox-close {
+.lightbox-top-actions {
   position: absolute;
   top: 16px;
   right: 16px;
+  display: flex;
+  gap: 8px;
+  z-index: 4001;
+}
+
+.lightbox-close,
+.lightbox-action {
   padding: 8px;
   background: rgba(255, 255, 255, 0.1);
   border: none;
   border-radius: 8px;
   color: var(--text-primary);
   cursor: pointer;
-  z-index: 4001;
-  transition: background 0.2s;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
 }
 
-.lightbox-close:hover {
+.lightbox-close:hover,
+.lightbox-action:hover {
   background: rgba(255, 255, 255, 0.2);
+}
+
+.lightbox-action.spinning {
+  animation: spin 1s linear infinite;
 }
 
 .lightbox-nav {

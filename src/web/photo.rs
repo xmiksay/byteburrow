@@ -1,10 +1,13 @@
 use crate::auth::Auth;
+use crate::config::Config;
 use crate::entity::{entry, photo};
-use crate::web::{AppState, ErrorResponse};
+use crate::job::Job;
+use crate::storage::thumbnail;
+use crate::web::{require_admin, AppState, ErrorResponse};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use chrono::NaiveDate;
@@ -30,6 +33,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/list/:year", get(list_by_year))
         .route("/list/:year/:month", get(list_by_year_month))
         .route("/list/:year/:month/:day", get(list_by_year_month_day))
+        .route("/regenerate/:hash", post(regenerate_thumbnail))
 }
 
 async fn enrich_photos(
@@ -165,6 +169,55 @@ async fn list_by_year_month_day(
         .map_err(db_error)?;
 
     Ok(Json(enrich_photos(&state.db, photos).await?))
+}
+
+/// Regenerate thumbnail for a photo
+/// POST /api/photo/regenerate/:hash
+async fn regenerate_thumbnail(
+    auth: Auth,
+    Path(hash): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    require_admin(&auth)?;
+
+    let hash_bytes = hex::decode(&hash).map_err(|_| bad_request("Invalid hash"))?;
+
+    // Verify the photo exists
+    photo::Entity::find_by_id(hash_bytes.clone())
+        .one(&state.db)
+        .await
+        .map_err(db_error)?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "Photo not found".to_string(),
+                }),
+            )
+        })?;
+
+    // Delete existing thumbnails
+    let config = Config::get();
+    let thumbnail_dir = std::path::PathBuf::from(&config.thumbnail_storage);
+    for size in ["mini", "small", "large"] {
+        let path = thumbnail::get_thumbnail_path(&thumbnail_dir, &hash, size);
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    // Dispatch job to regenerate
+    state
+        .job_sender
+        .send(Job::ChangedHash(hash_bytes))
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Failed to dispatch regeneration job".to_string(),
+                }),
+            )
+        })?;
+
+    Ok(StatusCode::ACCEPTED)
 }
 
 fn db_error(e: sea_orm::DbErr) -> (StatusCode, Json<ErrorResponse>) {

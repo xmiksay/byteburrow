@@ -53,7 +53,23 @@ A modern, high-performance personal cloud storage and file management system bui
 DATABASE_URL=postgres://user:password@localhost/cloud_db
 SERVER_ADDR=127.0.0.1:3000
 FRONTEND_DIST=./frontend/dist
+SALT=your-random-secret-string
+THUMBNAIL_STORAGE=/path/to/thumbnails
+BASE_URL=http://localhost:3000
+TOKEN_EXPIRATION_DAYS=30
+TOKEN_LENGTH=32
 ```
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `DATABASE_URL` | Yes | — | PostgreSQL connection string |
+| `SERVER_ADDR` | No | `0.0.0.0:3000` | Address and port the server binds to |
+| `FRONTEND_DIST` | No | `frontend/dist` | Path to the built frontend assets |
+| `SALT` | Yes | — | Secret string used for password hashing |
+| `THUMBNAIL_STORAGE` | No | `/tmp/thumbnails` | Directory where generated image thumbnails are stored |
+| `BASE_URL` | No | `http://localhost:3000` | Public base URL of the application |
+| `TOKEN_EXPIRATION_DAYS` | No | `30` | How long auth tokens remain valid |
+| `TOKEN_LENGTH` | No | `32` | Length of generated auth tokens |
 2. Run migrations:
 ```bash
 cargo run --bin cloud-migration up

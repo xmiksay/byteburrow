@@ -16,5 +16,9 @@ export const photoService = {
 
     async listByDay(year: number, month: number, day: number): Promise<Photo[]> {
         return api.get<Photo[]>(`/api/photo/list/${year}/${month}/${day}`)
+    },
+
+    async regenerateThumbnail(hash: string): Promise<void> {
+        await api.post(`/api/photo/regenerate/${hash}`)
     }
 }

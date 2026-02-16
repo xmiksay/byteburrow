@@ -5,7 +5,7 @@ use std::sync::Arc;
 use image::imageops::FilterType;
 use image::GenericImageView;
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 use tracing::{error, info, instrument, warn};
 
 use crate::config::Config;
@@ -24,16 +24,22 @@ pub struct JobRunner {
     rx: mpsc::UnboundedReceiver<Job>,
     db: Arc<DatabaseConnection>,
     tx: JobSender,
+    semaphore: Arc<Semaphore>,
 }
 
 impl JobRunner {
     pub fn new(db: DatabaseConnection) -> (Self, JobSender) {
         let (tx, rx) = mpsc::unbounded_channel();
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        info!(workers, "Job runner concurrency");
         (
             Self {
                 rx,
                 db: Arc::new(db),
                 tx: tx.clone(),
+                semaphore: Arc::new(Semaphore::new(workers)),
             },
             tx,
         )
@@ -42,16 +48,22 @@ impl JobRunner {
     pub async fn run(mut self) {
         info!("Job runner started");
         while let Some(job) = self.rx.recv().await {
-            info!(?job, "Processing job");
-            if let Err(e) = self.process(job).await {
-                error!("Job failed: {e}");
-            }
+            let permit = self.semaphore.clone().acquire_owned().await.unwrap();
+            let db = self.db.clone();
+            let tx = self.tx.clone();
+            tokio::spawn(async move {
+                info!(?job, "Processing job");
+                if let Err(e) = Self::process_job(&db, &tx, job).await {
+                    error!("Job failed: {e}");
+                }
+                drop(permit);
+            });
         }
         info!("Job runner stopped");
     }
 
-    #[instrument(skip(self))]
-    async fn process(&self, job: Job) -> anyhow::Result<()> {
+    #[instrument(skip(db, tx))]
+    async fn process_job(db: &DatabaseConnection, tx: &JobSender, job: Job) -> anyhow::Result<()> {
         match job {
             Job::CheckFile { storage_id, path } => {
                 // TODO: make this configurable
@@ -59,30 +71,30 @@ impl JobRunner {
                     && !path.contains(".cache")
                     && !path.contains("node_nodules")
                 {
-                    let storage = Storage::find_by_id(&self.db, storage_id).await?;
-                    let (updated, hash) = storage.calculate_hash(self.db.as_ref(), &path).await?;
+                    let storage = Storage::find_by_id(db, storage_id).await?;
+                    let (updated, hash) = storage.calculate_hash(db, &path).await?;
                     if updated {
                         info!(path = &path, hash = hex::encode(&hash), "Hash updated");
-                        let _ = self.tx.send(Job::ChangedHash(hash));
+                        let _ = tx.send(Job::ChangedHash(hash));
                     }
                 }
             }
 
             Job::ChangedHash(ref hash_bytes) => {
-                self.process_changed_hash(hash_bytes).await?;
+                Self::process_changed_hash(db, hash_bytes).await?;
             }
         }
 
         Ok(())
     }
 
-    async fn process_changed_hash(&self, hash_bytes: &[u8]) -> anyhow::Result<()> {
+    async fn process_changed_hash(db: &DatabaseConnection, hash_bytes: &[u8]) -> anyhow::Result<()> {
         let hash_hex = hex::encode(hash_bytes);
 
         // Find entry with this hash
         let entry = entry::Entity::find()
             .filter(entry::Column::Hash.eq(hash_bytes.to_vec()))
-            .one(self.db.as_ref())
+            .one(db)
             .await?;
 
         let entry = match entry {
@@ -99,7 +111,7 @@ impl JobRunner {
         }
 
         // Resolve full file path
-        let storage = Storage::find_by_id(&self.db, entry.storage_id).await?;
+        let storage = Storage::find_by_id(db, entry.storage_id).await?;
         let full_path = storage.get_full_path(&entry.path);
 
         info!(path = &entry.path, "Processing image for photo library");
@@ -109,7 +121,7 @@ impl JobRunner {
 
         // Upsert photo record
         let existing = photo::Entity::find_by_id(hash_bytes.to_vec())
-            .one(self.db.as_ref())
+            .one(db)
             .await?;
 
         if existing.is_some() {
@@ -120,7 +132,7 @@ impl JobRunner {
                 date: Set(date),
                 ..Default::default()
             };
-            active.update(self.db.as_ref()).await?;
+            active.update(db).await?;
         } else {
             let active = photo::ActiveModel {
                 hash: Set(hash_bytes.to_vec()),
@@ -129,7 +141,7 @@ impl JobRunner {
                 date: Set(date),
                 keywords: Set(vec![]),
             };
-            active.insert(self.db.as_ref()).await?;
+            active.insert(db).await?;
         }
 
         info!(
