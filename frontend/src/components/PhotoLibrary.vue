@@ -74,10 +74,6 @@ const selectMonth = (month: number) => {
   selectedDay.value = null
 }
 
-const selectDay = (day: number) => {
-  selectedDay.value = day
-}
-
 const clearMonth = () => {
   selectedMonth.value = null
   selectedDay.value = null
