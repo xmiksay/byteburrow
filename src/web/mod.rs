@@ -225,7 +225,7 @@ pub async fn health_handler(State(state): State<Arc<AppState>>) -> impl IntoResp
 
     Json(serde_json::json!({
         "status": "ok",
-        "service": "cloud",
+        "service": "byteburrow",
         "database": db_status,
     }))
 }

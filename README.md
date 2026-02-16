@@ -1,4 +1,4 @@
-# Cloud System
+# ByteBurrow
 
 A modern, high-performance personal cloud storage and file management system built with Rust and Vue 3.
 
@@ -50,7 +50,7 @@ A modern, high-performance personal cloud storage and file management system bui
 ### Backend Configuration
 1. Create a `.env` file in the root directory:
 ```env
-DATABASE_URL=postgres://user:password@localhost/cloud_db
+DATABASE_URL=postgres://user:password@localhost/byteburrow
 SERVER_ADDR=127.0.0.1:3000
 FRONTEND_DIST=./frontend/dist
 SALT=your-random-secret-string
@@ -72,11 +72,11 @@ TOKEN_LENGTH=32
 | `TOKEN_LENGTH` | No | `32` | Length of generated auth tokens |
 2. Run migrations:
 ```bash
-cargo run --bin cloud-migration up
+cargo run --bin byteburrow-migration up
 ```
 3. Start the server:
 ```bash
-cargo run --bin cloud
+cargo run --bin byteburrow
 ```
 
 ### Frontend Setup
@@ -98,7 +98,7 @@ To compile the project for Turris Omnia (ARMv7, musl):
 ```bash
 cross build --target armv7-unknown-linux-musleabihf --release
 ```
-The binary will be available at `target/armv7-unknown-linux-musleabihf/release/cloud`.
+The binary will be available at `target/armv7-unknown-linux-musleabihf/release/byteburrow`.
 
 ## 🏗️ Architecture
 

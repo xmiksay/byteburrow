@@ -2,7 +2,7 @@
 resolver = "1"
 
 [package]
-name = "cloud"
+name = "byteburrow"
 version = "0.1.0"
 edition = "2021"
 
@@ -43,8 +43,8 @@ image = "0.25"
 [workspace.package]
 version = "0.0.1"
 authors = ["Martin Miksanik"]
-description = "Cloud system"
-documentation = "https://gitlab.com/xmiksay/cloud#"
+description = "ByteBurrow - Personal cloud system"
+documentation = "https://gitlab.com/xmiksay/byteburrow#"
 
 [workspace.dependencies]
 axum = { version = "0.7.9" }

@@ -159,7 +159,7 @@ onMounted(async () => {
     <aside class="sidebar glass-panel">
       <div class="logo-section">
         <Cloud class="logo-icon" :size="28" />
-        <h1 v-if="!isSidebarCollapsed">Cloud</h1>
+        <h1 v-if="!isSidebarCollapsed">ByteBurrow</h1>
       </div>
 
       <nav class="main-nav">
