@@ -10,6 +10,7 @@ const GroupManagement = () => import('../components/GroupManagement.vue')
 const TagManagement = () => import('../components/TagManagement.vue')
 const ShareManagement = () => import('../components/ShareManagement.vue')
 const Monitoring = () => import('../components/Monitoring.vue')
+const PhotoLibrary = () => import('../components/PhotoLibrary.vue')
 
 const routes: RouteRecordRaw[] = [
     {
@@ -33,6 +34,12 @@ const routes: RouteRecordRaw[] = [
         name: 'shared-root',
         component: SharedWithMe,
         meta: { title: 'Shared with Me' }
+    },
+    {
+        path: '/photos',
+        name: 'photos',
+        component: PhotoLibrary,
+        meta: { title: 'Photos' }
     },
     {
         path: '/storages',

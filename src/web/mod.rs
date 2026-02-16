@@ -1,4 +1,5 @@
 pub mod group;
+pub mod photo;
 pub mod storage;
 pub mod tag;
 pub mod user;
@@ -181,7 +182,8 @@ pub async fn run(config: Config, db: DatabaseConnection, job_sender: JobSender) 
         .nest("/user", user::router())
         .nest("/group", group::router())
         .nest("/storage", storage::router())
-        .nest("/tag", tag::router());
+        .nest("/tag", tag::router())
+        .nest("/photo", photo::router());
 
     let app = Router::new().nest("/api", api_router).nest_service(
         "/",

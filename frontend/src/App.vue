@@ -15,7 +15,8 @@ import {
   ChevronLeft,
   ChevronRight,
   Share2,
-  Key
+  Key,
+  Camera
 } from 'lucide-vue-next'
 import Login from './components/Login.vue'
 import ChangePasswordDialog from './components/ChangePasswordDialog.vue'
@@ -179,6 +180,15 @@ onMounted(async () => {
         >
           <Share2 :size="20" />
           <span v-if="!isSidebarCollapsed">Shared with Me</span>
+        </router-link>
+        <router-link
+          to="/photos"
+          class="nav-item"
+          :class="{ active: isNavActive('photos') }"
+          title="Photos"
+        >
+          <Camera :size="20" />
+          <span v-if="!isSidebarCollapsed">Photos</span>
         </router-link>
         <router-link
           to="/storages"

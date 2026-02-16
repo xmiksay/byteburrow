@@ -1,6 +1,7 @@
 pub mod entry;
 pub mod group;
 pub mod group_user;
+pub mod photo;
 pub mod shared;
 pub mod storage;
 pub mod tag;

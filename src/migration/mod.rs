@@ -8,6 +8,7 @@ mod m20220101_000005_storage;
 mod m20220101_000006_entry;
 mod m20220101_000007_shared;
 mod m20220101_000010_token;
+mod m20220101_000011_photo;
 
 // Plugin migrations (feature-gated)
 #[cfg(feature = "plugin-contactlist")]
@@ -29,6 +30,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20220101_000006_entry::Migration),
             Box::new(m20220101_000007_shared::Migration),
             Box::new(m20220101_000010_token::Migration),
+            Box::new(m20220101_000011_photo::Migration),
         ];
 
         // Plugin migrations (conditionally included based on features)

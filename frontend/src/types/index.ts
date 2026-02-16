@@ -99,6 +99,16 @@ export interface Shared {
     created_at: string
 }
 
+export interface Photo {
+    hash: string
+    storage_id?: number
+    path?: string
+    latitude?: number
+    longitude?: number
+    date?: string
+    keywords: string[]
+}
+
 export interface ShareRequest {
     can_write: boolean
     expires_in_days?: number
