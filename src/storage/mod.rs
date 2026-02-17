@@ -439,6 +439,20 @@ impl Storage {
     }
 }
 
+/// Validate that a path exists and is a readable directory
+pub async fn validate_storage_path(path: &str) -> Result<()> {
+    let path_buf = PathBuf::from(path);
+
+    anyhow::ensure!(path_buf.exists(), "Path does not exist: {}", path);
+    anyhow::ensure!(path_buf.is_dir(), "Path is not a directory: {}", path);
+
+    let _ = fs::read_dir(&path_buf)
+        .await
+        .context(format!("Cannot read directory (permission denied): {}", path))?;
+
+    Ok(())
+}
+
 mod content_type;
 mod hash;
 pub mod thumbnail;

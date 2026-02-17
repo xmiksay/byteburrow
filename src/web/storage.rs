@@ -2,7 +2,8 @@ use crate::auth::Auth;
 use crate::entity::entry::EntryType;
 use crate::entity::{entry, group, group_user, shared, storage, user};
 use crate::storage::{
-    determine_content_type, thumbnail, DirectoryEntry, Storage as StorageWrapper,
+    determine_content_type, thumbnail, validate_storage_path, DirectoryEntry,
+    Storage as StorageWrapper,
 };
 use crate::web::{require_admin, AppState, ErrorResponse};
 use axum::{
@@ -70,44 +71,6 @@ pub struct UpdateStorageRequest {
     pub path: Option<String>,
     pub default_user: Option<i32>,
     pub default_group: Option<i32>,
-}
-
-/// Validate that a path exists and is a directory
-async fn validate_storage_path(path: &str) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    let path_buf = PathBuf::from(path);
-
-    // Check if path exists
-    if !path_buf.exists() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: format!("Path does not exist: {}", path),
-            }),
-        ));
-    }
-
-    // Check if it's a directory
-    if !path_buf.is_dir() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: format!("Path is not a directory: {}", path),
-            }),
-        ));
-    }
-
-    // Check read permissions by attempting to read directory
-    let read_check = fs::read_dir(&path_buf).await;
-    if read_check.is_err() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: format!("Cannot read directory (permission denied): {}", path),
-            }),
-        ));
-    }
-
-    Ok(())
 }
 
 /// Create entry request
@@ -239,7 +202,14 @@ async fn create_storage_handler(
     require_admin(&auth)?;
 
     // Validate path exists and is accessible
-    validate_storage_path(&payload.path).await?;
+    validate_storage_path(&payload.path).await.map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
 
     // Check if path already exists in storage
     let existing_path = storage::Entity::find()
@@ -448,7 +418,14 @@ async fn update_storage_handler(
     // Validate path if being changed
     if let Some(ref new_path) = payload.path {
         if new_path != &storage.path {
-            validate_storage_path(new_path).await?;
+            validate_storage_path(new_path).await.map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: e.to_string(),
+                    }),
+                )
+            })?;
 
             // Check if path already exists
             let existing = storage::Entity::find()
@@ -2113,24 +2090,7 @@ async fn share_index_impl(
                 .unwrap();
         });
 
-    // Transform entries to have paths relative to the share's base path
-    let relative_entries: Vec<_> = entries
-        .into_iter()
-        .map(|mut entry| {
-            let entry_path = entry.path.trim_matches('/');
-            let relative_path = if base_path.is_empty() {
-                entry_path.to_string()
-            } else if entry_path.starts_with(base_path) {
-                entry_path[base_path.len()..]
-                    .trim_start_matches('/')
-                    .to_string()
-            } else {
-                entry_path.to_string()
-            };
-            entry.path = relative_path;
-            entry
-        })
-        .collect();
+    let relative_entries = make_entries_relative(entries, base_path);
 
     let html = generate_directory_index(
         &state,
@@ -2147,6 +2107,27 @@ async fn share_index_impl(
         )
     })?;
     Ok(Html(html).into_response())
+}
+
+/// Transform directory entries to have paths relative to a base path.
+fn make_entries_relative(entries: Vec<DirectoryEntry>, base_path: &str) -> Vec<DirectoryEntry> {
+    entries
+        .into_iter()
+        .map(|mut entry| {
+            let entry_path = entry.path.trim_matches('/');
+            let relative_path = if base_path.is_empty() {
+                entry_path.to_string()
+            } else if entry_path.starts_with(base_path) {
+                entry_path[base_path.len()..]
+                    .trim_start_matches('/')
+                    .to_string()
+            } else {
+                entry_path.to_string()
+            };
+            entry.path = relative_path;
+            entry
+        })
+        .collect()
 }
 
 /// Share show handler - get file content
