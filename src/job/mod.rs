@@ -15,7 +15,15 @@ use crate::storage::{thumbnail, Storage};
 #[derive(Debug)]
 pub enum Job {
     CheckFile { storage_id: i32, path: String },
-    ChangedHash(Vec<u8>),
+    ChangedHash { hash: Vec<u8> },
+    CreateThumbnail { hash: Vec<u8>, regenerate: bool },
+    ProcessImage { hash: Vec<u8> },
+    ProcessPhoto { hash: Vec<u8> },
+    ProcessGit { path: String },
+    ProcessVideo { hash: Vec<u8> },
+    ProcessFilm { hash: Vec<u8> },
+    ProcessMusic { hash: Vec<u8> },
+    ProcessDocument { hash: Vec<u8> },
 }
 
 pub type JobSender = mpsc::UnboundedSender<Job>;
@@ -75,20 +83,64 @@ impl JobRunner {
                     let (updated, hash) = storage.calculate_hash(db, &path).await?;
                     if updated {
                         info!(path = &path, hash = hex::encode(&hash), "Hash updated");
-                        let _ = tx.send(Job::ChangedHash(hash));
+                        let _ = tx.send(Job::ChangedHash { hash });
                     }
+                    
                 }
             }
 
-            Job::ChangedHash(ref hash_bytes) => {
-                Self::process_changed_hash(db, hash_bytes).await?;
+            Job::ChangedHash { ref hash } => {
+                Self::process_changed_hash(db, hash).await?;
+            }
+
+            Job::CreateThumbnail { .. } => {
+                // TODO: Implement thumbnail creation
+                warn!("CreateThumbnail job not implemented yet");
+            }
+
+            Job::ProcessImage { .. } => {
+                // TODO: Implement image processing
+                warn!("ProcessImage job not implemented yet");
+            }
+
+            Job::ProcessPhoto { .. } => {
+                // TODO: Implement photo processing
+                warn!("ProcessPhoto job not implemented yet");
+            }
+
+            Job::ProcessVideo { .. } => {
+                // TODO: Implement video processing
+                warn!("ProcessVideo job not implemented yet");
+            }
+
+            Job::ProcessMusic { .. } => {
+                // TODO: Implement music processing
+                warn!("ProcessMusic job not implemented yet");
+            }
+
+            Job::ProcessDocument { .. } => {
+                // TODO: Implement document processing
+                warn!("ProcessDocument job not implemented yet");
+            }
+
+            Job::ProcessGit { .. } => {
+                // TODO: Implement git repository processing
+                warn!("ProcessGit job not implemented yet");
+            }
+
+            Job::ProcessFilm { .. } => {
+                // TODO: Implement film/video processing
+                warn!("ProcessFilm job not implemented yet");
             }
         }
 
         Ok(())
     }
 
-    async fn process_changed_hash(db: &DatabaseConnection, hash_bytes: &[u8]) -> anyhow::Result<()> {
+    async fn process_changed_hash(
+        db: &DatabaseConnection,
+        hash_bytes: &[u8],
+    ) -> anyhow::Result<()> {
         let hash_hex = hex::encode(hash_bytes);
 
         // Find entry with this hash
@@ -199,7 +251,17 @@ fn is_image_file(path: &str) -> bool {
     match path.extension().and_then(|e| e.to_str()) {
         Some(ext) => matches!(
             ext.to_lowercase().as_str(),
-            "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff" | "tif" | "heic" | "heif" | "avif"
+            "jpg"
+                | "jpeg"
+                | "png"
+                | "gif"
+                | "webp"
+                | "bmp"
+                | "tiff"
+                | "tif"
+                | "heic"
+                | "heif"
+                | "avif"
         ),
         None => false,
     }
@@ -265,9 +327,7 @@ fn extract_exif(full_path: &Path) -> (Option<f64>, Option<f64>, Option<chrono::N
     }
 
     // Extract date
-    if let Some(dt_field) =
-        exif_data.get_field(exif::Tag::DateTimeOriginal, exif::In::PRIMARY)
-    {
+    if let Some(dt_field) = exif_data.get_field(exif::Tag::DateTimeOriginal, exif::In::PRIMARY) {
         if let exif::Value::Ascii(ref vec) = dt_field.value {
             if let Some(bytes) = vec.first() {
                 if let Ok(dt) = exif::DateTime::from_ascii(bytes) {

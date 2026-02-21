@@ -1,4 +1,4 @@
-use byteburrow::{db_connect, config::Config, job::JobRunner};
+use byteburrow::{config::Config, db_connect, inotify::InotifyHandler, job::JobRunner};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
@@ -19,9 +19,11 @@ async fn main() {
         .expect("Failed to connect to database");
 
     let (job_runner, job_sender) = JobRunner::new(db.clone());
+    let inotify_handler = InotifyHandler::new(db.clone(), job_sender.clone());
 
     tokio::select! {
         _ = job_runner.run() => tracing::warn!("Job runner exited"),
+        _ = inotify_handler.run() => tracing::warn!("Inotify handler exited"),
         _ = byteburrow::web::run(config, db, job_sender) => tracing::warn!("Web server exited"),
     }
 }

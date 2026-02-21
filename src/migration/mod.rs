@@ -9,6 +9,7 @@ mod m20220101_000006_entry;
 mod m20220101_000007_shared;
 mod m20220101_000010_token;
 mod m20220101_000011_photo;
+mod m20220101_000012_add_inotify_to_storage;
 
 // Plugin migrations (feature-gated)
 #[cfg(feature = "plugin-contactlist")]
@@ -31,6 +32,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20220101_000007_shared::Migration),
             Box::new(m20220101_000010_token::Migration),
             Box::new(m20220101_000011_photo::Migration),
+            Box::new(m20220101_000012_add_inotify_to_storage::Migration),
         ];
 
         // Plugin migrations (conditionally included based on features)

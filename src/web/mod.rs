@@ -44,6 +44,64 @@ pub fn require_admin(auth: &Auth) -> Result<(), (StatusCode, Json<ErrorResponse>
     Ok(())
 }
 
+/// Helper function to verify a user exists by ID
+pub async fn require_user_exists(
+    user_id: i32,
+    db: &DatabaseConnection,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let exists = crate::auth::user_exists(user_id, db)
+        .await
+        .map_err(|e| {
+            tracing::error!("Database error checking user existence: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Database error".to_string(),
+                }),
+            )
+        })?;
+
+    if !exists {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("User with id {} not found", user_id),
+            }),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Helper function to verify a group exists by ID
+pub async fn require_group_exists(
+    group_id: i32,
+    db: &DatabaseConnection,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let exists = crate::auth::group_exists(group_id, db)
+        .await
+        .map_err(|e| {
+            tracing::error!("Database error checking group existence: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Database error".to_string(),
+                }),
+            )
+        })?;
+
+    if !exists {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("Group with id {} not found", group_id),
+            }),
+        ));
+    }
+
+    Ok(())
+}
+
 pub struct AppState {
     pub db: DatabaseConnection,
     pub config: Config,

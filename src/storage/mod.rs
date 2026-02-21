@@ -439,6 +439,11 @@ impl Storage {
     }
 }
 
+/// Check if a path exists on the filesystem
+pub fn path_exists(path: &str) -> bool {
+    PathBuf::from(path).exists()
+}
+
 /// Validate that a path exists and is a readable directory
 pub async fn validate_storage_path(path: &str) -> Result<()> {
     let path_buf = PathBuf::from(path);

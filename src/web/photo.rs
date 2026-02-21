@@ -207,7 +207,7 @@ async fn regenerate_thumbnail(
     // Dispatch job to regenerate
     state
         .job_sender
-        .send(Job::ChangedHash(hash_bytes))
+        .send(Job::ChangedHash { hash: hash_bytes })
         .map_err(|_| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,

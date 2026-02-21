@@ -1,4 +1,4 @@
-use crate::entity::{token, user};
+use crate::entity::{group, token, user};
 use axum::{
     async_trait,
     extract::FromRequestParts,
@@ -292,4 +292,23 @@ impl Auth {
             .await?;
         Ok(())
     }
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+/// Check if a user exists by ID
+pub async fn user_exists<C: ConnectionTrait>(user_id: i32, db: &C) -> Result<bool, sea_orm::DbErr> {
+    let user = user::Entity::find_by_id(user_id).one(db).await?;
+    Ok(user.is_some())
+}
+
+/// Check if a group exists by ID
+pub async fn group_exists<C: ConnectionTrait>(
+    group_id: i32,
+    db: &C,
+) -> Result<bool, sea_orm::DbErr> {
+    let group = group::Entity::find_by_id(group_id).one(db).await?;
+    Ok(group.is_some())
 }

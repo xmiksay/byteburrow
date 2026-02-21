@@ -1,11 +1,11 @@
 use crate::auth::Auth;
 use crate::entity::entry::EntryType;
-use crate::entity::{entry, group, group_user, shared, storage, user};
+use crate::entity::{entry, group_user, shared, storage};
 use crate::storage::{
     determine_content_type, thumbnail, validate_storage_path, DirectoryEntry,
     Storage as StorageWrapper,
 };
-use crate::web::{require_admin, AppState, ErrorResponse};
+use crate::web::{require_admin, require_group_exists, require_user_exists, AppState, ErrorResponse};
 use axum::{
     body::Body,
     extract::{Path as AxumPath, State},
@@ -38,6 +38,7 @@ pub struct StorageResponse {
     pub path: String,
     pub default_user: i32,
     pub default_group: i32,
+    pub inotify: bool,
 }
 
 impl From<storage::Model> for StorageResponse {
@@ -49,6 +50,7 @@ impl From<storage::Model> for StorageResponse {
             path: storage.path,
             default_user: storage.default_user,
             default_group: storage.default_group,
+            inotify: storage.inotify,
         }
     }
 }
@@ -61,6 +63,8 @@ pub struct CreateStorageRequest {
     pub path: String,
     pub default_user: i32,
     pub default_group: i32,
+    #[serde(default)]
+    pub inotify: bool,
 }
 
 /// Update storage request (all fields optional)
@@ -71,6 +75,7 @@ pub struct UpdateStorageRequest {
     pub path: Option<String>,
     pub default_user: Option<i32>,
     pub default_group: Option<i32>,
+    pub inotify: Option<bool>,
 }
 
 /// Create entry request
@@ -259,51 +264,9 @@ async fn create_storage_handler(
         ));
     }
 
-    // Verify default_user exists
-    let user_exists = user::Entity::find_by_id(payload.default_user)
-        .one(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Database error".to_string(),
-                }),
-            )
-        })?;
-
-    if user_exists.is_none() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: format!("User with id {} not found", payload.default_user),
-            }),
-        ));
-    }
-
-    // Verify default_group exists
-    let group_exists = group::Entity::find_by_id(payload.default_group)
-        .one(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Database error".to_string(),
-                }),
-            )
-        })?;
-
-    if group_exists.is_none() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: format!("Group with id {} not found", payload.default_group),
-            }),
-        ));
-    }
+    // Verify default_user and default_group exist
+    require_user_exists(payload.default_user, &state.db).await?;
+    require_group_exists(payload.default_group, &state.db).await?;
 
     let new_storage = storage::ActiveModel {
         name: Set(payload.name),
@@ -311,6 +274,7 @@ async fn create_storage_handler(
         path: Set(payload.path),
         default_user: Set(payload.default_user),
         default_group: Set(payload.default_group),
+        inotify: Set(payload.inotify),
         ..Default::default()
     };
 
@@ -483,52 +447,12 @@ async fn update_storage_handler(
 
     // Validate default_user if being changed
     if let Some(user_id) = payload.default_user {
-        let user_exists = user::Entity::find_by_id(user_id)
-            .one(&state.db)
-            .await
-            .map_err(|e| {
-                tracing::error!("Database error: {}", e);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: "Database error".to_string(),
-                    }),
-                )
-            })?;
-
-        if user_exists.is_none() {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: format!("User with id {} not found", user_id),
-                }),
-            ));
-        }
+        require_user_exists(user_id, &state.db).await?;
     }
 
     // Validate default_group if being changed
     if let Some(group_id) = payload.default_group {
-        let group_exists = group::Entity::find_by_id(group_id)
-            .one(&state.db)
-            .await
-            .map_err(|e| {
-                tracing::error!("Database error: {}", e);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: "Database error".to_string(),
-                    }),
-                )
-            })?;
-
-        if group_exists.is_none() {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: format!("Group with id {} not found", group_id),
-                }),
-            ));
-        }
+        require_group_exists(group_id, &state.db).await?;
     }
 
     let mut active_storage: storage::ActiveModel = storage.into();
@@ -547,6 +471,9 @@ async fn update_storage_handler(
     }
     if let Some(default_group) = payload.default_group {
         active_storage.default_group = Set(default_group);
+    }
+    if let Some(inotify) = payload.inotify {
+        active_storage.inotify = Set(inotify);
     }
 
     let updated_storage = active_storage.update(&state.db).await.map_err(|e| {
