@@ -1,0 +1,25 @@
+{
+  "name": "cloud-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "highlight.js": "^11.11.1",
+    "lucide-vue-next": "^0.363.0",
+    "marked": "^17.0.1",
+    "marked-highlight": "^2.2.3",
+    "vue": "^3.4.21",
+    "vue-router": "^4.6.4"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.0.4",
+    "typescript": "^5.4.3",
+    "vite": "^5.2.0",
+    "vue-tsc": "^2.0.7"
+  }
+}
