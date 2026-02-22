@@ -50,6 +50,12 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .default(false),
                     )
+                    .col(
+                        ColumnDef::new(Entry::Kind)
+                            .integer()
+                            .not_null()
+                            .default(0),
+                    )
                     .col(ColumnDef::new(Entry::Size).big_integer().not_null())
                     .col(ColumnDef::new(Entry::ModifiedAt).timestamp())
                     .col(
@@ -121,6 +127,7 @@ enum Entry {
     Hash,
     EntryType,
     Notify,
+    Kind,
     Size,
     ModifiedAt,
     CreatedAt,

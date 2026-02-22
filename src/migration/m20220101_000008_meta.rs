@@ -29,12 +29,6 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .default(Expr::cust("ARRAY[]::TEXT[]")),
                     )
-                    .col(
-                        ColumnDef::new(Meta::Kind)
-                            .integer()
-                            .not_null()
-                            .default(0),
-                    )
                     .col(ColumnDef::new(Meta::Custom).json_binary())
                     .to_owned(),
             )
@@ -54,6 +48,5 @@ enum Meta {
     Hash,
     Tags,
     Keywords,
-    Kind,
     Custom,
 }

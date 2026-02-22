@@ -1,4 +1,4 @@
-use crate::entity::entry::{self, EntryType};
+use crate::entity::entry::{self, EntryType, Kinds};
 use crate::entity::storage;
 use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
@@ -25,6 +25,7 @@ pub struct DirectoryEntry {
     pub hash: Option<Vec<u8>>,
     pub entry_type: EntryType,
     pub notify: bool,
+    pub kind: Kinds,
     pub size: i64,
     pub modified_at: chrono::DateTime<chrono::Utc>,
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -42,6 +43,7 @@ impl From<entry::Model> for DirectoryEntry {
             hash: model.hash,
             entry_type: model.entry_type,
             notify: model.notify,
+            kind: model.kind,
             size: model.size,
             modified_at: Utc.from_utc_datetime(&model.modified_at),
             created_at: Utc.from_utc_datetime(&model.created_at),
@@ -116,6 +118,7 @@ impl Storage {
                 hash: None, // Will be calculated if needed
                 entry_type,
                 notify: false,
+                kind: Kinds::default(),
                 size: metadata.len().try_into().unwrap(),
                 created_at: modified_at.clone(),
                 modified_at,
@@ -195,6 +198,7 @@ impl Storage {
                 fs_entry.id = db_entry.id;
                 fs_entry.hash = db_entry.hash;
                 fs_entry.notify = db_entry.notify;
+                fs_entry.kind = db_entry.kind;
                 fs_entry.user_id = db_entry.user_id;
                 fs_entry.group_id = db_entry.group_id;
 
@@ -356,6 +360,7 @@ impl Storage {
             path: Set(dir_path.to_string()),
             entry_type: Set(EntryType::Directory),
             notify: Set(false),
+            kind: Set(Kinds::default()),
             size: Set(0),
             modified_at: Set(modified_at),
             created_at: Set(Utc::now().naive_utc()),
@@ -411,6 +416,7 @@ impl Storage {
             path: Set(normalized_path),
             entry_type: Set(entry_type),
             notify: Set(false),
+            kind: Set(Kinds::default()),
             size: Set(metadata.len().try_into()?),
             modified_at: Set(metadata
                 .modified()
