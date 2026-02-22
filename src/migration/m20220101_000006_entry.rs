@@ -44,13 +44,13 @@ impl MigrationTrait for Migration {
                             )
                             .not_null(),
                     )
-                    .col(ColumnDef::new(Entry::Size).big_integer().not_null())
                     .col(
-                        ColumnDef::new(Entry::Tags)
-                            .array(ColumnType::Integer)
+                        ColumnDef::new(Entry::Notify)
+                            .boolean()
                             .not_null()
-                            .default(Expr::cust("ARRAY[]::INTEGER[]")),
+                            .default(false),
                     )
+                    .col(ColumnDef::new(Entry::Size).big_integer().not_null())
                     .col(ColumnDef::new(Entry::ModifiedAt).timestamp())
                     .col(
                         ColumnDef::new(Entry::CreatedAt)
@@ -100,7 +100,6 @@ impl MigrationTrait for Migration {
             .drop_table(Table::drop().table(Entry::Table).to_owned())
             .await?;
 
-        // Drop the enum type
         manager
             .get_connection()
             .execute_unprepared("DROP TYPE IF EXISTS entry_type_enum")
@@ -121,8 +120,8 @@ enum Entry {
     Path,
     Hash,
     EntryType,
+    Notify,
     Size,
-    Tags,
     ModifiedAt,
     CreatedAt,
 }

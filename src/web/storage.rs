@@ -38,7 +38,6 @@ pub struct StorageResponse {
     pub path: String,
     pub default_user: i32,
     pub default_group: i32,
-    pub inotify: bool,
 }
 
 impl From<storage::Model> for StorageResponse {
@@ -50,7 +49,6 @@ impl From<storage::Model> for StorageResponse {
             path: storage.path,
             default_user: storage.default_user,
             default_group: storage.default_group,
-            inotify: storage.inotify,
         }
     }
 }
@@ -63,8 +61,6 @@ pub struct CreateStorageRequest {
     pub path: String,
     pub default_user: i32,
     pub default_group: i32,
-    #[serde(default)]
-    pub inotify: bool,
 }
 
 /// Update storage request (all fields optional)
@@ -75,13 +71,14 @@ pub struct UpdateStorageRequest {
     pub path: Option<String>,
     pub default_user: Option<i32>,
     pub default_group: Option<i32>,
-    pub inotify: Option<bool>,
 }
 
 /// Create entry request
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateEntryRequest {
     pub entry_type: EntryType,
+    #[serde(default)]
+    pub notify: bool,
 }
 
 /// Rename entry request
@@ -114,7 +111,6 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/:id/create/*path", post(create_entry_handler))
         .route("/:id/rename/*path", post(rename_entry_handler))
         .route("/:id/remove/*path", delete(remove_entry_handler))
-        .route("/:id/tags/*path", put(update_entry_tags_handler))
         .route("/:id/hash/*path", post(trigger_hash_handler))
         .route("/:id/share/*path", get(list_shares_handler))
         .route("/:id/share/*path", post(share_entry_handler))
@@ -139,7 +135,6 @@ pub fn router() -> Router<Arc<AppState>> {
             "/share/:share_id/remove/*path",
             delete(share_remove_handler),
         )
-        .route("/share/:share_id/tags/*path", put(share_tags_handler))
         .route("/thumbnail/:hash/:size", get(thumbnail_handler))
 }
 
@@ -274,7 +269,6 @@ async fn create_storage_handler(
         path: Set(payload.path),
         default_user: Set(payload.default_user),
         default_group: Set(payload.default_group),
-        inotify: Set(payload.inotify),
         ..Default::default()
     };
 
@@ -472,10 +466,6 @@ async fn update_storage_handler(
     if let Some(default_group) = payload.default_group {
         active_storage.default_group = Set(default_group);
     }
-    if let Some(inotify) = payload.inotify {
-        active_storage.inotify = Set(inotify);
-    }
-
     let updated_storage = active_storage.update(&state.db).await.map_err(|e| {
         tracing::error!("Database error: {}", e);
         (
@@ -917,6 +907,20 @@ async fn create_entry_handler(
                     }),
                 )
             })?;
+            if payload.notify {
+                storage
+                    .set_notify(&state.db, &path, true)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("Error setting notify: {}", e);
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ErrorResponse {
+                                error: format!("Error setting notify: {}", e),
+                            }),
+                        )
+                    })?;
+            }
         }
         EntryType::File => {
             storage.create_file(&path).await.map_err(|e| {
@@ -1132,56 +1136,6 @@ fn generate_directory_index(
         "parent_path": parent_path.unwrap_or(""),
         "entries": sorted_entries,
     }))
-}
-
-/// Update tags request
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
-pub struct UpdateEntryTagsRequest {
-    pub tags: Vec<i32>,
-}
-
-/// Update entry tags handler
-/// PUT /api/storage/:id/tags/*path
-#[instrument(skip(state, auth))]
-async fn update_entry_tags_handler(
-    auth: Auth,
-    AxumPath((storage_id, path)): AxumPath<(i32, String)>,
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<UpdateEntryTagsRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    require_admin(&auth)?;
-
-    // Find storage
-    let storage = StorageWrapper::find_by_id(&state.db, storage_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Database error".to_string(),
-                }),
-            )
-        })?;
-
-    // Normalize path and check filesystem
-    let sub_path = path.trim_matches('/');
-    let entry_id = storage
-        .set_tags(&state.db, sub_path, payload.tags)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to set tags: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?;
-
-    Ok(Json(
-        serde_json::json!({ "id": entry_id, "message": "Tags updated successfully" }),
-    ))
 }
 
 /// Share entry request
@@ -1418,8 +1372,6 @@ async fn share_entry_handler(
     let sub_path = path.trim_matches('/');
 
     // Ensure entry exists in DB (create if missing)
-    // We can use storage.set_tags or similar if we wanted, but we just need entry_id
-    // For now, let's just find or error
     let entry_record = entry::Entity::find()
         .filter(entry::Column::StorageId.eq(storage_id))
         .filter(entry::Column::Path.eq(sub_path))
@@ -1438,27 +1390,27 @@ async fn share_entry_handler(
         Some(m) => m.id,
         None => {
             // Create entry if it exists on disk
-            let full_path = storage.get_full_path(sub_path);
-            if !full_path.exists() {
-                return Err((
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorResponse {
-                        error: "Path not found".to_string(),
-                    }),
-                ));
-            }
-            // Use set_tags with empty tags to create the entry
             storage
-                .set_tags(&state.db, sub_path, vec![])
+                .ensure_entry(&state.db, sub_path)
                 .await
                 .map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse {
-                            error: e.to_string(),
-                        }),
-                    )
+                    if e.to_string().contains("not found on disk") {
+                        (
+                            StatusCode::NOT_FOUND,
+                            Json(ErrorResponse {
+                                error: "Path not found".to_string(),
+                            }),
+                        )
+                    } else {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ErrorResponse {
+                                error: e.to_string(),
+                            }),
+                        )
+                    }
                 })?
+                .id
         }
     };
 
@@ -2353,54 +2305,6 @@ async fn share_remove_handler(
     Ok(Json(serde_json::json!({
         "message": "Entry removed successfully",
     })))
-}
-
-/// Share tags handler - update tags on an entry within a share
-/// PUT /api/storage/share/:share_id/tags/*path
-#[instrument(skip(state, auth))]
-async fn share_tags_handler(
-    auth: Option<Auth>,
-    AxumPath((share_id, path)): AxumPath<(String, String)>,
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<UpdateEntryTagsRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let (share, entry_model, storage) = get_share_context(&share_id, auth.as_ref(), &state).await?;
-
-    if !share.can_write {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse {
-                error: "This share does not allow write access".to_string(),
-            }),
-        ));
-    }
-
-    let base_path = entry_model.path.trim_matches('/');
-    let sub_path_clean = path.trim_matches('/');
-    let full_path = if base_path.is_empty() {
-        sub_path_clean.to_string()
-    } else if sub_path_clean.is_empty() {
-        base_path.to_string()
-    } else {
-        format!("{}/{}", base_path, sub_path_clean)
-    };
-
-    let entry_id = storage
-        .set_tags(&state.db, &full_path, payload.tags)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to set tags: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?;
-
-    Ok(Json(
-        serde_json::json!({ "id": entry_id, "message": "Tags updated successfully" }),
-    ))
 }
 
 /// Trigger hash calculation job for a file

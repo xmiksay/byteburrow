@@ -24,8 +24,8 @@ pub struct DirectoryEntry {
     pub path: String,
     pub hash: Option<Vec<u8>>,
     pub entry_type: EntryType,
+    pub notify: bool,
     pub size: i64,
-    pub tags: Vec<i32>,
     pub modified_at: chrono::DateTime<chrono::Utc>,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
@@ -41,8 +41,8 @@ impl From<entry::Model> for DirectoryEntry {
             path: model.path,
             hash: model.hash,
             entry_type: model.entry_type,
+            notify: model.notify,
             size: model.size,
-            tags: model.tags,
             modified_at: Utc.from_utc_datetime(&model.modified_at),
             created_at: Utc.from_utc_datetime(&model.created_at),
         }
@@ -115,8 +115,8 @@ impl Storage {
                 path: relative_path,
                 hash: None, // Will be calculated if needed
                 entry_type,
+                notify: false,
                 size: metadata.len().try_into().unwrap(),
-                tags: Vec::new(),
                 created_at: modified_at.clone(),
                 modified_at,
             });
@@ -193,8 +193,8 @@ impl Storage {
             if let Some(db_entry) = db_map.remove(&fs_entry.path) {
                 // Entry exists in both FS and DB
                 fs_entry.id = db_entry.id;
-                fs_entry.tags = db_entry.tags;
                 fs_entry.hash = db_entry.hash;
+                fs_entry.notify = db_entry.notify;
                 fs_entry.user_id = db_entry.user_id;
                 fs_entry.group_id = db_entry.group_id;
 
@@ -355,8 +355,8 @@ impl Storage {
             parent_id: Set(parent_id),
             path: Set(dir_path.to_string()),
             entry_type: Set(EntryType::Directory),
+            notify: Set(false),
             size: Set(0),
-            tags: Set(Vec::new()),
             modified_at: Set(modified_at),
             created_at: Set(Utc::now().naive_utc()),
             ..Default::default()
@@ -410,8 +410,8 @@ impl Storage {
             parent_id: Set(parent_id),
             path: Set(normalized_path),
             entry_type: Set(entry_type),
+            notify: Set(false),
             size: Set(metadata.len().try_into()?),
-            tags: Set(Vec::new()),
             modified_at: Set(metadata
                 .modified()
                 .ok()
@@ -424,17 +424,17 @@ impl Storage {
         Ok(active.insert(db).await?)
     }
 
-    /// Set tags for an entry, creating it if it doesn't exist in the database
-    #[instrument(skip(db, tags))]
-    pub async fn set_tags(
+    /// Set the notify flag on a directory entry, creating it if it doesn't exist
+    #[instrument(skip(db))]
+    pub async fn set_notify(
         &self,
         db: &sea_orm::DatabaseConnection,
         sub_path: &str,
-        tags: Vec<i32>,
+        notify: bool,
     ) -> Result<i32> {
         let model = self.ensure_entry(db, sub_path).await?;
         let mut active: entry::ActiveModel = model.into();
-        active.tags = Set(tags);
+        active.notify = Set(notify);
         Ok(active.update(db).await?.id)
     }
 }

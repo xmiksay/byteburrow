@@ -1,4 +1,5 @@
 pub mod entry;
+pub mod meta;
 pub mod group;
 pub mod group_user;
 pub mod photo;

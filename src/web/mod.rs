@@ -161,7 +161,6 @@ pub struct AppState {
             storage::UpdateStorageRequest,
             storage::CreateEntryRequest,
             storage::RenameEntryRequest,
-            storage::UpdateEntryTagsRequest,
             storage::ShareEntryRequest,
             storage::ShareResponse,
             crate::entity::entry::EntryType,

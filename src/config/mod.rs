@@ -1,18 +1,46 @@
-use std::env;
+use config::Environment;
+use serde::Deserialize;
 use std::sync::{Arc, OnceLock};
 
 static INSTANCE: OnceLock<Arc<Config>> = OnceLock::new();
 
-#[derive(Clone)]
+#[derive(Clone, Deserialize)]
 pub struct Config {
     pub database_url: String,
-    pub server_addr: String,
-    pub frontend_dist: String,
     pub salt: String,
+    #[serde(default = "defaults::server_addr")]
+    pub server_addr: String,
+    #[serde(default = "defaults::frontend_dist")]
+    pub frontend_dist: String,
+    #[serde(default = "defaults::thumbnail_storage")]
     pub thumbnail_storage: String,
-    pub token_expiration_days: i64,
-    pub token_length: usize,
+    #[serde(default = "defaults::base_url")]
     pub base_url: String,
+    #[serde(default = "defaults::token_expiration_days")]
+    pub token_expiration_days: i64,
+    #[serde(default = "defaults::token_length")]
+    pub token_length: usize,
+}
+
+mod defaults {
+    pub fn server_addr() -> String {
+        "0.0.0.0:3000".to_string()
+    }
+    pub fn frontend_dist() -> String {
+        "frontend/dist".to_string()
+    }
+    pub fn thumbnail_storage() -> String {
+        "/tmp/thumbnails".to_string()
+    }
+    pub fn base_url() -> String {
+        "http://localhost:3000".to_string()
+    }
+    pub fn token_expiration_days() -> i64 {
+        30
+    }
+    pub fn token_length() -> usize {
+        32
+    }
 }
 
 impl Config {
@@ -28,34 +56,16 @@ impl Config {
 
     pub fn from_env() -> Self {
         dotenvy::dotenv().ok();
-        let database_url =
-            env::var("DATABASE_URL").expect("DATABASE_URL must be set in .env file or environment");
-        let server_addr = env::var("SERVER_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
-        let frontend_dist =
-            env::var("FRONTEND_DIST").unwrap_or_else(|_| "frontend/dist".to_string());
-        let salt = env::var("SALT").expect("SALT must be set in .env file or environment");
-        let thumbnail_storage =
-            env::var("THUMBNAIL_STORAGE").unwrap_or_else(|_| "/tmp/thumbnails".to_string());
-        let token_expiration_days = env::var("TOKEN_EXPIRATION_DAYS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(30);
-        let token_length = env::var("TOKEN_LENGTH")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(32);
 
-        let base_url = env::var("BASE_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
-        
-        Self {
-            database_url,
-            server_addr,
-            frontend_dist,
-            salt,
-            thumbnail_storage,
-            token_expiration_days,
-            token_length,
-            base_url,
-        }
+        config::Config::builder()
+            .add_source(
+                Environment::with_prefix("BYTEBURROW")
+                    .separator("__")
+                    .try_parsing(true),
+            )
+            .build()
+            .expect("Failed to build configuration")
+            .try_deserialize()
+            .expect("Failed to deserialize configuration")
     }
 }

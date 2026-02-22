@@ -36,8 +36,8 @@ pub struct Model {
     pub path: String,
     pub hash: Option<Vec<u8>>,
     pub entry_type: EntryType,
+    pub notify: bool,
     pub size: i64,
-    pub tags: Vec<i32>,
     pub modified_at: DateTime,
     pub created_at: DateTime,
 }
@@ -102,8 +102,5 @@ impl Model {
         self.entry_type == EntryType::Symlink
     }
 
-    /// Check if entry has a specific tag
-    pub fn has_tag(&self, tag_id: i32) -> bool {
-        self.tags.contains(&tag_id)
-    }
+
 }
