@@ -54,7 +54,7 @@ export const storageService = {
     },
 
     async triggerHash(storageId: number, path: string): Promise<{ message: string }> {
-        return api.post<{ message: string }>(`/api/storage/${storageId}/hash/${path}`)
+        return api.post<{ message: string }>(`/api/storage/${storageId}/hash/${path}?mode=force`)
     },
 
     async shareEntry(storageId: number, path: string, data: any): Promise<any> {

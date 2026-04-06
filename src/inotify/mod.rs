@@ -1,5 +1,5 @@
 use crate::entity::{entry, storage};
-use crate::job::{Job, JobSender};
+use crate::job::{Job, JobSender, ProcessMode};
 use notify::{
     event::{CreateKind, ModifyKind, RemoveKind, RenameMode},
     Event, EventKind, RecommendedWatcher, RecursiveMode, Result as NotifyResult, Watcher,
@@ -18,6 +18,8 @@ struct WatchedEntry {
     storage_base: PathBuf,
     /// Absolute path being watched (storage_base + entry.path).
     abs_path: PathBuf,
+    /// Parsed ignore patterns from the storage.
+    ignore_patterns: Vec<String>,
 }
 
 pub struct InotifyHandler {
@@ -121,6 +123,8 @@ impl InotifyHandler {
             } else {
                 storage_base.join(&entry_model.path)
             };
+            let ignore_patterns =
+                crate::ignore::parse_patterns(&storage_model.ignore_patterns);
 
             // Check if already watching the same path
             if let Some(existing) = self.watched_entries.get(&entry_model.id) {
@@ -131,6 +135,7 @@ impl InotifyHandler {
                             storage_id: entry_model.storage_id,
                             storage_base,
                             abs_path,
+                            ignore_patterns,
                         },
                     );
                     continue;
@@ -151,6 +156,7 @@ impl InotifyHandler {
                                 storage_id: entry_model.storage_id,
                                 storage_base,
                                 abs_path,
+                                ignore_patterns,
                             },
                         );
                     }
@@ -186,27 +192,28 @@ impl InotifyHandler {
     async fn handle_event(&self, event: Event) {
         debug!("Filesystem event: {:?}", event);
 
-        let (storage_id, storage_base) = match self.find_storage_for_path(&event.paths) {
-            Some(pair) => pair,
-            None => return,
-        };
+        let (storage_id, storage_base, ignore_patterns) =
+            match self.find_storage_for_path(&event.paths) {
+                Some(tuple) => tuple,
+                None => return,
+            };
 
         match event.kind {
             EventKind::Create(CreateKind::File) => {
                 for path in &event.paths {
-                    self.handle_file_created(storage_id, &storage_base, path)
+                    self.handle_file_created(storage_id, &storage_base, &ignore_patterns, path)
                         .await;
                 }
             }
             EventKind::Modify(ModifyKind::Data(_)) => {
                 for path in &event.paths {
-                    self.handle_file_modified(storage_id, &storage_base, path)
+                    self.handle_file_modified(storage_id, &storage_base, &ignore_patterns, path)
                         .await;
                 }
             }
             EventKind::Remove(RemoveKind::File) => {
                 for path in &event.paths {
-                    self.handle_file_removed(storage_id, &storage_base, path)
+                    self.handle_file_removed(storage_id, &storage_base, &ignore_patterns, path)
                         .await;
                 }
             }
@@ -215,6 +222,7 @@ impl InotifyHandler {
                     self.handle_file_renamed(
                         storage_id,
                         &storage_base,
+                        &ignore_patterns,
                         &event.paths[0],
                         &event.paths[1],
                     )
@@ -223,13 +231,13 @@ impl InotifyHandler {
             }
             EventKind::Create(CreateKind::Folder) => {
                 for path in &event.paths {
-                    self.handle_folder_created(storage_id, &storage_base, path)
+                    self.handle_folder_created(storage_id, &storage_base, &ignore_patterns, path)
                         .await;
                 }
             }
             EventKind::Remove(RemoveKind::Folder) => {
                 for path in &event.paths {
-                    self.handle_folder_removed(storage_id, &storage_base, path)
+                    self.handle_folder_removed(storage_id, &storage_base, &ignore_patterns, path)
                         .await;
                 }
             }
@@ -237,12 +245,16 @@ impl InotifyHandler {
         }
     }
 
-    /// Find the storage_id and storage base path for the first matching event path.
-    fn find_storage_for_path(&self, paths: &[PathBuf]) -> Option<(i32, PathBuf)> {
+    /// Find the storage_id, storage base path, and ignore patterns for the first matching event path.
+    fn find_storage_for_path(&self, paths: &[PathBuf]) -> Option<(i32, PathBuf, Vec<String>)> {
         for path in paths {
             for watched in self.watched_entries.values() {
                 if path.starts_with(&watched.abs_path) {
-                    return Some((watched.storage_id, watched.storage_base.clone()));
+                    return Some((
+                        watched.storage_id,
+                        watched.storage_base.clone(),
+                        watched.ignore_patterns.clone(),
+                    ));
                 }
             }
         }
@@ -261,14 +273,19 @@ impl InotifyHandler {
         &self,
         storage_id: i32,
         storage_base: &PathBuf,
+        ignore_patterns: &[String],
         path: &PathBuf,
     ) {
         if let Some(rel) = Self::relative_path(storage_base, path) {
+            if crate::ignore::is_ignored(&rel, ignore_patterns) {
+                return;
+            }
             info!("File created in storage {}: {}", storage_id, rel);
             self.job_sender
-                .send(Job::CheckFile {
+                .send(Job::ProcessFile {
                     storage_id,
                     path: rel,
+                    mode: ProcessMode::Auto,
                 })
                 .ok();
         }
@@ -278,14 +295,19 @@ impl InotifyHandler {
         &self,
         storage_id: i32,
         storage_base: &PathBuf,
+        ignore_patterns: &[String],
         path: &PathBuf,
     ) {
         if let Some(rel) = Self::relative_path(storage_base, path) {
+            if crate::ignore::is_ignored(&rel, ignore_patterns) {
+                return;
+            }
             debug!("File modified in storage {}: {}", storage_id, rel);
             self.job_sender
-                .send(Job::CheckFile {
+                .send(Job::ProcessFile {
                     storage_id,
                     path: rel,
+                    mode: ProcessMode::Auto,
                 })
                 .ok();
         }
@@ -295,9 +317,13 @@ impl InotifyHandler {
         &self,
         storage_id: i32,
         storage_base: &PathBuf,
+        ignore_patterns: &[String],
         path: &PathBuf,
     ) {
         if let Some(rel) = Self::relative_path(storage_base, path) {
+            if crate::ignore::is_ignored(&rel, ignore_patterns) {
+                return;
+            }
             info!("File removed in storage {}: {}", storage_id, rel);
             // TODO: Handle file deletion in database
         }
@@ -307,15 +333,20 @@ impl InotifyHandler {
         &self,
         storage_id: i32,
         storage_base: &PathBuf,
+        ignore_patterns: &[String],
         _old_path: &PathBuf,
         new_path: &PathBuf,
     ) {
         if let Some(rel) = Self::relative_path(storage_base, new_path) {
+            if crate::ignore::is_ignored(&rel, ignore_patterns) {
+                return;
+            }
             info!("File renamed in storage {}: {}", storage_id, rel);
             self.job_sender
-                .send(Job::CheckFile {
+                .send(Job::ProcessFile {
                     storage_id,
                     path: rel,
+                    mode: ProcessMode::Auto,
                 })
                 .ok();
         }
@@ -325,14 +356,19 @@ impl InotifyHandler {
         &self,
         storage_id: i32,
         storage_base: &PathBuf,
+        ignore_patterns: &[String],
         path: &PathBuf,
     ) {
         if let Some(rel) = Self::relative_path(storage_base, path) {
+            if crate::ignore::is_ignored(&rel, ignore_patterns) {
+                return;
+            }
             info!("Folder created in storage {}: {}", storage_id, rel);
             self.job_sender
-                .send(Job::CheckFile {
+                .send(Job::ProcessFile {
                     storage_id,
                     path: rel,
+                    mode: ProcessMode::Auto,
                 })
                 .ok();
         }
@@ -342,9 +378,13 @@ impl InotifyHandler {
         &self,
         storage_id: i32,
         storage_base: &PathBuf,
+        ignore_patterns: &[String],
         path: &PathBuf,
     ) {
         if let Some(rel) = Self::relative_path(storage_base, path) {
+            if crate::ignore::is_ignored(&rel, ignore_patterns) {
+                return;
+            }
             info!("Folder removed in storage {}: {}", storage_id, rel);
             // TODO: Handle folder deletion in database
         }

@@ -8,13 +8,32 @@ ByteBurrow is a modern personal cloud storage and file management system built w
 
 ## Development Commands
 
+### Cargo Make (recommended)
+
+```bash
+# Build and run everything (plugins + frontend + server) in release mode
+cargo make run
+
+# Build plugins + run server (no frontend build, debug mode)
+cargo make dev
+
+# Build everything for release
+cargo make build
+
+# Build plugins only
+cargo make build-plugins
+
+# Frontend dev server with hot reload
+cargo make frontend-dev
+```
+
 ### Backend (Rust)
 
 ```bash
 # Run the main server
 cargo run --bin byteburrow
 
-# Run database migrations
+# Run database migrations (also runs automatically on server startup)
 cargo run --bin byteburrow-migration up
 
 # Rollback migrations
@@ -25,6 +44,16 @@ cargo build --release
 
 # Cross-compile for Turris Omnia (ARMv7, musl)
 cross build --target armv7-unknown-linux-musleabihf --release
+```
+
+### Plugins
+
+```bash
+# Build a single plugin
+cd plugins/exif-classifier && cargo build --release
+
+# Build all plugins and symlink to target/plugins/
+cargo make build-plugins
 ```
 
 ### Frontend (Vue 3)
@@ -61,6 +90,7 @@ Create a `.env` file in the project root with:
 - `BASE_URL` (optional): Defaults to `http://localhost:3000`
 - `TOKEN_EXPIRATION_DAYS` (optional): Defaults to 30
 - `TOKEN_LENGTH` (optional): Defaults to 32
+- `PLUGIN_DIR` (optional): Defaults to `/etc/byteburrow/plugins` (for local dev, `cargo make` sets this to `target/plugins`)
 
 ## Architecture
 
@@ -70,7 +100,7 @@ Create a `.env` file in the project root with:
   - Individual route modules: `user.rs`, `group.rs`, `storage.rs`, `tag.rs`, `photo.rs`
   - Protocol implementations: `webdav/`, `caldav/`, `carddav/`, `upnp/`
   - WebSocket support in `ws/`
-  - API documentation via `utoipa` (available at `/swagger-ui`)
+  - OpenAPI documentation via `utoipa` + `utoipa-swagger-ui` (available at `/swagger-ui`)
 
 - **`src/auth/mod.rs`**: Authentication system
   - `Auth` extractor for Axum handlers (supports Bearer tokens, Basic auth, and query params)
@@ -98,6 +128,20 @@ Create a `.env` file in the project root with:
   - SeaORM migration system
   - Migration files follow pattern: `m{timestamp}_{description}.rs`
 
+- **`src/plugin/`**: Dynamic plugin system
+  - `PluginRegistry`: loads `.so` files from plugin directory at startup
+  - Multi-pass classification with dependency resolution between plugins
+  - Integrates with job system — plugins run during `ChangedHash` processing
+
+- **`byteburrow-plugin-api/`**: Lightweight plugin API crate (workspace member)
+  - `ClassifierPlugin` trait — implemented by all plugins
+  - `FileContext`, `ClassificationResult`, `KindFlags` — shared types
+  - FFI contract via `#[no_mangle] extern "C"` constructor
+  - No heavy dependencies (only `serde` + `serde_json`)
+
+- **`plugins/`**: Plugin implementations (each is a `cdylib` crate)
+  - `exif-classifier/`: EXIF metadata extraction (GPS, date, camera info)
+
 - **`src/config/`**: Configuration management
   - Global singleton config loaded from environment variables
   - Access via `Config::get()` throughout the application
@@ -115,11 +159,38 @@ Create a `.env` file in the project root with:
 
 ### Application Flow
 
-1. **Startup**: `src/bin/byteburrow.rs` initializes tracing, loads config, connects to database
+1. **Startup**: `src/bin/byteburrow.rs` initializes tracing, loads config, connects to database, runs pending migrations, loads plugins
 2. **Concurrent execution**: Job runner and web server run in parallel via `tokio::select!`
 3. **Request handling**: Axum router → Auth extractor → Handler → Database/Filesystem → Response
 4. **State management**: `AppState` contains DB connection, config, Jinja templates, and job sender
 5. **Background jobs**: Handlers can enqueue jobs via `JobSender` for async processing
+
+### OpenAPI / Swagger
+
+All API endpoints are annotated with `#[utoipa::path(...)]` and grouped by tags. The central `ApiDoc` derive lives in `src/web/mod.rs`.
+
+**Tag grouping:**
+
+| Tag | Description | Module |
+|-----|-------------|--------|
+| `user` | User management (login, CRUD, password) | `src/web/user.rs` |
+| `group` | Group management (CRUD) | `src/web/group.rs` |
+| `tag` | Tag management (CRUD) | `src/web/tag.rs` |
+| `storage` | Storage CRUD (list, get, create, update, delete) | `src/web/storage.rs` |
+| `file` | File content operations (show, download, update) | `src/web/storage.rs` |
+| `entry` | Entry management (create, rename, remove, list directory) | `src/web/storage.rs` |
+| `share` | Sharing operations (create, list, update, delete, share-based access) | `src/web/storage.rs` |
+| `thumbnail` | Thumbnail serving and hash trigger | `src/web/storage.rs` |
+| `photo` | Photo listing and thumbnail regeneration | `src/web/photo.rs` |
+
+**When adding a new endpoint:**
+1. Add `#[utoipa::path(..., tag = "...", ...)]` annotation to the handler
+2. Register the handler in `ApiDoc`'s `paths(...)` in `src/web/mod.rs`
+3. Register any new request/response schemas in `components(schemas(...))`
+4. If introducing a new tag, add it to the `tags(...)` list
+5. Make the handler `pub(crate)` so the macro can reference it
+
+**Swagger UI** is available at `/swagger-ui`, OpenAPI JSON at `/api-doc/openapi.json`.
 
 ## Key Patterns
 
@@ -153,7 +224,12 @@ let entries = storage.list_directory_fs(sub_path).await?;
 ### Background Jobs
 Enqueue jobs via the job sender available in AppState:
 ```rust
-state.job_sender.send(Job::CheckFile { storage_id, path }).ok();
+// Auto: check if changed, then classify (respects skip_plugins flag)
+state.job_sender.send(Job::ProcessFile { storage_id, path, mode: ProcessMode::Auto }).ok();
+// ForceClassify: re-run plugins regardless of change, ignores skip_plugins
+state.job_sender.send(Job::ProcessFile { storage_id, path, mode: ProcessMode::ForceClassify }).ok();
+// HashOnly: only recalculate hash, never run plugins
+state.job_sender.send(Job::ProcessFile { storage_id, path, mode: ProcessMode::HashOnly }).ok();
 ```
 
 ## Binary Targets
@@ -168,3 +244,7 @@ state.job_sender.send(Job::CheckFile { storage_id, path }).ok();
 - Frontend assets are served by Axum's `ServeDir` middleware from the path specified in `FRONTEND_DIST`
 - CORS is permissive (`CorsLayer::permissive()`) for development
 - Structured logging via `tracing` with environment-based filtering (default: `byteburrow=debug,tower_http=debug,sea_orm=info,sqlx=warn`)
+
+## Maintaining This File
+
+This CLAUDE.md must be kept in sync with the codebase. After any design or architectural change (new modules, new API tags, changed patterns, new binary targets, etc.), update the relevant sections here before considering the task complete.

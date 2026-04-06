@@ -9,21 +9,58 @@ use crate::auth::Auth;
 use crate::config::Config;
 use crate::job::JobSender;
 use crate::storage::format_size;
-use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Json, Router};
+use axum::{
+    extract::State,
+    http::{header, StatusCode, Uri},
+    response::IntoResponse,
+    routing::get,
+    Json, Router,
+};
 use minijinja::Environment;
+use rust_embed::Embed;
 use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 use serde::Serialize;
-use std::path::PathBuf;
 use std::sync::Arc;
-use tower_http::{
-    services::{ServeDir, ServeFile},
-    trace::TraceLayer,
-};
+use tower_http::trace::TraceLayer;
 use utoipa::{
     openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme},
     Modify, OpenApi,
 };
 use utoipa_swagger_ui::SwaggerUi;
+
+#[derive(Embed)]
+#[folder = "frontend/dist"]
+struct FrontendAssets;
+
+async fn frontend_handler(uri: Uri) -> impl IntoResponse {
+    let path = uri.path().trim_start_matches('/');
+
+    // Try the exact path first, then fall back to index.html (SPA routing)
+    let file = if path.is_empty() {
+        FrontendAssets::get("index.html")
+    } else {
+        FrontendAssets::get(path).or_else(|| FrontendAssets::get("index.html"))
+    };
+
+    match file {
+        Some(content) => {
+            let mime = mime_guess::from_path(if FrontendAssets::get(path).is_some() {
+                path
+            } else {
+                "index.html"
+            })
+            .first_or_octet_stream();
+
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, mime.as_ref().to_string())],
+                content.data.into_owned(),
+            )
+                .into_response()
+        }
+        None => (StatusCode::NOT_FOUND, "Not Found").into_response(),
+    }
+}
 
 /// Error response
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -112,6 +149,11 @@ pub struct AppState {
 /// OpenAPI documentation
 #[derive(OpenApi)]
 #[openapi(
+    info(
+        title = "ByteBurrow API",
+        version = "1.0.0",
+        description = "REST API for ByteBurrow personal cloud storage",
+    ),
     paths(
         // User endpoints
         user::login_handler,
@@ -134,12 +176,45 @@ pub struct AppState {
         tag::create_tag_handler,
         tag::update_tag_handler,
         tag::delete_tag_handler,
-        // Storage endpoints
+        // Storage CRUD endpoints
         storage::list_storages_handler,
         storage::get_storage_handler,
         storage::create_storage_handler,
         storage::update_storage_handler,
         storage::delete_storage_handler,
+        // File content endpoints
+        storage::get_file_content_handler,
+        storage::download_file_handler,
+        storage::update_file_content_handler,
+        // Entry management endpoints
+        storage::create_entry_handler,
+        storage::rename_entry_handler,
+        storage::remove_entry_handler,
+        storage::list_directory_handler,
+        // Share endpoints
+        storage::list_shares_handler,
+        storage::list_all_user_shares_handler,
+        storage::list_shares_with_me_handler,
+        storage::share_entry_handler,
+        storage::delete_share_handler,
+        storage::update_share_handler,
+        storage::get_share_info_handler,
+        storage::share_list_root_handler,
+        storage::share_list_handler,
+        storage::share_show_handler,
+        storage::share_update_handler,
+        storage::share_create_handler,
+        storage::share_rename_handler,
+        storage::share_remove_handler,
+        // Thumbnail endpoints
+        storage::thumbnail_handler,
+        storage::trigger_hash_handler,
+        // Photo endpoints
+        photo::list_photos,
+        photo::list_by_year,
+        photo::list_by_year_month,
+        photo::list_by_year_month_day,
+        photo::regenerate_thumbnail,
     ),
     components(
         schemas(
@@ -164,6 +239,8 @@ pub struct AppState {
             storage::ShareEntryRequest,
             storage::ShareResponse,
             crate::entity::entry::EntryType,
+            crate::storage::DirectoryEntry,
+            photo::PhotoResponse,
         )
     ),
     modifiers(&SecurityAddon),
@@ -171,7 +248,12 @@ pub struct AppState {
         (name = "user", description = "User management endpoints"),
         (name = "group", description = "Group management endpoints"),
         (name = "tag", description = "Tag management endpoints"),
-        (name = "storage", description = "Storage management endpoints"),
+        (name = "storage", description = "Storage CRUD endpoints"),
+        (name = "file", description = "File content operations"),
+        (name = "entry", description = "Entry management (create, rename, remove, list)"),
+        (name = "share", description = "Sharing operations"),
+        (name = "thumbnail", description = "Thumbnail and hash operations"),
+        (name = "photo", description = "Photo management endpoints"),
     )
 )]
 struct ApiDoc;
@@ -229,8 +311,6 @@ pub async fn run(config: Config, db: DatabaseConnection, job_sender: JobSender) 
         job_sender,
     });
 
-    let index_path = PathBuf::from(&config.frontend_dist).join("index.html");
-
     // API router - all API routes under /api
     let api_router = Router::new()
         .route("/health", get(health_handler))
@@ -242,10 +322,9 @@ pub async fn run(config: Config, db: DatabaseConnection, job_sender: JobSender) 
         .nest("/tag", tag::router())
         .nest("/photo", photo::router());
 
-    let app = Router::new().nest("/api", api_router).nest_service(
-        "/",
-        ServeDir::new(&config.frontend_dist).fallback(ServeFile::new(index_path)),
-    );
+    let app = Router::new()
+        .nest("/api", api_router)
+        .fallback(get(frontend_handler));
 
     // Merge Swagger UI - convert explicitly with type annotation
     let swagger_router = Router::<Arc<AppState>>::from(

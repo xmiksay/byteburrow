@@ -1,0 +1,10 @@
+[package]
+name = "byteburrow-plugin-api"
+version = "0.1.0"
+edition = "2021"
+description = "Plugin API for ByteBurrow file classification plugins"
+authors = ["Martin Miksanik"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

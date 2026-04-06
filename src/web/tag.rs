@@ -60,6 +60,7 @@ pub fn router() -> Router<Arc<AppState>> {
 #[utoipa::path(
     get,
     path = "/api/tag",
+    tag = "tag",
     responses(
         (status = 200, description = "List of all tags", body = Vec<TagResponse>),
     )
@@ -86,6 +87,7 @@ async fn list_tags_handler(
 #[utoipa::path(
     get,
     path = "/api/tag/{id}",
+    tag = "tag",
     params(("id" = i32, Path, description = "Tag ID")),
     responses(
         (status = 200, description = "Tag found", body = TagResponse),
@@ -124,6 +126,7 @@ async fn get_tag_handler(
 #[utoipa::path(
     post,
     path = "/api/tag",
+    tag = "tag",
     request_body = CreateTagRequest,
     responses(
         (status = 200, description = "Tag created", body = TagResponse),
@@ -187,6 +190,7 @@ async fn create_tag_handler(
 #[utoipa::path(
     put,
     path = "/api/tag/{id}",
+    tag = "tag",
     params(("id" = i32, Path, description = "Tag ID")),
     request_body = UpdateTagRequest,
     responses(
@@ -280,6 +284,7 @@ async fn update_tag_handler(
 #[utoipa::path(
     delete,
     path = "/api/tag/{id}",
+    tag = "tag",
     params(("id" = i32, Path, description = "Tag ID")),
     responses(
         (status = 200, description = "Tag deleted"),

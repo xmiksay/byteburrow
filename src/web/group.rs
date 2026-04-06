@@ -60,6 +60,7 @@ pub fn router() -> Router<Arc<AppState>> {
 #[utoipa::path(
     get,
     path = "/api/group",
+    tag = "group",
     responses(
         (status = 200, description = "List of all groups", body = Vec<GroupResponse>),
         (status = 403, description = "Admin access required", body = ErrorResponse),
@@ -90,6 +91,7 @@ async fn list_groups_handler(
 #[utoipa::path(
     get,
     path = "/api/group/{id}",
+    tag = "group",
     params(("id" = i32, Path, description = "Group ID")),
     responses(
         (status = 200, description = "Group found", body = GroupResponse),
@@ -132,6 +134,7 @@ async fn get_group_handler(
 #[utoipa::path(
     post,
     path = "/api/group",
+    tag = "group",
     request_body = CreateGroupRequest,
     responses(
         (status = 200, description = "Group created", body = GroupResponse),
@@ -195,6 +198,7 @@ async fn create_group_handler(
 #[utoipa::path(
     put,
     path = "/api/group/{id}",
+    tag = "group",
     params(("id" = i32, Path, description = "Group ID")),
     request_body = UpdateGroupRequest,
     responses(
@@ -288,6 +292,7 @@ async fn update_group_handler(
 #[utoipa::path(
     delete,
     path = "/api/group/{id}",
+    tag = "group",
     params(("id" = i32, Path, description = "Group ID")),
     responses(
         (status = 200, description = "Group deleted"),

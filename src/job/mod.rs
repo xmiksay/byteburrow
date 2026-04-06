@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::BufReader;
 use std::path::Path;
 use std::sync::Arc;
@@ -9,21 +10,40 @@ use tokio::sync::{mpsc, Semaphore};
 use tracing::{error, info, instrument, warn};
 
 use crate::config::Config;
-use crate::entity::{entry, photo};
-use crate::storage::{thumbnail, Storage};
+use crate::entity::{entry, meta, photo};
+use crate::plugin::PluginRegistry;
+use crate::storage::{determine_content_type, thumbnail, Storage};
+
+/// Default nice value for background job threads (lower priority than web server).
+/// Range: 0 (normal) to 19 (lowest priority). 10 is a reasonable background level.
+const JOB_THREAD_NICE: i32 = 10;
+
+/// Controls what processing to perform on a file.
+#[derive(Debug, Clone, Copy)]
+pub enum ProcessMode {
+    /// Check if file changed (hash differs). If yes, rehash AND run plugins.
+    /// Respects the entry's `skip_plugins` flag.
+    Auto,
+    /// Force re-run the plugin classification cycle regardless of whether
+    /// the file hash changed. Ignores the `skip_plugins` flag.
+    ForceClassify,
+    /// Only recalculate hash, never run plugins.
+    HashOnly,
+}
 
 #[derive(Debug)]
 pub enum Job {
-    CheckFile { storage_id: i32, path: String },
-    ChangedHash { hash: Vec<u8> },
-    CreateThumbnail { hash: Vec<u8>, regenerate: bool },
-    ProcessImage { hash: Vec<u8> },
-    ProcessPhoto { hash: Vec<u8> },
-    ProcessGit { path: String },
-    ProcessVideo { hash: Vec<u8> },
-    ProcessFilm { hash: Vec<u8> },
-    ProcessMusic { hash: Vec<u8> },
-    ProcessDocument { hash: Vec<u8> },
+    /// Unified file processing: check hash, optionally run plugin classification.
+    ProcessFile {
+        storage_id: i32,
+        path: String,
+        mode: ProcessMode,
+    },
+    /// Generate thumbnails for an entry identified by hash.
+    CreateThumbnail {
+        hash: Vec<u8>,
+        regenerate: bool,
+    },
 }
 
 pub type JobSender = mpsc::UnboundedSender<Job>;
@@ -31,185 +51,281 @@ pub type JobSender = mpsc::UnboundedSender<Job>;
 pub struct JobRunner {
     rx: mpsc::UnboundedReceiver<Job>,
     db: Arc<DatabaseConnection>,
-    tx: JobSender,
     semaphore: Arc<Semaphore>,
+    plugins: Arc<PluginRegistry>,
+    runtime: tokio::runtime::Runtime,
 }
 
 impl JobRunner {
-    pub fn new(db: DatabaseConnection) -> (Self, JobSender) {
+    pub fn new(db: DatabaseConnection, plugins: PluginRegistry) -> (Self, JobSender) {
         let (tx, rx) = mpsc::unbounded_channel();
         let workers = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
-        info!(workers, "Job runner concurrency");
+        info!(workers, nice = JOB_THREAD_NICE, "Job runner concurrency");
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(workers)
+            .thread_name("byteburrow-job")
+            .on_thread_start(|| {
+                // Set lower scheduling priority for job threads so the web
+                // server (running on the main runtime) is always preferred
+                // by the OS scheduler.
+                unsafe {
+                    libc::nice(JOB_THREAD_NICE);
+                }
+            })
+            .enable_all()
+            .build()
+            .expect("Failed to create job runtime");
+
         (
             Self {
                 rx,
                 db: Arc::new(db),
-                tx: tx.clone(),
                 semaphore: Arc::new(Semaphore::new(workers)),
+                plugins: Arc::new(plugins),
+                runtime,
             },
             tx,
         )
     }
 
-    pub async fn run(mut self) {
-        info!("Job runner started");
-        while let Some(job) = self.rx.recv().await {
-            let permit = self.semaphore.clone().acquire_owned().await.unwrap();
-            let db = self.db.clone();
-            let tx = self.tx.clone();
-            tokio::spawn(async move {
-                info!(?job, "Processing job");
-                if let Err(e) = Self::process_job(&db, &tx, job).await {
-                    error!("Job failed: {e}");
-                }
-                drop(permit);
-            });
-        }
-        info!("Job runner stopped");
+    /// Run the job processing loop. This blocks the calling thread and
+    /// executes all jobs on the dedicated low-priority runtime.
+    pub fn run(mut self) {
+        self.runtime.block_on(async move {
+            info!("Job runner started (dedicated runtime, nice {})", JOB_THREAD_NICE);
+            while let Some(job) = self.rx.recv().await {
+                let permit = self.semaphore.clone().acquire_owned().await.unwrap();
+                let db = self.db.clone();
+                let plugins = self.plugins.clone();
+                tokio::spawn(async move {
+                    info!(?job, "Processing job");
+                    if let Err(e) = Self::process_job(&db, &plugins, job).await {
+                        error!("Job failed: {e}");
+                    }
+                    drop(permit);
+                });
+            }
+            info!("Job runner stopped");
+        });
     }
 
-    #[instrument(skip(db, tx))]
-    async fn process_job(db: &DatabaseConnection, tx: &JobSender, job: Job) -> anyhow::Result<()> {
+    #[instrument(skip(db, plugins))]
+    async fn process_job(
+        db: &DatabaseConnection,
+        plugins: &PluginRegistry,
+        job: Job,
+    ) -> anyhow::Result<()> {
         match job {
-            Job::CheckFile { storage_id, path } => {
-                // TODO: make this configurable
-                if !path.contains(".git")
-                    && !path.contains(".cache")
-                    && !path.contains("node_nodules")
-                {
-                    let storage = Storage::find_by_id(db, storage_id).await?;
-                    let (updated, hash) = storage.calculate_hash(db, &path).await?;
-                    if updated {
-                        info!(path = &path, hash = hex::encode(&hash), "Hash updated");
-                        let _ = tx.send(Job::ChangedHash { hash });
-                    }
-                    
-                }
+            Job::ProcessFile { storage_id, path, mode } => {
+                Self::process_file(db, plugins, storage_id, &path, mode).await?;
             }
 
-            Job::ChangedHash { ref hash } => {
-                Self::process_changed_hash(db, hash).await?;
-            }
-
-            Job::CreateThumbnail { .. } => {
-                // TODO: Implement thumbnail creation
-                warn!("CreateThumbnail job not implemented yet");
-            }
-
-            Job::ProcessImage { .. } => {
-                // TODO: Implement image processing
-                warn!("ProcessImage job not implemented yet");
-            }
-
-            Job::ProcessPhoto { .. } => {
-                // TODO: Implement photo processing
-                warn!("ProcessPhoto job not implemented yet");
-            }
-
-            Job::ProcessVideo { .. } => {
-                // TODO: Implement video processing
-                warn!("ProcessVideo job not implemented yet");
-            }
-
-            Job::ProcessMusic { .. } => {
-                // TODO: Implement music processing
-                warn!("ProcessMusic job not implemented yet");
-            }
-
-            Job::ProcessDocument { .. } => {
-                // TODO: Implement document processing
-                warn!("ProcessDocument job not implemented yet");
-            }
-
-            Job::ProcessGit { .. } => {
-                // TODO: Implement git repository processing
-                warn!("ProcessGit job not implemented yet");
-            }
-
-            Job::ProcessFilm { .. } => {
-                // TODO: Implement film/video processing
-                warn!("ProcessFilm job not implemented yet");
+            Job::CreateThumbnail { ref hash, regenerate } => {
+                Self::create_thumbnail(db, hash, regenerate).await?;
             }
         }
 
         Ok(())
     }
 
-    async fn process_changed_hash(
+    async fn process_file(
         db: &DatabaseConnection,
-        hash_bytes: &[u8],
+        plugins: &PluginRegistry,
+        storage_id: i32,
+        path: &str,
+        mode: ProcessMode,
     ) -> anyhow::Result<()> {
-        let hash_hex = hex::encode(hash_bytes);
+        let storage = Storage::find_by_id(db, storage_id).await?;
 
-        // Find entry with this hash
-        let entry = entry::Entity::find()
-            .filter(entry::Column::Hash.eq(hash_bytes.to_vec()))
-            .one(db)
-            .await?;
+        // Filter excluded paths using per-storage ignore patterns
+        let patterns = crate::ignore::parse_patterns(&storage.model.ignore_patterns);
+        if crate::ignore::is_ignored(path, &patterns) {
+            return Ok(());
+        }
+        let (updated, hash, entry) = storage.calculate_hash(db, path).await?;
 
-        let entry = match entry {
-            Some(e) => e,
-            None => {
-                warn!(hash = %hash_hex, "No entry found for hash");
-                return Ok(());
-            }
-        };
-
-        // Check if it's an image by extension
-        if !is_image_file(&entry.path) {
+        // In Auto mode, skip if nothing changed
+        if !updated && matches!(mode, ProcessMode::Auto) {
             return Ok(());
         }
 
-        // Resolve full file path
-        let storage = Storage::find_by_id(db, entry.storage_id).await?;
+        let hash_hex = hex::encode(&hash);
         let full_path = storage.get_full_path(&entry.path);
 
-        info!(path = &entry.path, "Processing image for photo library");
+        // Decide whether to run plugins
+        let run_plugins = match mode {
+            ProcessMode::HashOnly => false,
+            ProcessMode::Auto => !entry.skip_plugins,
+            ProcessMode::ForceClassify => true,
+        };
 
-        // Extract EXIF metadata
-        let (latitude, longitude, date) = extract_exif(&full_path);
-
-        // Upsert photo record
-        let existing = photo::Entity::find_by_id(hash_bytes.to_vec())
-            .one(db)
-            .await?;
-
-        if existing.is_some() {
-            let active = photo::ActiveModel {
-                hash: Set(hash_bytes.to_vec()),
-                latitude: Set(latitude),
-                longitude: Set(longitude),
-                date: Set(date),
-                ..Default::default()
-            };
-            active.update(db).await?;
-        } else {
-            let active = photo::ActiveModel {
-                hash: Set(hash_bytes.to_vec()),
-                latitude: Set(latitude),
-                longitude: Set(longitude),
-                date: Set(date),
-                keywords: Set(vec![]),
-            };
-            active.insert(db).await?;
+        if run_plugins {
+            Self::run_classification(db, plugins, &entry, &hash, &full_path).await?;
         }
 
-        info!(
-            path = &entry.path,
-            lat = ?latitude,
-            lon = ?longitude,
-            date = ?date,
-            "Photo record saved"
-        );
+        // Generate thumbnails for images (always, not gated by plugin skip)
+        if is_image_file(&entry.path) {
+            Self::generate_thumbnails(&full_path, &hash_hex).await?;
+        }
 
-        // Generate thumbnails
+        Ok(())
+    }
+
+    async fn run_classification(
+        db: &DatabaseConnection,
+        plugins: &PluginRegistry,
+        entry: &entry::Model,
+        hash_bytes: &[u8],
+        full_path: &Path,
+    ) -> anyhow::Result<()> {
+        // Read file data and determine MIME type
+        let data = std::fs::read(full_path).unwrap_or_default();
+        let mime_type = determine_content_type(full_path, &data);
+
+        info!(path = &entry.path, mime = mime_type, "Classifying file");
+
+        if !plugins.is_empty() {
+            let existing_custom: HashMap<String, serde_json::Value> = HashMap::new();
+            let ctx = byteburrow_plugin_api::FileContext {
+                path: &entry.path,
+                full_path,
+                data: &data,
+                mime_type,
+                size: entry.size as u64,
+                custom: &existing_custom,
+            };
+
+            let merged = plugins.classify_file(&ctx);
+
+            // Upsert meta record with keywords + custom
+            if !merged.keywords.is_empty() || !merged.custom.is_empty() {
+                let existing_meta = meta::Entity::find_by_id(hash_bytes.to_vec())
+                    .one(db)
+                    .await?;
+
+                match existing_meta {
+                    Some(m) => {
+                        let mut kw = m.keywords.clone();
+                        kw.extend(merged.keywords);
+                        kw.sort();
+                        kw.dedup();
+
+                        let custom = match m.custom {
+                            serde_json::Value::Object(mut map) => {
+                                map.extend(merged.custom);
+                                serde_json::Value::Object(map)
+                            }
+                            _ => {
+                                if merged.custom.is_empty() {
+                                    m.custom
+                                } else {
+                                    serde_json::Value::Object(merged.custom)
+                                }
+                            }
+                        };
+
+                        let active = meta::ActiveModel {
+                            hash: Set(hash_bytes.to_vec()),
+                            keywords: Set(kw),
+                            custom: Set(custom),
+                            ..Default::default()
+                        };
+                        active.update(db).await?;
+                    }
+                    None => {
+                        let active = meta::ActiveModel {
+                            hash: Set(hash_bytes.to_vec()),
+                            tags: Set(vec![]),
+                            keywords: Set(merged.keywords),
+                            custom: Set(if merged.custom.is_empty() {
+                                serde_json::Value::Object(serde_json::Map::new())
+                            } else {
+                                serde_json::Value::Object(merged.custom)
+                            }),
+                        };
+                        active.insert(db).await?;
+                    }
+                }
+            }
+
+            // Upsert photo record if geo/date data was produced
+            if merged.latitude.is_some()
+                || merged.longitude.is_some()
+                || merged.date_unix.is_some()
+            {
+                let date = merged.date_unix.and_then(|ts| {
+                    chrono::DateTime::from_timestamp(ts, 0).map(|dt| dt.naive_utc())
+                });
+
+                let existing = photo::Entity::find_by_id(hash_bytes.to_vec())
+                    .one(db)
+                    .await?;
+
+                if existing.is_some() {
+                    let active = photo::ActiveModel {
+                        hash: Set(hash_bytes.to_vec()),
+                        latitude: Set(merged.latitude),
+                        longitude: Set(merged.longitude),
+                        date: Set(date),
+                        ..Default::default()
+                    };
+                    active.update(db).await?;
+                } else {
+                    let active = photo::ActiveModel {
+                        hash: Set(hash_bytes.to_vec()),
+                        latitude: Set(merged.latitude),
+                        longitude: Set(merged.longitude),
+                        date: Set(date),
+                        keywords: Set(vec![]),
+                    };
+                    active.insert(db).await?;
+                }
+            }
+        } else {
+            // Fallback: inline EXIF extraction when no plugins loaded
+            if is_image_file(&entry.path) {
+                info!(path = &entry.path, "Processing image (inline, no plugins)");
+                let (latitude, longitude, date) = extract_exif(full_path);
+
+                let existing = photo::Entity::find_by_id(hash_bytes.to_vec())
+                    .one(db)
+                    .await?;
+
+                if existing.is_some() {
+                    let active = photo::ActiveModel {
+                        hash: Set(hash_bytes.to_vec()),
+                        latitude: Set(latitude),
+                        longitude: Set(longitude),
+                        date: Set(date),
+                        ..Default::default()
+                    };
+                    active.update(db).await?;
+                } else {
+                    let active = photo::ActiveModel {
+                        hash: Set(hash_bytes.to_vec()),
+                        latitude: Set(latitude),
+                        longitude: Set(longitude),
+                        date: Set(date),
+                        keywords: Set(vec![]),
+                    };
+                    active.insert(db).await?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn generate_thumbnails(full_path: &Path, hash_hex: &str) -> anyhow::Result<()> {
         let config = Config::get();
         let thumbnail_dir = std::path::PathBuf::from(&config.thumbnail_storage);
 
         for (size_name, max_dim) in [("mini", 64u32), ("small", 256u32), ("large", 1024u32)] {
-            let thumb_path = thumbnail::get_thumbnail_path(&thumbnail_dir, &hash_hex, size_name);
+            let thumb_path =
+                thumbnail::get_thumbnail_path(&thumbnail_dir, hash_hex, size_name);
 
             if thumb_path.exists() {
                 continue;
@@ -217,7 +333,7 @@ impl JobRunner {
 
             thumbnail::ensure_thumbnail_dir(&thumb_path).await?;
 
-            let full_path = full_path.clone();
+            let full_path = full_path.to_path_buf();
             let thumb_path_clone = thumb_path.clone();
             let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
                 let img = image::open(&full_path)?;
@@ -233,16 +349,51 @@ impl JobRunner {
             .await?;
 
             match result {
-                Ok(()) => {
-                    info!(size = size_name, "Thumbnail generated");
-                }
-                Err(e) => {
-                    warn!(size = size_name, error = %e, "Failed to generate thumbnail");
-                }
+                Ok(()) => info!(size = size_name, "Thumbnail generated"),
+                Err(e) => warn!(size = size_name, error = %e, "Failed to generate thumbnail"),
             }
         }
 
         Ok(())
+    }
+
+    async fn create_thumbnail(
+        db: &DatabaseConnection,
+        hash_bytes: &[u8],
+        regenerate: bool,
+    ) -> anyhow::Result<()> {
+        let hash_hex = hex::encode(hash_bytes);
+
+        let entry = entry::Entity::find()
+            .filter(entry::Column::Hash.eq(hash_bytes.to_vec()))
+            .one(db)
+            .await?;
+
+        let entry = match entry {
+            Some(e) => e,
+            None => {
+                warn!(hash = %hash_hex, "No entry found for hash");
+                return Ok(());
+            }
+        };
+
+        if !is_image_file(&entry.path) {
+            return Ok(());
+        }
+
+        let storage = Storage::find_by_id(db, entry.storage_id).await?;
+        let full_path = storage.get_full_path(&entry.path);
+
+        if regenerate {
+            let config = Config::get();
+            let thumbnail_dir = std::path::PathBuf::from(&config.thumbnail_storage);
+            for size in ["mini", "small", "large"] {
+                let path = thumbnail::get_thumbnail_path(&thumbnail_dir, &hash_hex, size);
+                let _ = tokio::fs::remove_file(&path).await;
+            }
+        }
+
+        Self::generate_thumbnails(&full_path, &hash_hex).await
     }
 }
 

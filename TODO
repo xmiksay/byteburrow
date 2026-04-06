@@ -3,7 +3,6 @@
 [x] Create storage service and use it on frontend
 
 
-Create recursive discovery method
 Add crud operation with files and shares
 Add streaming file content endpoint
 Connect forntend

@@ -1,0 +1,15 @@
+[package]
+name = "byteburrow-plugin-face"
+version = "0.1.0"
+edition = "2021"
+description = "Face detection plugin for ByteBurrow"
+authors = ["Martin Miksanik"]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+byteburrow-plugin-api = { path = "../../byteburrow-plugin-api" }
+rustface = "0.1"
+image = "0.25"
+serde_json = "1.0"

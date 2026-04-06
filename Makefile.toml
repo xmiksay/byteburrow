@@ -1,0 +1,73 @@
+[config]
+default_to_workspace = false
+
+[env]
+BYTEBURROW__PLUGIN_DIR = "target/plugins"
+
+[tasks.build-plugins]
+description = "Build all plugins as release cdylibs and symlink to target/plugins/"
+script = '''
+#!/bin/bash
+set -e
+
+PLUGIN_DIR="target/plugins"
+mkdir -p "$PLUGIN_DIR"
+
+# Build all plugin workspace members
+cargo build --release $(
+    for dir in plugins/*/; do
+        [ -f "$dir/Cargo.toml" ] && echo "-p $(grep '^name' "$dir/Cargo.toml" | head -1 | sed 's/.*= *"\(.*\)"/\1/')"
+    done
+)
+
+# Symlink all plugin .so files
+for dir in plugins/*/; do
+    [ -f "$dir/Cargo.toml" ] || continue
+    name=$(grep '^name' "$dir/Cargo.toml" | head -1 | sed 's/.*= *"\(.*\)"/\1/' | tr '-' '_')
+    so="target/release/lib${name}.so"
+    if [ -f "$so" ]; then
+        ln -sf "../../$so" "$PLUGIN_DIR/lib${name}.so"
+        echo "  → $PLUGIN_DIR/lib${name}.so"
+    fi
+done
+
+echo "Plugins ready in $PLUGIN_DIR"
+'''
+
+[tasks.frontend-install]
+description = "Install frontend dependencies"
+script = '''
+cd frontend && . "$NVM_DIR/nvm.sh" && nvm use && npm install
+'''
+
+[tasks.frontend-build]
+description = "Build frontend for production"
+dependencies = ["frontend-install"]
+script = '''
+cd frontend && . "$NVM_DIR/nvm.sh" && nvm use && npm run build
+'''
+
+[tasks.frontend-dev]
+description = "Run frontend dev server with hot reload"
+dependencies = ["frontend-install"]
+script = '''
+cd frontend && . "$NVM_DIR/nvm.sh" && nvm use && npm run dev
+'''
+
+[tasks.dev]
+description = "Build plugins, then run the server"
+dependencies = ["build-plugins"]
+command = "cargo"
+args = ["run", "--bin", "byteburrow"]
+
+[tasks.run]
+description = "Build and run everything (plugins + frontend + server)"
+dependencies = ["build-plugins", "frontend-build"]
+command = "cargo"
+args = ["run", "--release", "--bin", "byteburrow"]
+
+[tasks.build]
+description = "Build everything (server + plugins + frontend)"
+dependencies = ["build-plugins", "frontend-build"]
+command = "cargo"
+args = ["build", "--release"]

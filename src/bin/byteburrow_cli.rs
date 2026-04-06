@@ -1,6 +1,13 @@
+use byteburrow::migration::Migrator;
+use byteburrow::{
+    auth::Auth,
+    config::Config,
+    db_connect,
+    entity::{group, group_user, user},
+};
 use clap::{Args, Parser, Subcommand};
-use byteburrow::{auth::Auth, config::Config, db_connect, entity::user};
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, NotSet, QueryFilter, Set};
+use sea_orm_migration::prelude::*;
 
 #[derive(Parser)]
 #[command(name = "byteburrow-cli")]
@@ -19,6 +26,8 @@ enum Commands {
         #[command(subcommand)]
         command: UserCommands,
     },
+    /// Load development fixtures (admin user + admin group, no conflict checks)
+    Fixtures,
 }
 
 #[derive(Subcommand)]
@@ -86,7 +95,62 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        Commands::Fixtures => {
+            if let Err(e) = load_fixtures(&config).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
     }
+}
+
+async fn load_fixtures(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
+    let db = db_connect(config).await?;
+    Migrator::fresh(&db).await?;
+
+    // Insert admin group (ignore conflicts)
+    let admin_group = group::ActiveModel {
+        id: NotSet,
+        name: Set("admin".to_string()),
+        description: Set(Some("Administrators".to_string())),
+    };
+    let group_result = admin_group.insert(&db).await?;
+    println!(
+        "✓ Group created: {} (id={})",
+        group_result.name, group_result.id
+    );
+
+    // Insert admin user (ignore conflicts)
+    let hashed = Auth::hash_string("admin");
+    let admin_user = user::ActiveModel {
+        id: NotSet,
+        username: Set("admin".to_string()),
+        name: Set("Administrator".to_string()),
+        password: Set(hashed),
+        description: Set(None),
+        admin: Set(true),
+        enabled: Set(true),
+    };
+    let user_result = admin_user.insert(&db).await?;
+    println!(
+        "✓ User created:  {} (id={})",
+        user_result.username, user_result.id
+    );
+
+    // Add admin user to admin group
+    let membership = group_user::ActiveModel {
+        id: NotSet,
+        group_id: Set(group_result.id),
+        user_id: Set(user_result.id),
+        admin: Set(true),
+    };
+    membership.insert(&db).await?;
+    println!(
+        "✓ User '{}' added to group '{}'",
+        user_result.username, group_result.name
+    );
+
+    Ok(())
 }
 
 async fn handle_user_command(

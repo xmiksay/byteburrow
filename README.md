@@ -100,6 +100,27 @@ cross build --target armv7-unknown-linux-musleabihf --release
 ```
 The binary will be available at `target/armv7-unknown-linux-musleabihf/release/byteburrow`.
 
+## 📖 API Documentation
+
+ByteBurrow provides auto-generated OpenAPI documentation via **Swagger UI**.
+
+- **Swagger UI**: Available at `/swagger-ui` when the server is running
+- **OpenAPI JSON**: Available at `/api-doc/openapi.json`
+
+All endpoints are grouped by resource tags:
+
+| Tag | Description |
+|-----|-------------|
+| `user` | User management (login, CRUD, password change) |
+| `group` | Group management (CRUD) |
+| `tag` | Tag management (CRUD) |
+| `storage` | Storage backend CRUD |
+| `file` | File content operations (view, download, update) |
+| `entry` | Entry management (create, rename, remove, list directory) |
+| `share` | Sharing (create, list, update, delete, share-based file access) |
+| `thumbnail` | Thumbnail serving and hash calculation |
+| `photo` | Photo listing by date and thumbnail regeneration |
+
 ## 🏗️ Architecture
 
 The system is designed with a clear separation of concerns:

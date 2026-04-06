@@ -10,6 +10,10 @@ mod m20220101_000007_shared;
 mod m20220101_000008_meta;
 mod m20220101_000010_token;
 mod m20220101_000011_photo;
+mod m20220101_000012_meta_custom_required;
+mod m20220101_000013_entry_skip_plugins;
+mod m20220101_000014_entry_drop_kind;
+mod m20220101_000015_storage_ignore_patterns;
 
 // Plugin migrations (feature-gated)
 #[cfg(feature = "plugin-contactlist")]
@@ -33,6 +37,10 @@ impl MigratorTrait for Migrator {
             Box::new(m20220101_000008_meta::Migration),
             Box::new(m20220101_000010_token::Migration),
             Box::new(m20220101_000011_photo::Migration),
+            Box::new(m20220101_000012_meta_custom_required::Migration),
+            Box::new(m20220101_000013_entry_skip_plugins::Migration),
+            Box::new(m20220101_000014_entry_drop_kind::Migration),
+            Box::new(m20220101_000015_storage_ignore_patterns::Migration),
         ];
 
         // Plugin migrations (conditionally included based on features)

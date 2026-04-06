@@ -99,6 +99,7 @@ pub struct ChangePasswordRequest {
 #[utoipa::path(
     post,
     path = "/api/user/{id}/password",
+    tag = "user",
     params(("id" = i32, Path, description = "User ID")),
     request_body = ChangePasswordRequest,
     responses(
@@ -164,6 +165,7 @@ async fn change_password_handler(
 #[utoipa::path(
     post,
     path = "/api/user/login",
+    tag = "user",
     request_body = LoginRequest,
     responses(
         (status = 200, description = "Login successful", body = LoginResponse),
@@ -232,6 +234,7 @@ async fn login_handler(
 #[utoipa::path(
     get,
     path = "/api/user/me",
+    tag = "user",
     responses(
         (status = 200, description = "Current user info"),
     ),
@@ -257,6 +260,7 @@ async fn me_handler(auth: Auth) -> impl IntoResponse {
 #[utoipa::path(
     get,
     path = "/api/user",
+    tag = "user",
     responses(
         (status = 200, description = "List of all users", body = Vec<UserResponse>),
         (status = 403, description = "Admin access required", body = ErrorResponse),
@@ -290,6 +294,7 @@ async fn list_users_handler(
 #[utoipa::path(
     get,
     path = "/api/user/{id}",
+    tag = "user",
     params(("id" = i32, Path, description = "User ID")),
     responses(
         (status = 200, description = "User found", body = UserResponse),
@@ -332,6 +337,7 @@ async fn get_user_handler(
 #[utoipa::path(
     post,
     path = "/api/user",
+    tag = "user",
     request_body = CreateUserRequest,
     responses(
         (status = 200, description = "User created", body = UserResponse),
@@ -402,6 +408,7 @@ async fn create_user_handler(
 #[utoipa::path(
     put,
     path = "/api/user/{id}",
+    tag = "user",
     params(("id" = i32, Path, description = "User ID")),
     request_body = UpdateUserRequest,
     responses(
@@ -507,6 +514,7 @@ async fn update_user_handler(
 #[utoipa::path(
     delete,
     path = "/api/user/{id}",
+    tag = "user",
     params(("id" = i32, Path, description = "User ID")),
     responses(
         (status = 200, description = "User deleted"),

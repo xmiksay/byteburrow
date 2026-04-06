@@ -401,7 +401,7 @@ const deleteEntry = async (entry: DirectoryEntry) => {
             </div>
             <File v-else :size="18" class="entry-icon file" />
             <span class="entry-name">{{ getBasename(entry.path) }}</span>
-            <div class="entry-tags" v-if="entry.tags.length > 0">
+            <div class="entry-tags" v-if="entry.tags?.length > 0">
               <span v-for="tagId in entry.tags" :key="tagId" class="tag-pill">
                 {{ getTagName(tagId) }}
               </span>

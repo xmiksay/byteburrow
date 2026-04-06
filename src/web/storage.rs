@@ -8,7 +8,7 @@ use crate::storage::{
 use crate::web::{require_admin, require_group_exists, require_user_exists, AppState, ErrorResponse};
 use axum::{
     body::Body,
-    extract::{Path as AxumPath, State},
+    extract::{Path as AxumPath, Query, State},
     http::{header, Request, StatusCode},
     response::{Html, IntoResponse},
     routing::{delete, get, post, put},
@@ -38,6 +38,7 @@ pub struct StorageResponse {
     pub path: String,
     pub default_user: i32,
     pub default_group: i32,
+    pub ignore_patterns: String,
 }
 
 impl From<storage::Model> for StorageResponse {
@@ -49,6 +50,7 @@ impl From<storage::Model> for StorageResponse {
             path: storage.path,
             default_user: storage.default_user,
             default_group: storage.default_group,
+            ignore_patterns: storage.ignore_patterns,
         }
     }
 }
@@ -61,6 +63,7 @@ pub struct CreateStorageRequest {
     pub path: String,
     pub default_user: i32,
     pub default_group: i32,
+    pub ignore_patterns: Option<String>,
 }
 
 /// Update storage request (all fields optional)
@@ -71,6 +74,7 @@ pub struct UpdateStorageRequest {
     pub path: Option<String>,
     pub default_user: Option<i32>,
     pub default_group: Option<i32>,
+    pub ignore_patterns: Option<String>,
 }
 
 /// Create entry request
@@ -140,8 +144,22 @@ pub fn router() -> Router<Arc<AppState>> {
 
 /// Thumbnail endpoint - serves thumbnail by entry hash (public, no auth)
 /// GET /api/storage/thumbnail/:hash/:size
+#[utoipa::path(
+    get,
+    path = "/api/storage/thumbnail/{hash}/{size}",
+    tag = "thumbnail",
+    params(
+        ("hash" = String, Path, description = "Entry hash"),
+        ("size" = String, Path, description = "Thumbnail size (small, large, mini)"),
+    ),
+    responses(
+        (status = 200, description = "Thumbnail image", content_type = "image/png"),
+        (status = 400, description = "Invalid hash or size"),
+        (status = 404, description = "Thumbnail not found"),
+    )
+)]
 #[instrument(skip(state))]
-async fn thumbnail_handler(
+pub(crate) async fn thumbnail_handler(
     AxumPath((hash, size)): AxumPath<(String, String)>,
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -185,6 +203,7 @@ async fn thumbnail_handler(
 #[utoipa::path(
     post,
     path = "/api/storage",
+    tag = "storage",
     request_body = CreateStorageRequest,
     responses(
         (status = 200, description = "Storage created", body = StorageResponse),
@@ -263,12 +282,17 @@ async fn create_storage_handler(
     require_user_exists(payload.default_user, &state.db).await?;
     require_group_exists(payload.default_group, &state.db).await?;
 
+    let ignore_patterns = payload.ignore_patterns.unwrap_or_else(|| {
+        crate::config::Config::get().ignore_patterns.join(",")
+    });
+
     let new_storage = storage::ActiveModel {
         name: Set(payload.name),
         description: Set(payload.description),
         path: Set(payload.path),
         default_user: Set(payload.default_user),
         default_group: Set(payload.default_group),
+        ignore_patterns: Set(ignore_patterns),
         ..Default::default()
     };
 
@@ -290,6 +314,7 @@ async fn create_storage_handler(
 #[utoipa::path(
     get,
     path = "/api/storage/{id}",
+    tag = "storage",
     params(("id" = i32, Path, description = "Storage ID")),
     responses(
         (status = 200, description = "Storage found", body = StorageResponse),
@@ -333,6 +358,7 @@ async fn get_storage_handler(
 #[utoipa::path(
     put,
     path = "/api/storage/{id}",
+    tag = "storage",
     params(("id" = i32, Path, description = "Storage ID")),
     request_body = UpdateStorageRequest,
     responses(
@@ -466,6 +492,9 @@ async fn update_storage_handler(
     if let Some(default_group) = payload.default_group {
         active_storage.default_group = Set(default_group);
     }
+    if let Some(ignore_patterns) = payload.ignore_patterns {
+        active_storage.ignore_patterns = Set(ignore_patterns);
+    }
     let updated_storage = active_storage.update(&state.db).await.map_err(|e| {
         tracing::error!("Database error: {}", e);
         (
@@ -484,6 +513,7 @@ async fn update_storage_handler(
 #[utoipa::path(
     delete,
     path = "/api/storage/{id}",
+    tag = "storage",
     params(("id" = i32, Path, description = "Storage ID")),
     responses(
         (status = 200, description = "Storage deleted"),
@@ -572,6 +602,7 @@ async fn delete_storage_handler(
 #[utoipa::path(
     get,
     path = "/api/storage",
+    tag = "storage",
     responses(
         (status = 200, description = "List of all storages", body = Vec<StorageResponse>),
     ),
@@ -702,9 +733,10 @@ async fn directory_index_impl(
         .for_each(|e| {
             state
                 .job_sender
-                .send(crate::job::Job::CheckFile {
+                .send(crate::job::Job::ProcessFile {
                     storage_id: e.storage_id,
                     path: e.path.clone(),
+                    mode: crate::job::ProcessMode::Auto,
                 })
                 .unwrap();
         });
@@ -723,8 +755,24 @@ async fn directory_index_impl(
     Ok(Html(html).into_response())
 }
 
+/// Get file content with detected content type
+/// GET /api/storage/:id/show/*path
+#[utoipa::path(
+    get,
+    path = "/api/storage/{id}/show/{path}",
+    tag = "file",
+    params(
+        ("id" = i32, Path, description = "Storage ID"),
+        ("path" = String, Path, description = "File path"),
+    ),
+    responses(
+        (status = 200, description = "File content"),
+        (status = 404, description = "File not found", body = ErrorResponse),
+    ),
+    security(("bearer" = []))
+)]
 #[instrument(skip(state, _auth, req))]
-async fn get_file_content_handler(
+pub(crate) async fn get_file_content_handler(
     _auth: Auth,
     AxumPath((storage_id, path)): AxumPath<(i32, String)>,
     State(state): State<Arc<AppState>>,
@@ -733,8 +781,24 @@ async fn get_file_content_handler(
     serve_file_with_content_type(storage_id, path, state, req, None).await
 }
 
+/// Download file as octet-stream
+/// GET /api/storage/:id/raw/*path
+#[utoipa::path(
+    get,
+    path = "/api/storage/{id}/raw/{path}",
+    tag = "file",
+    params(
+        ("id" = i32, Path, description = "Storage ID"),
+        ("path" = String, Path, description = "File path"),
+    ),
+    responses(
+        (status = 200, description = "File download", content_type = "application/octet-stream"),
+        (status = 404, description = "File not found", body = ErrorResponse),
+    ),
+    security(("bearer" = []))
+)]
 #[instrument(skip(state, _auth, req))]
-async fn download_file_handler(
+pub(crate) async fn download_file_handler(
     _auth: Auth,
     AxumPath((storage_id, path)): AxumPath<(i32, String)>,
     State(state): State<Arc<AppState>>,
@@ -832,8 +896,25 @@ async fn serve_file_with_content_type(
     Ok(res.into_response())
 }
 
+/// Update file content
+/// PUT /api/storage/:id/update/*path
+#[utoipa::path(
+    put,
+    path = "/api/storage/{id}/update/{path}",
+    tag = "file",
+    params(
+        ("id" = i32, Path, description = "Storage ID"),
+        ("path" = String, Path, description = "File path"),
+    ),
+    request_body(content = Vec<u8>, content_type = "application/octet-stream"),
+    responses(
+        (status = 200, description = "File updated"),
+        (status = 404, description = "Storage not found", body = ErrorResponse),
+    ),
+    security(("bearer" = []))
+)]
 #[instrument(skip(state, _auth, body))]
-async fn update_file_content_handler(
+pub(crate) async fn update_file_content_handler(
     _auth: Auth,
     AxumPath((storage_id, path)): AxumPath<(i32, String)>,
     State(state): State<Arc<AppState>>,
@@ -877,8 +958,25 @@ async fn update_file_content_handler(
     })))
 }
 
+/// Create a new file or directory entry
+/// POST /api/storage/:id/create/*path
+#[utoipa::path(
+    post,
+    path = "/api/storage/{id}/create/{path}",
+    tag = "entry",
+    params(
+        ("id" = i32, Path, description = "Storage ID"),
+        ("path" = String, Path, description = "Entry path"),
+    ),
+    request_body = CreateEntryRequest,
+    responses(
+        (status = 200, description = "Entry created"),
+        (status = 400, description = "Unsupported entry type", body = ErrorResponse),
+    ),
+    security(("bearer" = []))
+)]
 #[instrument(skip(state, _auth))]
-async fn create_entry_handler(
+pub(crate) async fn create_entry_handler(
     _auth: Auth,
     AxumPath((storage_id, path)): AxumPath<(i32, String)>,
     State(state): State<Arc<AppState>>,
@@ -948,8 +1046,25 @@ async fn create_entry_handler(
     ))
 }
 
+/// Rename a file or directory
+/// POST /api/storage/:id/rename/*path
+#[utoipa::path(
+    post,
+    path = "/api/storage/{id}/rename/{path}",
+    tag = "entry",
+    params(
+        ("id" = i32, Path, description = "Storage ID"),
+        ("path" = String, Path, description = "Current entry path"),
+    ),
+    request_body = RenameEntryRequest,
+    responses(
+        (status = 200, description = "Entry renamed"),
+        (status = 500, description = "Error renaming entry", body = ErrorResponse),
+    ),
+    security(("bearer" = []))
+)]
 #[instrument(skip(state, _auth))]
-async fn rename_entry_handler(
+pub(crate) async fn rename_entry_handler(
     _auth: Auth,
     AxumPath((storage_id, old_path)): AxumPath<(i32, String)>,
     State(state): State<Arc<AppState>>,
@@ -985,8 +1100,24 @@ async fn rename_entry_handler(
     ))
 }
 
+/// Remove a file or directory
+/// DELETE /api/storage/:id/remove/*path
+#[utoipa::path(
+    delete,
+    path = "/api/storage/{id}/remove/{path}",
+    tag = "entry",
+    params(
+        ("id" = i32, Path, description = "Storage ID"),
+        ("path" = String, Path, description = "Entry path"),
+    ),
+    responses(
+        (status = 200, description = "Entry removed"),
+        (status = 500, description = "Error removing entry", body = ErrorResponse),
+    ),
+    security(("bearer" = []))
+)]
 #[instrument(skip(state, _auth))]
-async fn remove_entry_handler(
+pub(crate) async fn remove_entry_handler(
     _auth: Auth,
     AxumPath((storage_id, path)): AxumPath<(i32, String)>,
     State(state): State<Arc<AppState>>,
@@ -1018,8 +1149,24 @@ async fn remove_entry_handler(
     ))
 }
 
+/// List directory contents (JSON)
+/// GET /api/storage/:id/list/*path
+#[utoipa::path(
+    get,
+    path = "/api/storage/{id}/list/{path}",
+    tag = "entry",
+    params(
+        ("id" = i32, Path, description = "Storage ID"),
+        ("path" = String, Path, description = "Directory path"),
+    ),
+    responses(
+        (status = 200, description = "Directory listing"),
+        (status = 404, description = "Storage not found", body = ErrorResponse),
+    ),
+    security(("bearer" = []))
+)]
 #[instrument(skip(state, _auth))]
-async fn list_directory_handler(
+pub(crate) async fn list_directory_handler(
     _auth: Auth,
     AxumPath((id, path)): AxumPath<(i32, String)>,
     State(state): State<Arc<AppState>>,
@@ -1067,9 +1214,10 @@ async fn list_directory_handler(
         .for_each(|e| {
             state
                 .job_sender
-                .send(crate::job::Job::CheckFile {
+                .send(crate::job::Job::ProcessFile {
                     storage_id: e.storage_id,
                     path: e.path.clone(),
+                    mode: crate::job::ProcessMode::Auto,
                 })
                 .unwrap();
         });
@@ -1178,10 +1326,23 @@ impl ShareResponse {
     }
 }
 
-/// List shares handler
+/// List shares for an entry
 /// GET /api/storage/:id/share/*path
+#[utoipa::path(
+    get,
+    path = "/api/storage/{id}/share/{path}",
+    tag = "share",
+    params(
+        ("id" = i32, Path, description = "Storage ID"),
+        ("path" = String, Path, description = "Entry path"),
+    ),
+    responses(
+        (status = 200, description = "List of shares", body = Vec<ShareResponse>),
+    ),
+    security(("bearer" = []))
+)]
 #[instrument(skip(state, _auth))]
-async fn list_shares_handler(
+pub(crate) async fn list_shares_handler(
     _auth: Auth,
     AxumPath((storage_id, path)): AxumPath<(i32, String)>,
     State(state): State<Arc<AppState>>,
@@ -1240,10 +1401,19 @@ async fn list_shares_handler(
     ))
 }
 
-/// List all user's shares
+/// List all shares owned by the current user
 /// GET /api/storage/share
+#[utoipa::path(
+    get,
+    path = "/api/storage/share",
+    tag = "share",
+    responses(
+        (status = 200, description = "List of user's shares", body = Vec<ShareResponse>),
+    ),
+    security(("bearer" = []))
+)]
 #[instrument(skip(state, auth))]
-async fn list_all_user_shares_handler(
+pub(crate) async fn list_all_user_shares_handler(
     auth: Auth,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<ShareResponse>>, (StatusCode, Json<ErrorResponse>)> {
@@ -1297,8 +1467,17 @@ async fn list_all_user_shares_handler(
 
 /// List shares shared with the current user
 /// GET /api/storage/share/with-me
+#[utoipa::path(
+    get,
+    path = "/api/storage/share/with-me",
+    tag = "share",
+    responses(
+        (status = 200, description = "List of shares shared with user", body = Vec<ShareResponse>),
+    ),
+    security(("bearer" = []))
+)]
 #[instrument(skip(state, auth))]
-async fn list_shares_with_me_handler(
+pub(crate) async fn list_shares_with_me_handler(
     auth: Auth,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<ShareResponse>>, (StatusCode, Json<ErrorResponse>)> {
@@ -1349,10 +1528,25 @@ async fn list_shares_with_me_handler(
     Ok(Json(response))
 }
 
-/// Share entry handler
+/// Create a share for an entry
 /// POST /api/storage/:id/share/*path
+#[utoipa::path(
+    post,
+    path = "/api/storage/{id}/share/{path}",
+    tag = "share",
+    params(
+        ("id" = i32, Path, description = "Storage ID"),
+        ("path" = String, Path, description = "Entry path"),
+    ),
+    request_body = ShareEntryRequest,
+    responses(
+        (status = 200, description = "Share created", body = ShareResponse),
+        (status = 404, description = "Path not found", body = ErrorResponse),
+    ),
+    security(("bearer" = []))
+)]
 #[instrument(skip(state, _auth))]
-async fn share_entry_handler(
+pub(crate) async fn share_entry_handler(
     _auth: Auth,
     AxumPath((storage_id, path)): AxumPath<(i32, String)>,
     State(state): State<Arc<AppState>>,
@@ -1468,10 +1662,20 @@ async fn share_entry_handler(
     Ok(Json(ShareResponse::from_model(created, entry_model)))
 }
 
-/// Delete share handler
+/// Delete a share
 /// DELETE /api/storage/share/:share_id
+#[utoipa::path(
+    delete,
+    path = "/api/storage/share/{share_id}",
+    tag = "share",
+    params(("share_id" = i32, Path, description = "Share ID")),
+    responses(
+        (status = 200, description = "Share deleted"),
+    ),
+    security(("bearer" = []))
+)]
 #[instrument(skip(state, _auth))]
-async fn delete_share_handler(
+pub(crate) async fn delete_share_handler(
     _auth: Auth,
     AxumPath(share_id): AxumPath<i32>,
     State(state): State<Arc<AppState>>,
@@ -1493,10 +1697,22 @@ async fn delete_share_handler(
     ))
 }
 
-/// Update share handler
+/// Update a share
 /// PUT /api/storage/share/:share_id
+#[utoipa::path(
+    put,
+    path = "/api/storage/share/{share_id}",
+    tag = "share",
+    params(("share_id" = i32, Path, description = "Share ID")),
+    request_body = ShareEntryRequest,
+    responses(
+        (status = 200, description = "Share updated", body = ShareResponse),
+        (status = 404, description = "Share not found", body = ErrorResponse),
+    ),
+    security(("bearer" = []))
+)]
 #[instrument(skip(state, _auth))]
-async fn update_share_handler(
+pub(crate) async fn update_share_handler(
     _auth: Auth,
     AxumPath(share_id): AxumPath<i32>,
     State(state): State<Arc<AppState>>,
@@ -1747,9 +1963,19 @@ async fn get_share_context(
     Ok((share, entry_model, storage))
 }
 
-// Helper to get share info
+/// Get share info
 /// GET /api/storage/share/:share_id
-async fn get_share_info_handler(
+#[utoipa::path(
+    get,
+    path = "/api/storage/share/{share_id}",
+    tag = "share",
+    params(("share_id" = String, Path, description = "Share ID or token")),
+    responses(
+        (status = 200, description = "Share info"),
+        (status = 404, description = "Share not found", body = ErrorResponse),
+    )
+)]
+pub(crate) async fn get_share_info_handler(
     auth: Option<Auth>,
     AxumPath(share_id): AxumPath<String>,
     State(state): State<Arc<AppState>>,
@@ -1768,10 +1994,20 @@ async fn get_share_info_handler(
     })))
 }
 
-/// Share list root handler
+/// List share root directory
 /// GET /api/storage/share/:share_id/list
+#[utoipa::path(
+    get,
+    path = "/api/storage/share/{share_id}/list",
+    tag = "share",
+    params(("share_id" = String, Path, description = "Share ID or token")),
+    responses(
+        (status = 200, description = "Directory listing"),
+        (status = 404, description = "Share not found", body = ErrorResponse),
+    )
+)]
 #[instrument(skip(state, auth))]
-async fn share_list_root_handler(
+pub(crate) async fn share_list_root_handler(
     auth: Option<Auth>,
     AxumPath(share_id): AxumPath<String>,
     State(state): State<Arc<AppState>>,
@@ -1779,10 +2015,23 @@ async fn share_list_root_handler(
     share_list_impl(auth, share_id, String::new(), state).await
 }
 
-/// Share list handler
+/// List share subdirectory
 /// GET /api/storage/share/:share_id/list/*path
+#[utoipa::path(
+    get,
+    path = "/api/storage/share/{share_id}/list/{path}",
+    tag = "share",
+    params(
+        ("share_id" = String, Path, description = "Share ID or token"),
+        ("path" = String, Path, description = "Subdirectory path"),
+    ),
+    responses(
+        (status = 200, description = "Directory listing"),
+        (status = 404, description = "Share not found", body = ErrorResponse),
+    )
+)]
 #[instrument(skip(state, auth))]
-async fn share_list_handler(
+pub(crate) async fn share_list_handler(
     auth: Option<Auth>,
     AxumPath((share_id, path)): AxumPath<(String, String)>,
     State(state): State<Arc<AppState>>,
@@ -1828,9 +2077,10 @@ async fn share_list_impl(
         .for_each(|e| {
             state
                 .job_sender
-                .send(crate::job::Job::CheckFile {
+                .send(crate::job::Job::ProcessFile {
                     storage_id: e.storage_id,
                     path: e.path.clone(),
+                    mode: crate::job::ProcessMode::Auto,
                 })
                 .unwrap();
         });
@@ -1962,9 +2212,10 @@ async fn share_index_impl(
         .for_each(|e| {
             state
                 .job_sender
-                .send(crate::job::Job::CheckFile {
+                .send(crate::job::Job::ProcessFile {
                     storage_id: e.storage_id,
                     path: e.path.clone(),
+                    mode: crate::job::ProcessMode::Auto,
                 })
                 .unwrap();
         });
@@ -2009,10 +2260,23 @@ fn make_entries_relative(entries: Vec<DirectoryEntry>, base_path: &str) -> Vec<D
         .collect()
 }
 
-/// Share show handler - get file content
+/// Get file content via share
 /// GET /api/storage/share/:share_id/show/*path
+#[utoipa::path(
+    get,
+    path = "/api/storage/share/{share_id}/show/{path}",
+    tag = "share",
+    params(
+        ("share_id" = String, Path, description = "Share ID or token"),
+        ("path" = String, Path, description = "File path"),
+    ),
+    responses(
+        (status = 200, description = "File content"),
+        (status = 404, description = "File not found", body = ErrorResponse),
+    )
+)]
 #[instrument(skip(state, auth))]
-async fn share_show_handler(
+pub(crate) async fn share_show_handler(
     auth: Option<Auth>,
     AxumPath((share_id, path)): AxumPath<(String, String)>,
     State(state): State<Arc<AppState>>,
@@ -2082,10 +2346,24 @@ async fn share_show_handler(
     Ok(res)
 }
 
-/// Share update handler - update file content
+/// Update file content via share
 /// PUT /api/storage/share/:share_id/update/*path
+#[utoipa::path(
+    put,
+    path = "/api/storage/share/{share_id}/update/{path}",
+    tag = "share",
+    params(
+        ("share_id" = String, Path, description = "Share ID or token"),
+        ("path" = String, Path, description = "File path"),
+    ),
+    request_body(content = Vec<u8>, content_type = "application/octet-stream"),
+    responses(
+        (status = 200, description = "File updated"),
+        (status = 403, description = "Write access denied", body = ErrorResponse),
+    )
+)]
 #[instrument(skip(state, auth, body))]
-async fn share_update_handler(
+pub(crate) async fn share_update_handler(
     auth: Option<Auth>,
     AxumPath((share_id, path)): AxumPath<(String, String)>,
     State(state): State<Arc<AppState>>,
@@ -2129,10 +2407,24 @@ async fn share_update_handler(
     })))
 }
 
-/// Share create handler - create file or folder
+/// Create file or folder via share
 /// POST /api/storage/share/:share_id/create/*path
+#[utoipa::path(
+    post,
+    path = "/api/storage/share/{share_id}/create/{path}",
+    tag = "share",
+    params(
+        ("share_id" = String, Path, description = "Share ID or token"),
+        ("path" = String, Path, description = "Entry path"),
+    ),
+    request_body = CreateEntryRequest,
+    responses(
+        (status = 200, description = "Entry created"),
+        (status = 403, description = "Write access denied", body = ErrorResponse),
+    )
+)]
 #[instrument(skip(state, auth))]
-async fn share_create_handler(
+pub(crate) async fn share_create_handler(
     auth: Option<Auth>,
     AxumPath((share_id, path)): AxumPath<(String, String)>,
     State(state): State<Arc<AppState>>,
@@ -2198,10 +2490,24 @@ async fn share_create_handler(
     })))
 }
 
-/// Share rename handler - rename file or folder
+/// Rename file or folder via share
 /// POST /api/storage/share/:share_id/rename/*path
+#[utoipa::path(
+    post,
+    path = "/api/storage/share/{share_id}/rename/{path}",
+    tag = "share",
+    params(
+        ("share_id" = String, Path, description = "Share ID or token"),
+        ("path" = String, Path, description = "Current entry path"),
+    ),
+    request_body = RenameEntryRequest,
+    responses(
+        (status = 200, description = "Entry renamed"),
+        (status = 403, description = "Write access denied", body = ErrorResponse),
+    )
+)]
 #[instrument(skip(state, auth))]
-async fn share_rename_handler(
+pub(crate) async fn share_rename_handler(
     auth: Option<Auth>,
     AxumPath((share_id, path)): AxumPath<(String, String)>,
     State(state): State<Arc<AppState>>,
@@ -2256,10 +2562,23 @@ async fn share_rename_handler(
     })))
 }
 
-/// Share remove handler - delete file or folder
+/// Delete file or folder via share
 /// DELETE /api/storage/share/:share_id/remove/*path
+#[utoipa::path(
+    delete,
+    path = "/api/storage/share/{share_id}/remove/{path}",
+    tag = "share",
+    params(
+        ("share_id" = String, Path, description = "Share ID or token"),
+        ("path" = String, Path, description = "Entry path"),
+    ),
+    responses(
+        (status = 200, description = "Entry removed"),
+        (status = 403, description = "Write access denied", body = ErrorResponse),
+    )
+)]
 #[instrument(skip(state, auth))]
-async fn share_remove_handler(
+pub(crate) async fn share_remove_handler(
     auth: Option<Auth>,
     AxumPath((share_id, path)): AxumPath<(String, String)>,
     State(state): State<Arc<AppState>>,
@@ -2307,20 +2626,48 @@ async fn share_remove_handler(
     })))
 }
 
-/// Trigger hash calculation job for a file
-/// POST /api/storage/:id/hash/*path
-async fn trigger_hash_handler(
+#[derive(Deserialize)]
+pub(crate) struct ProcessQuery {
+    /// Processing mode: "auto" (default), "force", or "hash_only"
+    mode: Option<String>,
+}
+
+/// Trigger file processing job
+/// POST /api/storage/:id/hash/*path?mode=auto|force|hash_only
+#[utoipa::path(
+    post,
+    path = "/api/storage/{id}/hash/{path}",
+    tag = "thumbnail",
+    params(
+        ("id" = i32, Path, description = "Storage ID"),
+        ("path" = String, Path, description = "File path"),
+        ("mode" = Option<String>, Query, description = "Processing mode: auto (default), force, hash_only"),
+    ),
+    responses(
+        (status = 200, description = "Processing job queued"),
+    ),
+    security(("bearer" = []))
+)]
+pub(crate) async fn trigger_hash_handler(
     auth: Auth,
     AxumPath((storage_id, path)): AxumPath<(i32, String)>,
+    Query(query): Query<ProcessQuery>,
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     require_admin(&auth)?;
 
+    let mode = match query.mode.as_deref() {
+        Some("force") => crate::job::ProcessMode::ForceClassify,
+        Some("hash_only") => crate::job::ProcessMode::HashOnly,
+        _ => crate::job::ProcessMode::Auto,
+    };
+
     state
         .job_sender
-        .send(crate::job::Job::CheckFile {
+        .send(crate::job::Job::ProcessFile {
             storage_id,
             path: path.trim_matches('/').to_string(),
+            mode,
         })
         .map_err(|e| {
             tracing::error!("Failed to send job: {}", e);

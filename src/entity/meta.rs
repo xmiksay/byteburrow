@@ -8,7 +8,7 @@ pub struct Model {
     pub hash: Vec<u8>,
     pub tags: Vec<i32>,
     pub keywords: Vec<String>,
-    pub custom: Option<Json>,
+    pub custom: Json,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

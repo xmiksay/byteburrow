@@ -11,6 +11,7 @@ pub struct Model {
     pub path: String,
     pub default_user: i32,
     pub default_group: i32,
+    pub ignore_patterns: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

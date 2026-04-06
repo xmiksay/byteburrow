@@ -10,8 +10,6 @@ pub struct Config {
     pub salt: String,
     #[serde(default = "defaults::server_addr")]
     pub server_addr: String,
-    #[serde(default = "defaults::frontend_dist")]
-    pub frontend_dist: String,
     #[serde(default = "defaults::thumbnail_storage")]
     pub thumbnail_storage: String,
     #[serde(default = "defaults::base_url")]
@@ -20,14 +18,15 @@ pub struct Config {
     pub token_expiration_days: i64,
     #[serde(default = "defaults::token_length")]
     pub token_length: usize,
+    #[serde(default = "defaults::plugin_dir")]
+    pub plugin_dir: String,
+    #[serde(default = "defaults::ignore_patterns")]
+    pub ignore_patterns: Vec<String>,
 }
 
 mod defaults {
     pub fn server_addr() -> String {
         "0.0.0.0:3000".to_string()
-    }
-    pub fn frontend_dist() -> String {
-        "frontend/dist".to_string()
     }
     pub fn thumbnail_storage() -> String {
         "/tmp/thumbnails".to_string()
@@ -40,6 +39,19 @@ mod defaults {
     }
     pub fn token_length() -> usize {
         32
+    }
+    pub fn plugin_dir() -> String {
+        "/etc/byteburrow/plugins".to_string()
+    }
+    pub fn ignore_patterns() -> Vec<String> {
+        vec![
+            ".git".to_string(),
+            ".cache".to_string(),
+            "node_modules".to_string(),
+            ".DS_Store".to_string(),
+            "__pycache__".to_string(),
+            ".Trash".to_string(),
+        ]
     }
 }
 

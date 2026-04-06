@@ -1,8 +1,6 @@
 use crate::auth::Auth;
-use crate::config::Config;
 use crate::entity::{entry, photo};
 use crate::job::Job;
-use crate::storage::thumbnail;
 use crate::web::{require_admin, AppState, ErrorResponse};
 use axum::{
     extract::{Path, State},
@@ -73,9 +71,18 @@ async fn enrich_photos(
         .collect())
 }
 
-/// List all photos
+/// List all photos without a date
 /// GET /api/photo
-async fn list_photos(
+#[utoipa::path(
+    get,
+    path = "/api/photo",
+    tag = "photo",
+    responses(
+        (status = 200, description = "List of photos", body = Vec<PhotoResponse>),
+    ),
+    security(("bearer" = []))
+)]
+pub(crate) async fn list_photos(
     _auth: Auth,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<PhotoResponse>>, (StatusCode, Json<ErrorResponse>)> {
@@ -90,7 +97,18 @@ async fn list_photos(
 
 /// List photos by year
 /// GET /api/photo/list/:year
-async fn list_by_year(
+#[utoipa::path(
+    get,
+    path = "/api/photo/list/{year}",
+    tag = "photo",
+    params(("year" = i32, Path, description = "Year")),
+    responses(
+        (status = 200, description = "List of photos", body = Vec<PhotoResponse>),
+        (status = 400, description = "Invalid year", body = ErrorResponse),
+    ),
+    security(("bearer" = []))
+)]
+pub(crate) async fn list_by_year(
     _auth: Auth,
     Path(year): Path<i32>,
     State(state): State<Arc<AppState>>,
@@ -117,7 +135,21 @@ async fn list_by_year(
 
 /// List photos by year and month
 /// GET /api/photo/list/:year/:month
-async fn list_by_year_month(
+#[utoipa::path(
+    get,
+    path = "/api/photo/list/{year}/{month}",
+    tag = "photo",
+    params(
+        ("year" = i32, Path, description = "Year"),
+        ("month" = u32, Path, description = "Month"),
+    ),
+    responses(
+        (status = 200, description = "List of photos", body = Vec<PhotoResponse>),
+        (status = 400, description = "Invalid year/month", body = ErrorResponse),
+    ),
+    security(("bearer" = []))
+)]
+pub(crate) async fn list_by_year_month(
     _auth: Auth,
     Path((year, month)): Path<(i32, u32)>,
     State(state): State<Arc<AppState>>,
@@ -149,7 +181,22 @@ async fn list_by_year_month(
 
 /// List photos by year, month, and day
 /// GET /api/photo/list/:year/:month/:day
-async fn list_by_year_month_day(
+#[utoipa::path(
+    get,
+    path = "/api/photo/list/{year}/{month}/{day}",
+    tag = "photo",
+    params(
+        ("year" = i32, Path, description = "Year"),
+        ("month" = u32, Path, description = "Month"),
+        ("day" = u32, Path, description = "Day"),
+    ),
+    responses(
+        (status = 200, description = "List of photos", body = Vec<PhotoResponse>),
+        (status = 400, description = "Invalid date", body = ErrorResponse),
+    ),
+    security(("bearer" = []))
+)]
+pub(crate) async fn list_by_year_month_day(
     _auth: Auth,
     Path((year, month, day)): Path<(i32, u32, u32)>,
     State(state): State<Arc<AppState>>,
@@ -173,7 +220,18 @@ async fn list_by_year_month_day(
 
 /// Regenerate thumbnail for a photo
 /// POST /api/photo/regenerate/:hash
-async fn regenerate_thumbnail(
+#[utoipa::path(
+    post,
+    path = "/api/photo/regenerate/{hash}",
+    tag = "photo",
+    params(("hash" = String, Path, description = "Photo hash")),
+    responses(
+        (status = 202, description = "Regeneration queued"),
+        (status = 404, description = "Photo not found", body = ErrorResponse),
+    ),
+    security(("bearer" = []))
+)]
+pub(crate) async fn regenerate_thumbnail(
     auth: Auth,
     Path(hash): Path<String>,
     State(state): State<Arc<AppState>>,
@@ -196,18 +254,10 @@ async fn regenerate_thumbnail(
             )
         })?;
 
-    // Delete existing thumbnails
-    let config = Config::get();
-    let thumbnail_dir = std::path::PathBuf::from(&config.thumbnail_storage);
-    for size in ["mini", "small", "large"] {
-        let path = thumbnail::get_thumbnail_path(&thumbnail_dir, &hash, size);
-        let _ = tokio::fs::remove_file(&path).await;
-    }
-
-    // Dispatch job to regenerate
+    // Dispatch job to regenerate thumbnails
     state
         .job_sender
-        .send(Job::ChangedHash { hash: hash_bytes })
+        .send(Job::CreateThumbnail { hash: hash_bytes, regenerate: true })
         .map_err(|_| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
