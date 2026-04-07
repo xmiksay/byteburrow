@@ -1,0 +1,15 @@
+[package]
+name = "byteburrow-plugin-face-embed"
+version = "0.1.0"
+edition = "2021"
+description = "Face embedding plugin for ByteBurrow — local inference via tract"
+authors = ["Martin Miksanik"]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+byteburrow-plugin-api = { path = "../../byteburrow-plugin-api" }
+image = "0.25"
+serde_json = "1.0"
+tract-onnx = "0.21"

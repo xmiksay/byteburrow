@@ -114,6 +114,24 @@ impl FromRequestParts<Arc<AppState>> for Auth {
             }
         }
 
+        // Try Cookie: session_token=...
+        if let Some(cookie_header) = parts.headers.get(axum::http::header::COOKIE) {
+            if let Ok(cookies) = cookie_header.to_str() {
+                for cookie in cookies.split(';') {
+                    let cookie = cookie.trim();
+                    if let Some(token_value) = cookie.strip_prefix("session_token=") {
+                        return Auth::from_token(
+                            token_value.trim(),
+                            &state.db,
+                            user_agent,
+                            ip_address,
+                        )
+                        .await;
+                    }
+                }
+            }
+        }
+
         Err(AuthError::MissingCredentials)
     }
 }

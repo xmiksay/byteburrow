@@ -14,6 +14,8 @@ mod m20220101_000012_meta_custom_required;
 mod m20220101_000013_entry_skip_plugins;
 mod m20220101_000014_entry_drop_kind;
 mod m20220101_000015_storage_ignore_patterns;
+mod m20220101_000016_contact;
+mod m20220101_000017_face_reference;
 
 // Plugin migrations (feature-gated)
 #[cfg(feature = "plugin-contactlist")]
@@ -41,6 +43,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20220101_000013_entry_skip_plugins::Migration),
             Box::new(m20220101_000014_entry_drop_kind::Migration),
             Box::new(m20220101_000015_storage_ignore_patterns::Migration),
+            Box::new(m20220101_000016_contact::Migration),
+            Box::new(m20220101_000017_face_reference::Migration),
         ];
 
         // Plugin migrations (conditionally included based on features)

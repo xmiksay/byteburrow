@@ -1,4 +1,6 @@
+pub mod contact;
 pub mod entry;
+pub mod face_reference;
 pub mod meta;
 pub mod group;
 pub mod group_user;

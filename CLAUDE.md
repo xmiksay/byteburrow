@@ -221,6 +221,31 @@ let storage = Storage::find_by_id(&db, storage_id).await?;
 let entries = storage.list_directory_fs(sub_path).await?;
 ```
 
+### Plugin System
+Plugins are dynamic libraries (`.so`) that classify files. Each plugin implements `ClassifierPlugin` from the `byteburrow-plugin-api` crate.
+
+**Plugin trait key methods:**
+- `mime_interests()` — MIME prefixes the plugin handles (e.g. `&["image/"]`)
+- `kind_requires()` — `KindFlags` that must be set before this plugin runs
+- `custom_requires()` — custom metadata keys that must exist (for chaining)
+- `classify(&FileContext) -> Result<Option<ClassificationResult>>` — main logic
+
+**Multi-pass execution:** Plugins declare dependencies. The host runs them in iterative passes until no new plugins become eligible:
+```
+Pass 1: EXIF plugin (no requirements) → sets Kind::Photo
+Pass 2: Face detection (requires Kind::Photo) → adds custom["faces"]
+Pass 3: Face recognition (requires custom "faces") → adds custom["people"]
+```
+
+**Creating a new plugin:**
+1. Create a new crate in `plugins/` with `crate-type = ["cdylib"]`
+2. Depend on `byteburrow-plugin-api`
+3. Implement `ClassifierPlugin` trait
+4. Export constructor: `#[no_mangle] pub extern "C" fn byteburrow_create_plugin() -> *mut dyn ClassifierPlugin`
+5. Build with `cargo make build-plugins`
+
+**ABI requirement:** Host and plugins must be compiled with the same Rust compiler version and same `byteburrow-plugin-api` crate version.
+
 ### Background Jobs
 Enqueue jobs via the job sender available in AppState:
 ```rust

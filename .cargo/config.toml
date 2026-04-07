@@ -1,0 +1,2 @@
+[env]
+BYTEBURROW_FACE_EMBED_MODEL = { value = "plugins/face-embedder/recognition_resnet27.onnx", relative = true }

@@ -86,17 +86,15 @@ pub async fn require_user_exists(
     user_id: i32,
     db: &DatabaseConnection,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    let exists = crate::auth::user_exists(user_id, db)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database error checking user existence: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Database error".to_string(),
-                }),
-            )
-        })?;
+    let exists = crate::auth::user_exists(user_id, db).await.map_err(|e| {
+        tracing::error!("Database error checking user existence: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Database error".to_string(),
+            }),
+        )
+    })?;
 
     if !exists {
         return Err((
@@ -115,17 +113,15 @@ pub async fn require_group_exists(
     group_id: i32,
     db: &DatabaseConnection,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    let exists = crate::auth::group_exists(group_id, db)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database error checking group existence: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Database error".to_string(),
-                }),
-            )
-        })?;
+    let exists = crate::auth::group_exists(group_id, db).await.map_err(|e| {
+        tracing::error!("Database error checking group existence: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Database error".to_string(),
+            }),
+        )
+    })?;
 
     if !exists {
         return Err((
@@ -209,6 +205,8 @@ pub struct AppState {
         // Thumbnail endpoints
         storage::thumbnail_handler,
         storage::trigger_hash_handler,
+        // Meta endpoints
+        storage::get_meta_handler,
         // Photo endpoints
         photo::list_photos,
         photo::list_by_year,
@@ -241,6 +239,7 @@ pub struct AppState {
             crate::entity::entry::EntryType,
             crate::storage::DirectoryEntry,
             photo::PhotoResponse,
+            storage::MetaResponse,
         )
     ),
     modifiers(&SecurityAddon),
@@ -253,6 +252,7 @@ pub struct AppState {
         (name = "entry", description = "Entry management (create, rename, remove, list)"),
         (name = "share", description = "Sharing operations"),
         (name = "thumbnail", description = "Thumbnail and hash operations"),
+        (name = "meta", description = "File meta information endpoints"),
         (name = "photo", description = "Photo management endpoints"),
     )
 )]
@@ -324,15 +324,10 @@ pub async fn run(config: Config, db: DatabaseConnection, job_sender: JobSender) 
 
     let app = Router::new()
         .nest("/api", api_router)
+        .merge(SwaggerUi::new("/api/docs/").url("/api/docs/openapi.json", ApiDoc::openapi()))
         .fallback(get(frontend_handler));
 
-    // Merge Swagger UI - convert explicitly with type annotation
-    let swagger_router = Router::<Arc<AppState>>::from(
-        SwaggerUi::new("/swagger-ui").url("/api-doc/openapi.json", ApiDoc::openapi()),
-    );
-
     let app = app
-        .merge(swagger_router)
         .layer(tower_http::cors::CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state);

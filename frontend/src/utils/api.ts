@@ -22,6 +22,7 @@ export async function apiCall<T>(
   const response = await fetch(endpoint, {
     ...options,
     headers,
+    credentials: 'same-origin',
   })
 
   if (!response.ok) {

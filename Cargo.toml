@@ -1,6 +1,7 @@
 [workspace]
 resolver = "1"
 members = [".", "byteburrow-plugin-api", "plugins/*"]
+exclude = ["plugins/face-embedder/service"]
 
 [package]
 name = "byteburrow"

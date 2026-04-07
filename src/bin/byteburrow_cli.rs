@@ -3,7 +3,7 @@ use byteburrow::{
     auth::Auth,
     config::Config,
     db_connect,
-    entity::{group, group_user, user},
+    entity::{contact, face_reference, group, group_user, user},
 };
 use clap::{Args, Parser, Subcommand};
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, NotSet, QueryFilter, Set};
@@ -28,6 +28,16 @@ enum Commands {
     },
     /// Load development fixtures (admin user + admin group, no conflict checks)
     Fixtures,
+    /// List all face references in the database
+    FaceList,
+    /// Test face matching: compare a contact's confirmed faces against all others
+    FaceMatch {
+        /// Contact ID whose confirmed faces to use as source
+        contact_id: i32,
+        /// Similarity threshold (0.0-1.0, default 0.5)
+        #[arg(short, long, default_value_t = 0.5)]
+        threshold: f32,
+    },
 }
 
 #[derive(Subcommand)]
@@ -97,6 +107,18 @@ async fn main() {
         }
         Commands::Fixtures => {
             if let Err(e) = load_fixtures(&config).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Commands::FaceList => {
+            if let Err(e) = face_list(&config).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Commands::FaceMatch { contact_id, threshold } => {
+            if let Err(e) = face_match(&config, *contact_id, *threshold).await {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
@@ -266,4 +288,193 @@ async fn handle_user_command(
     }
 
     Ok(())
+}
+
+async fn face_list(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
+    let db = db_connect(config).await?;
+
+    let refs = face_reference::Entity::find().all(&db).await?;
+
+    if refs.is_empty() {
+        println!("No face references found.");
+        return Ok(());
+    }
+
+    let contacts = contact::Entity::find().all(&db).await?;
+    let contact_map: std::collections::HashMap<i32, String> = contacts
+        .into_iter()
+        .map(|c| (c.id, c.name))
+        .collect();
+
+    println!(
+        "\n{:<5} {:<66} {:<6} {:<10} {:<20} {:<9} {}",
+        "ID", "Hash", "Face#", "Confirmed", "Contact", "Embed", "Bbox"
+    );
+    println!("{}", "-".repeat(130));
+
+    for r in &refs {
+        let hash_hex = hex::encode(&r.hash);
+        let contact_name = r
+            .contact_id
+            .and_then(|id| contact_map.get(&id))
+            .map(|n| n.as_str())
+            .unwrap_or("-");
+        let embed_dim = r.embedding.len() / 4;
+
+        println!(
+            "{:<5} {:<66} {:<6} {:<10} {:<20} {:<9} {}x{}+{}+{}",
+            r.id,
+            hash_hex,
+            r.face_index,
+            if r.confirmed { "YES" } else { "no" },
+            contact_name,
+            format!("{}d", embed_dim),
+            r.bbox_w, r.bbox_h, r.bbox_x, r.bbox_y,
+        );
+    }
+    println!("\nTotal: {} face references", refs.len());
+
+    Ok(())
+}
+
+async fn face_match(
+    config: &Config,
+    contact_id: i32,
+    threshold: f32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db = db_connect(config).await?;
+
+    // Look up contact name
+    let contact_record = contact::Entity::find_by_id(contact_id)
+        .one(&db)
+        .await?
+        .ok_or_else(|| format!("Contact with id={contact_id} not found"))?;
+
+    // Get confirmed face references for this contact
+    let source_refs = face_reference::Entity::find()
+        .filter(face_reference::Column::ContactId.eq(contact_id))
+        .filter(face_reference::Column::Confirmed.eq(true))
+        .all(&db)
+        .await?;
+
+    if source_refs.is_empty() {
+        return Err(format!(
+            "No confirmed face references for contact '{}' (id={})",
+            contact_record.name, contact_id
+        )
+        .into());
+    }
+
+    let source_embeddings: Vec<Vec<f32>> = source_refs
+        .iter()
+        .map(|r| bytes_to_floats(&r.embedding))
+        .collect();
+
+    println!(
+        "Contact: '{}' (id={}) — {} confirmed reference(s)",
+        contact_record.name,
+        contact_id,
+        source_refs.len()
+    );
+    println!("Threshold: {:.2}\n", threshold);
+
+    // Load all other face references
+    let all_refs = face_reference::Entity::find().all(&db).await?;
+    let source_ids: std::collections::HashSet<i32> =
+        source_refs.iter().map(|r| r.id).collect();
+
+    let contacts = contact::Entity::find().all(&db).await?;
+    let contact_map: std::collections::HashMap<i32, String> = contacts
+        .into_iter()
+        .map(|c| (c.id, c.name))
+        .collect();
+
+    let mut matches: Vec<(f32, &face_reference::Model)> = Vec::new();
+
+    for r in &all_refs {
+        // Skip source faces
+        if source_ids.contains(&r.id) {
+            continue;
+        }
+        // Skip faces already assigned to the same contact
+        if r.contact_id == Some(contact_id) {
+            continue;
+        }
+        // Skip faces already confirmed for another contact
+        if r.confirmed && r.contact_id.is_some() {
+            continue;
+        }
+
+        let emb = bytes_to_floats(&r.embedding);
+
+        // Best similarity across all source embeddings for this contact
+        let best_sim = source_embeddings
+            .iter()
+            .map(|src| cosine_similarity(src, &emb))
+            .fold(0.0f32, f32::max);
+
+        if best_sim >= threshold {
+            matches.push((best_sim, r));
+        }
+    }
+
+    matches.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    if matches.is_empty() {
+        println!("No matches found above threshold {:.2}", threshold);
+    } else {
+        println!(
+            "{:<10} {:<5} {:<66} {:<6} {:<10} {:<20}",
+            "Similarity", "ID", "Hash", "Face#", "Confirmed", "Contact"
+        );
+        println!("{}", "-".repeat(120));
+
+        let mut saved = 0;
+        for (sim, r) in &matches {
+            let hash_hex = hex::encode(&r.hash);
+            let contact_name = r
+                .contact_id
+                .and_then(|id| contact_map.get(&id))
+                .map(|n| n.as_str())
+                .unwrap_or("-");
+
+            println!(
+                "{:<10.4} {:<5} {:<66} {:<6} {:<10} {:<20}",
+                sim, r.id, hash_hex, r.face_index,
+                if r.confirmed { "YES" } else { "no" },
+                contact_name,
+            );
+
+            // Assign contact (unconfirmed) to matched face references
+            let model: face_reference::Model = (*r).clone();
+            let mut active: face_reference::ActiveModel = model.into();
+            active.contact_id = Set(Some(contact_id));
+            active.update(&db).await?;
+            saved += 1;
+        }
+        println!("\n{} matches found, {} saved (unconfirmed)", matches.len(), saved);
+    }
+
+    Ok(())
+}
+
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_a > 0.0 && norm_b > 0.0 {
+        dot / (norm_a * norm_b)
+    } else {
+        0.0
+    }
+}
+
+fn bytes_to_floats(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect()
 }

@@ -1,6 +1,6 @@
 use crate::auth::Auth;
 use crate::entity::entry::EntryType;
-use crate::entity::{entry, group_user, shared, storage};
+use crate::entity::{entry, group_user, meta, shared, storage};
 use crate::storage::{
     determine_content_type, thumbnail, validate_storage_path, DirectoryEntry,
     Storage as StorageWrapper,
@@ -140,6 +140,82 @@ pub fn router() -> Router<Arc<AppState>> {
             delete(share_remove_handler),
         )
         .route("/thumbnail/:hash/:size", get(thumbnail_handler))
+        .route("/meta/:hash", get(get_meta_handler))
+}
+
+/// Meta response
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct MetaResponse {
+    pub hash: String,
+    pub tags: Vec<i32>,
+    pub keywords: Vec<String>,
+    pub custom: serde_json::Value,
+}
+
+impl From<meta::Model> for MetaResponse {
+    fn from(m: meta::Model) -> Self {
+        Self {
+            hash: hex::encode(&m.hash),
+            tags: m.tags,
+            keywords: m.keywords,
+            custom: m.custom,
+        }
+    }
+}
+
+/// Get meta information by hash
+/// GET /api/storage/meta/:hash
+#[utoipa::path(
+    get,
+    path = "/api/storage/meta/{hash}",
+    tag = "meta",
+    params(
+        ("hash" = String, Path, description = "File content hash (hex-encoded)"),
+    ),
+    responses(
+        (status = 200, description = "Meta information", body = MetaResponse),
+        (status = 400, description = "Invalid hash format", body = ErrorResponse),
+        (status = 404, description = "Meta not found", body = ErrorResponse),
+    ),
+    security(("bearer" = []))
+)]
+#[instrument(skip(_auth, state))]
+pub(crate) async fn get_meta_handler(
+    _auth: Auth,
+    AxumPath(hash): AxumPath<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<MetaResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let hash_bytes = hex::decode(&hash).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Invalid hex hash format".to_string(),
+            }),
+        )
+    })?;
+
+    let meta = meta::Entity::find_by_id(hash_bytes)
+        .one(&state.db)
+        .await
+        .map_err(|e| {
+            tracing::error!("Database error fetching meta: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Database error".to_string(),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "Meta not found".to_string(),
+                }),
+            )
+        })?;
+
+    Ok(Json(MetaResponse::from(meta)))
 }
 
 /// Thumbnail endpoint - serves thumbnail by entry hash (public, no auth)

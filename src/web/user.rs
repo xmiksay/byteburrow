@@ -3,7 +3,7 @@ use crate::entity::user;
 use crate::web::{require_admin, AppState, ErrorResponse};
 use axum::{
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -177,7 +177,7 @@ async fn login_handler(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(payload): Json<LoginRequest>,
-) -> Result<Json<LoginResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     // Extract user agent from headers
     let user_agent = headers
         .get(axum::http::header::USER_AGENT)
@@ -223,10 +223,25 @@ async fn login_handler(
             )
         })?;
 
-    Ok(Json(LoginResponse {
-        token,
-        expires_in_days: config.token_expiration_days,
-    }))
+    // Build Set-Cookie header for HttpOnly session cookie
+    let max_age = config.token_expiration_days * 24 * 60 * 60;
+    let secure_flag = if config.base_url.starts_with("https://") {
+        "; Secure"
+    } else {
+        ""
+    };
+    let cookie_value = format!(
+        "session_token={}; HttpOnly; SameSite=Strict; Path=/api; Max-Age={}{}",
+        token, max_age, secure_flag
+    );
+
+    Ok((
+        [(header::SET_COOKIE, cookie_value)],
+        Json(LoginResponse {
+            token,
+            expires_in_days: config.token_expiration_days,
+        }),
+    ))
 }
 
 /// Me endpoint - returns current user info
