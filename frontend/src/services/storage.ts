@@ -1,5 +1,5 @@
 import { api } from '../utils/api'
-import type { Storage, CreateStorageRequest, UpdateStorageRequest, DirectoryListingResponse } from '../types'
+import type { Storage, CreateStorageRequest, UpdateStorageRequest, DirectoryListingResponse, MetaResponse } from '../types'
 
 export const storageService = {
     async getStorages(): Promise<Storage[]> {
@@ -143,5 +143,15 @@ export const storageService = {
 
     async updateShareEntryTags(shareId: number | string, path: string, tags: number[]): Promise<{ message: string }> {
         return api.put<{ message: string }>(`/api/storage/share/${shareId}/tags/${path}`, { tags })
+    },
+
+    async getMeta(hash: number[]): Promise<MetaResponse | null> {
+        if (!hash || hash.length === 0) return null
+        const hex = Array.from(hash).map(b => b.toString(16).padStart(2, '0')).join('')
+        try {
+            return await api.get<MetaResponse>(`/api/storage/meta/${hex}`)
+        } catch {
+            return null
+        }
     }
 }

@@ -7,11 +7,13 @@ import {
   Music,
   Video,
   ImageIcon,
+  Info,
   Tag as TagIcon
 } from 'lucide-vue-next'
 import { tagService } from '../services/tag'
 import { useAuth } from '../composables/useAuth'
 import TagDialog from './TagDialog.vue'
+import FileMetaPanel from './FileMetaPanel.vue'
 import type { Storage, DirectoryEntry, Tag } from '../types'
 import { isVideo as isVideoFile, isAudio as isAudioFile, isImage as isImageFile, getBasename, getThumbnailUrl } from '../utils/file'
 import { onMounted } from 'vue'
@@ -45,6 +47,7 @@ const mediaUrl = computed(() => {
 })
 
 const isFullscreen = ref(false)
+const showMeta = ref(false)
 
 const toggleFullscreen = () => {
   isFullscreen.value = !isFullscreen.value
@@ -90,6 +93,10 @@ onMounted(fetchTags)
         </div>
 
         <div class="viewer-actions">
+          <button class="btn-icon" :class="{ active: showMeta }" @click="showMeta = !showMeta" title="File Info">
+            <Info :size="20" />
+          </button>
+
           <button v-if="user?.admin" class="btn-icon" @click="showTagsModal = true" title="Manage Tags">
             <TagIcon :size="20" />
           </button>
@@ -105,38 +112,44 @@ onMounted(fetchTags)
         </div>
       </header>
 
-      <div class="viewer-body">
-        <div v-if="isImg" class="image-wrapper">
-          <img :src="mediaUrl" :alt="getBasename(entry.path)" class="image-viewer" />
-        </div>
-
-        <div v-else-if="isVideo" class="video-wrapper">
-          <video
-            ref="videoRef"
-            :src="mediaUrl"
-            class="video-player"
-            controls
-            autoplay
-          >
-            Your browser does not support the video tag.
-          </video>
-        </div>
-
-        <div v-else-if="isAudio" class="audio-wrapper">
-          <div class="audio-art glass-panel">
-            <img v-if="entry.hash" :src="getThumbnailUrl(entry, 'large')!" class="album-art" @error="(e) => (e.target as HTMLImageElement).style.display = 'none'" />
-            <Music :size="80" class="music-icon" />
+      <div class="viewer-body" :class="{ 'with-sidebar': showMeta }">
+        <div class="media-content">
+          <div v-if="isImg" class="image-wrapper">
+            <img :src="mediaUrl" :alt="getBasename(entry.path)" class="image-viewer" />
           </div>
-          <audio 
-            ref="audioRef"
-            :src="mediaUrl"
-            class="audio-player"
-            controls
-            autoplay
-          >
-            Your browser does not support the audio tag.
-          </audio>
+
+          <div v-else-if="isVideo" class="video-wrapper">
+            <video
+              ref="videoRef"
+              :src="mediaUrl"
+              class="video-player"
+              controls
+              autoplay
+            >
+              Your browser does not support the video tag.
+            </video>
+          </div>
+
+          <div v-else-if="isAudio" class="audio-wrapper">
+            <div class="audio-art glass-panel">
+              <img v-if="entry.hash" :src="getThumbnailUrl(entry, 'large')!" class="album-art" @error="(e) => (e.target as HTMLImageElement).style.display = 'none'" />
+              <Music :size="80" class="music-icon" />
+            </div>
+            <audio
+              ref="audioRef"
+              :src="mediaUrl"
+              class="audio-player"
+              controls
+              autoplay
+            >
+              Your browser does not support the audio tag.
+            </audio>
+          </div>
         </div>
+
+        <aside v-if="showMeta" class="meta-sidebar">
+          <FileMetaPanel :entry="entry" />
+        </aside>
       </div>
 
       <footer class="viewer-footer">
@@ -268,14 +281,33 @@ onMounted(fetchTags)
   background: rgba(239, 68, 68, 0.1);
 }
 
+.btn-icon.active {
+  color: var(--accent-color);
+  background: rgba(59, 130, 246, 0.1);
+}
+
 .viewer-body {
+  flex: 1;
+  display: flex;
+  background: #000;
+  position: relative;
+  overflow: hidden;
+}
+
+.media-content {
   flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #000;
-  position: relative;
   overflow: hidden;
+}
+
+.meta-sidebar {
+  width: 280px;
+  flex-shrink: 0;
+  background: rgba(15, 15, 25, 0.95);
+  border-left: 1px solid var(--border-color);
+  overflow-y: auto;
 }
 
 .image-wrapper {

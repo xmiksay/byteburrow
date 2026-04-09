@@ -10,6 +10,7 @@ import {
   AlertCircle,
   Maximize2,
   Minimize2,
+  Info,
   Tag as TagIcon
 } from 'lucide-vue-next'
 import { marked } from 'marked'
@@ -20,6 +21,7 @@ import { storageService } from '../services/storage'
 import { tagService } from '../services/tag'
 import { useAuth } from '../composables/useAuth'
 import TagDialog from './TagDialog.vue'
+import FileMetaPanel from './FileMetaPanel.vue'
 import type { Storage, DirectoryEntry, Tag } from '../types'
 
 const { user } = useAuth()
@@ -49,6 +51,7 @@ const loading = ref(true)
 const saving = ref(false)
 const error = ref<string | null>(null)
 const isFullscreen = ref(false)
+const showMeta = ref(false)
 const editorRef = ref<HTMLTextAreaElement | null>(null)
 const previewRef = ref<HTMLElement | null>(null)
 
@@ -203,6 +206,10 @@ onMounted(fetchTags)
             <span>{{ saving ? 'Saving...' : 'Save' }}</span>
           </button>
 
+          <button class="btn-icon" :class="{ active: showMeta }" @click="showMeta = !showMeta" title="File Info">
+            <Info :size="20" />
+          </button>
+
           <button v-if="user?.admin" class="btn-icon" @click="showTagsModal = true" title="Manage Tags">
             <TagIcon :size="20" />
           </button>
@@ -220,56 +227,62 @@ onMounted(fetchTags)
         </div>
       </header>
 
-      <div class="viewer-body">
-        <div v-if="loading" class="body-loading">
-          <div class="spinner"></div>
-          <p>Loading content...</p>
-        </div>
-
-        <div v-else-if="error" class="body-error">
-          <AlertCircle :size="48" class="error-icon" />
-          <p>{{ error }}</p>
-          <button class="btn-secondary" @click="fetchContent">Retry</button>
-        </div>
-
-        <template v-else>
-          <!-- Preview Mode -->
-          <div v-if="mode === 'preview'" 
-               class="content-preview" 
-               :class="{ 'markdown-body': isMarkdown, 'code-preview': !isMarkdown }" 
-               v-html="highlightedContent">
+      <div class="viewer-body" :class="{ 'with-sidebar': showMeta }">
+        <div class="body-content">
+          <div v-if="loading" class="body-loading">
+            <div class="spinner"></div>
+            <p>Loading content...</p>
           </div>
 
-          <!-- Edit Mode: Markdown Split View -->
-          <div v-else-if="isMarkdown" class="split-editor">
-            <div class="split-editor-pane">
+          <div v-else-if="error" class="body-error">
+            <AlertCircle :size="48" class="error-icon" />
+            <p>{{ error }}</p>
+            <button class="btn-secondary" @click="fetchContent">Retry</button>
+          </div>
+
+          <template v-else>
+            <!-- Preview Mode -->
+            <div v-if="mode === 'preview'"
+                 class="content-preview"
+                 :class="{ 'markdown-body': isMarkdown, 'code-preview': !isMarkdown }"
+                 v-html="highlightedContent">
+            </div>
+
+            <!-- Edit Mode: Markdown Split View -->
+            <div v-else-if="isMarkdown" class="split-editor">
+              <div class="split-editor-pane">
+                <textarea
+                  ref="editorRef"
+                  v-model="content"
+                  class="content-editor"
+                  placeholder="Start typing..."
+                  spellcheck="false"
+                  @scroll="syncScroll"
+                ></textarea>
+              </div>
+              <div class="split-divider"></div>
+              <div
+                ref="previewRef"
+                class="split-preview-pane markdown-body"
+                v-html="highlightedContent"
+              ></div>
+            </div>
+
+            <!-- Edit Mode: Plain textarea for non-markdown -->
+            <div v-else class="editor-container">
               <textarea
-                ref="editorRef"
                 v-model="content"
                 class="content-editor"
                 placeholder="Start typing..."
                 spellcheck="false"
-                @scroll="syncScroll"
               ></textarea>
             </div>
-            <div class="split-divider"></div>
-            <div
-              ref="previewRef"
-              class="split-preview-pane markdown-body"
-              v-html="highlightedContent"
-            ></div>
-          </div>
+          </template>
+        </div>
 
-          <!-- Edit Mode: Plain textarea for non-markdown -->
-          <div v-else class="editor-container">
-            <textarea
-              v-model="content"
-              class="content-editor"
-              placeholder="Start typing..."
-              spellcheck="false"
-            ></textarea>
-          </div>
-        </template>
+        <aside v-if="showMeta" class="meta-sidebar">
+          <FileMetaPanel :entry="entry" />
+        </aside>
       </div>
 
       <footer class="viewer-footer">
@@ -455,6 +468,11 @@ onMounted(fetchTags)
   background: rgba(255, 255, 255, 0.05);
 }
 
+.btn-icon.active {
+  color: var(--accent-color);
+  background: rgba(59, 130, 246, 0.1);
+}
+
 .btn-icon.close:hover {
   color: #ef4444;
   background: rgba(239, 68, 68, 0.1);
@@ -465,6 +483,22 @@ onMounted(fetchTags)
   overflow: hidden;
   position: relative;
   background: rgba(0, 0, 0, 0.2);
+  display: flex;
+}
+
+.body-content {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.meta-sidebar {
+  width: 280px;
+  flex-shrink: 0;
+  background: rgba(15, 15, 25, 0.95);
+  border-left: 1px solid var(--border-color);
+  overflow-y: auto;
 }
 
 .body-loading, .body-error {

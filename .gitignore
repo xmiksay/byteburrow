@@ -2,3 +2,4 @@
 /data
 *.log
 .env
+recognition_resnet27.onnx

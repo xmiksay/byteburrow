@@ -1,0 +1,16 @@
+[package]
+name = "byteburrow-plugin-keyword-extractor"
+version = "0.1.0"
+edition = "2021"
+description = "Image keyword extraction plugin for ByteBurrow — uses Ollama vision LLM"
+authors = ["Martin Miksanik"]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+byteburrow-plugin-api = { path = "../../byteburrow-plugin-api" }
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+ureq = { version = "3", features = ["json"] }
+base64 = "0.22"

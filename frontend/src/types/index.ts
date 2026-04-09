@@ -109,6 +109,13 @@ export interface Photo {
     keywords: string[]
 }
 
+export interface MetaResponse {
+    hash: string
+    tags: number[]
+    keywords: string[]
+    custom: Record<string, any>
+}
+
 export interface ShareRequest {
     can_write: boolean
     expires_in_days?: number
