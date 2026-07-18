@@ -1,13 +1,15 @@
 use crate::auth::Auth;
 use crate::entity::tag;
-use crate::web::{require_admin, AppState, ErrorResponse};
+use crate::web::{
+    conflict, not_found, require_admin, save_or_err, tag_name_taken, ApiError, AppState,
+    ErrorResponse,
+};
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
     routing::get,
     Json, Router,
 };
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+use sea_orm::{ActiveModelTrait, EntityTrait, Set};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -68,16 +70,8 @@ pub fn router() -> Router<Arc<AppState>> {
 async fn list_tags_handler(
     _auth: Option<Auth>,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<TagResponse>>, (StatusCode, Json<ErrorResponse>)> {
-    let tags = tag::Entity::find().all(&state.db).await.map_err(|e| {
-        tracing::error!("Database error: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Database error".to_string(),
-            }),
-        )
-    })?;
+) -> Result<Json<Vec<TagResponse>>, ApiError> {
+    let tags = tag::Entity::find().all(&state.db).await?;
 
     Ok(Json(tags.into_iter().map(TagResponse::from).collect()))
 }
@@ -98,25 +92,11 @@ async fn get_tag_handler(
     _auth: Option<Auth>,
     Path(tag_id): Path<i32>,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<TagResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<TagResponse>, ApiError> {
     let tag = tag::Entity::find_by_id(tag_id)
         .one(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Database error".to_string(),
-                }),
-            )
-        })?
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("Tag {} not found", tag_id),
-            }),
-        ))?;
+        .await?
+        .ok_or_else(|| not_found("Tag", tag_id))?;
 
     Ok(Json(TagResponse::from(tag)))
 }
@@ -139,31 +119,14 @@ async fn create_tag_handler(
     auth: Auth,
     State(state): State<Arc<AppState>>,
     Json(payload): Json<CreateTagRequest>,
-) -> Result<Json<TagResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<TagResponse>, ApiError> {
     require_admin(&auth)?;
 
-    // Check if tag with same name already exists
-    let existing = tag::Entity::find()
-        .filter(tag::Column::Name.eq(&payload.name))
-        .one(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Database error".to_string(),
-                }),
-            )
-        })?;
-
-    if existing.is_some() {
-        return Err((
-            StatusCode::CONFLICT,
-            Json(ErrorResponse {
-                error: format!("Tag with name '{}' already exists", payload.name),
-            }),
-        ));
+    if tag_name_taken(&state.db, &payload.name).await? {
+        return Err(conflict(format!(
+            "Tag with name '{}' already exists",
+            payload.name
+        )));
     }
 
     let new_tag = tag::ActiveModel {
@@ -172,15 +135,7 @@ async fn create_tag_handler(
         ..Default::default()
     };
 
-    let created_tag = new_tag.insert(&state.db).await.map_err(|e| {
-        tracing::error!("Database error: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Failed to create tag".to_string(),
-            }),
-        )
-    })?;
+    let created_tag = new_tag.insert(&state.db).await?;
 
     Ok(Json(TagResponse::from(created_tag)))
 }
@@ -206,54 +161,20 @@ async fn update_tag_handler(
     Path(tag_id): Path<i32>,
     State(state): State<Arc<AppState>>,
     Json(payload): Json<UpdateTagRequest>,
-) -> Result<Json<TagResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<TagResponse>, ApiError> {
     require_admin(&auth)?;
 
-    // Find the tag
     let tag = tag::Entity::find_by_id(tag_id)
         .one(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Database error".to_string(),
-                }),
-            )
-        })?
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("Tag {} not found", tag_id),
-            }),
-        ))?;
+        .await?
+        .ok_or_else(|| not_found("Tag", tag_id))?;
 
-    // Check if name is being changed and if it conflicts
     if let Some(ref new_name) = payload.name {
-        if new_name != &tag.name {
-            let existing = tag::Entity::find()
-                .filter(tag::Column::Name.eq(new_name))
-                .one(&state.db)
-                .await
-                .map_err(|e| {
-                    tracing::error!("Database error: {}", e);
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse {
-                            error: "Database error".to_string(),
-                        }),
-                    )
-                })?;
-
-            if existing.is_some() {
-                return Err((
-                    StatusCode::CONFLICT,
-                    Json(ErrorResponse {
-                        error: format!("Tag with name '{}' already exists", new_name),
-                    }),
-                ));
-            }
+        if new_name != &tag.name && tag_name_taken(&state.db, new_name).await? {
+            return Err(conflict(format!(
+                "Tag with name '{}' already exists",
+                new_name
+            )));
         }
     }
 
@@ -266,15 +187,7 @@ async fn update_tag_handler(
         active_tag.description = Set(Some(description));
     }
 
-    let updated_tag = active_tag.update(&state.db).await.map_err(|e| {
-        tracing::error!("Database error: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Failed to update tag".to_string(),
-            }),
-        )
-    })?;
+    let updated_tag = save_or_err(active_tag, &state.db).await?;
 
     Ok(Json(TagResponse::from(updated_tag)))
 }
@@ -297,42 +210,15 @@ async fn delete_tag_handler(
     auth: Auth,
     Path(tag_id): Path<i32>,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     require_admin(&auth)?;
 
-    // Check if tag exists
     let tag = tag::Entity::find_by_id(tag_id)
         .one(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Database error".to_string(),
-                }),
-            )
-        })?
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("Tag {} not found", tag_id),
-            }),
-        ))?;
+        .await?
+        .ok_or_else(|| not_found("Tag", tag_id))?;
 
-    // Delete the tag
-    tag::Entity::delete_by_id(tag_id)
-        .exec(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Failed to delete tag".to_string(),
-                }),
-            )
-        })?;
+    tag::Entity::delete_by_id(tag_id).exec(&state.db).await?;
 
     Ok(Json(serde_json::json!({
         "message": format!("Tag '{}' deleted successfully", tag.name),

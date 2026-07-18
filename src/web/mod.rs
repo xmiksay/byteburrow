@@ -68,15 +68,248 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
+/// Unified error type for the web layer.
+///
+/// Every variant logs internally (in [`IntoResponse`]) and renders as a JSON
+/// `ErrorResponse` body, so handlers can simply use `?` and `.map_err(...)`
+/// without repeating the boilerplate tuple `(StatusCode, Json<ErrorResponse>)`.
+#[derive(Debug)]
+pub enum ApiError {
+    /// A database error (logged, maps to 500 Internal Server Error).
+    Db(sea_orm::DbErr),
+    /// An entity lookup returned no row (404 Not Found).
+    NotFound {
+        entity: &'static str,
+        id: i32,
+    },
+    /// A 404 with a fully custom message (e.g. "Photo not found").
+    NotFoundMsg {
+        msg: String,
+    },
+    /// A conflicting resource already exists (409 Conflict).
+    Conflict {
+        msg: String,
+    },
+    /// The request was malformed / invalid (400 Bad Request).
+    BadRequest {
+        msg: String,
+    },
+    /// The caller is not permitted to perform the action (403 Forbidden).
+    Forbidden {
+        msg: String,
+    },
+    /// The caller must authenticate to perform the action (401 Unauthorized).
+    Unauthorized,
+    /// The caller must authenticate; carries a specific message body
+    /// (401 Unauthorized + WWW-Authenticate header).
+    UnauthorizedMsg {
+        msg: String,
+    },
+    /// The requested share has expired (410 Gone).
+    Gone {
+        msg: String,
+    },
+    /// Any other internal failure (500 Internal Server Error).
+    Internal {
+        msg: String,
+    },
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> axum::response::Response {
+        let (status, message) = match &self {
+            ApiError::Db(e) => {
+                tracing::error!("Database error: {e}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Database error".to_string(),
+                )
+            }
+            ApiError::NotFound { entity, id } => {
+                (StatusCode::NOT_FOUND, format!("{entity} {id} not found"))
+            }
+            ApiError::NotFoundMsg { msg } => (StatusCode::NOT_FOUND, msg.clone()),
+            ApiError::Conflict { msg } => (StatusCode::CONFLICT, msg.clone()),
+            ApiError::BadRequest { msg } => (StatusCode::BAD_REQUEST, msg.clone()),
+            ApiError::Forbidden { msg } => {
+                (StatusCode::FORBIDDEN, msg.clone())
+            }
+            ApiError::Unauthorized => {
+                (StatusCode::UNAUTHORIZED, "Authentication required".to_string())
+            }
+            ApiError::UnauthorizedMsg { msg } => {
+                (StatusCode::UNAUTHORIZED, msg.clone())
+            }
+            ApiError::Gone { msg } => (StatusCode::GONE, msg.clone()),
+            ApiError::Internal { msg } => {
+                tracing::error!("Internal error: {msg}");
+                (StatusCode::INTERNAL_SERVER_ERROR, msg.clone())
+            }
+        };
+
+        if matches!(self, ApiError::Unauthorized) {
+            (
+                status,
+                [(header::WWW_AUTHENTICATE, "Basic realm=\"Cloud\"")],
+                Json(ErrorResponse { error: message }),
+            )
+                .into_response()
+        } else {
+            (status, Json(ErrorResponse { error: message })).into_response()
+        }
+    }
+}
+
+impl From<sea_orm::DbErr> for ApiError {
+    fn from(e: sea_orm::DbErr) -> Self {
+        if matches!(e, sea_orm::DbErr::RecordNotFound(_)) {
+            ApiError::NotFoundMsg {
+                msg: e.to_string(),
+            }
+        } else {
+            ApiError::Db(e)
+        }
+    }
+}
+
+/// Construct a database error (used as `.map_err(db_err)?` for readability).
+pub fn db_err(e: sea_orm::DbErr) -> ApiError {
+    ApiError::Db(e)
+}
+
+/// Construct a forbidden error with a specific message.
+pub fn forbidden<S: Into<String>>(msg: S) -> ApiError {
+    ApiError::Forbidden { msg: msg.into() }
+}
+
+/// Construct a not-found error for a given entity and id.
+pub fn not_found(entity: &'static str, id: i32) -> ApiError {
+    ApiError::NotFound { entity, id }
+}
+
+/// Construct a not-found error with a custom message body.
+pub fn not_found_msg<S: Into<String>>(msg: S) -> ApiError {
+    ApiError::NotFoundMsg { msg: msg.into() }
+}
+
+/// Construct a conflict error with a message.
+pub fn conflict<S: Into<String>>(msg: S) -> ApiError {
+    ApiError::Conflict { msg: msg.into() }
+}
+
+/// Construct a bad-request error with a message.
+pub fn bad_request<S: Into<String>>(msg: S) -> ApiError {
+    ApiError::BadRequest { msg: msg.into() }
+}
+
+/// Construct an internal-error with a message.
+pub fn internal<S: Into<String>>(msg: S) -> ApiError {
+    ApiError::Internal { msg: msg.into() }
+}
+
+/// Construct an unauthorized error (401 + WWW-Authenticate) with a message.
+pub fn unauthorized_msg<S: Into<String>>(msg: S) -> ApiError {
+    ApiError::UnauthorizedMsg { msg: msg.into() }
+}
+
+// ---------------------------------------------------------------------------
+// Unique-name validation (DRY-2)
+// ---------------------------------------------------------------------------
+
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+/// Per-entity uniqueness checks. Each helper queries the right column and
+/// returns `Ok(true)` if the name/path is already in use. Combine with the
+/// [`conflict`] helper at call sites:
+///
+/// ```ignore
+/// if user_name_taken(db, &payload.username).await? {
+///     return Err(conflict(format!("Username '{}' already exists", payload.username)));
+/// }
+/// ```
+pub async fn user_name_taken(db: &DatabaseConnection, name: &str) -> Result<bool, ApiError> {
+    use crate::entity::user;
+    Ok(user::Entity::find()
+        .filter(user::Column::Username.eq(name))
+        .one(db)
+        .await?
+        .is_some())
+}
+
+pub async fn group_name_taken(db: &DatabaseConnection, name: &str) -> Result<bool, ApiError> {
+    use crate::entity::group;
+    Ok(group::Entity::find()
+        .filter(group::Column::Name.eq(name))
+        .one(db)
+        .await?
+        .is_some())
+}
+
+pub async fn tag_name_taken(db: &DatabaseConnection, name: &str) -> Result<bool, ApiError> {
+    use crate::entity::tag;
+    Ok(tag::Entity::find()
+        .filter(tag::Column::Name.eq(name))
+        .one(db)
+        .await?
+        .is_some())
+}
+
+pub async fn storage_name_taken(db: &DatabaseConnection, name: &str) -> Result<bool, ApiError> {
+    use crate::entity::storage;
+    Ok(storage::Entity::find()
+        .filter(storage::Column::Name.eq(name))
+        .one(db)
+        .await?
+        .is_some())
+}
+
+pub async fn storage_path_taken(db: &DatabaseConnection, path: &str) -> Result<bool, ApiError> {
+    use crate::entity::storage;
+    Ok(storage::Entity::find()
+        .filter(storage::Column::Path.eq(path))
+        .one(db)
+        .await?
+        .is_some())
+}
+
+// ---------------------------------------------------------------------------
+// Generic SeaORM persistence helpers (DRY-3)
+// ---------------------------------------------------------------------------
+
+use sea_orm::{ActiveModelBehavior, ActiveModelTrait, IntoActiveModel};
+
+/// Insert an active model, mapping any DB error to [`ApiError`].
+pub async fn insert_or_err<A, E>(am: A, db: &DatabaseConnection) -> Result<E::Model, ApiError>
+where
+    E: EntityTrait,
+    A: ActiveModelTrait<Entity = E> + ActiveModelBehavior + Send + Sync + 'static,
+    E::Model: IntoActiveModel<A>,
+{
+    Ok(am.insert(db).await?)
+}
+
+/// Save (update) an active model, mapping any DB error to [`ApiError`].
+pub async fn save_or_err<A, E>(am: A, db: &DatabaseConnection) -> Result<E::Model, ApiError>
+where
+    E: EntityTrait,
+    A: ActiveModelTrait<Entity = E> + ActiveModelBehavior + Send + Sync + 'static,
+    E::Model: IntoActiveModel<A>,
+{
+    Ok(am.update(db).await?)
+}
+
+/// If `value` is `Some`, overwrite `*field` with it. Used to apply optional
+/// `Option<T>` fields from update payloads without repeating `if let Some`.
+pub fn apply_optional<T>(field: &mut T, value: Option<T>) {
+    if let Some(v) = value {
+        *field = v;
+    }
+}
+
 /// Helper function to check if user is admin
-pub fn require_admin(auth: &Auth) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+pub fn require_admin(auth: &Auth) -> Result<(), ApiError> {
     if !auth.user.admin {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse {
-                error: "Admin access required".to_string(),
-            }),
-        ));
+        return Err(forbidden("Admin access required"));
     }
     Ok(())
 }
@@ -85,26 +318,13 @@ pub fn require_admin(auth: &Auth) -> Result<(), (StatusCode, Json<ErrorResponse>
 pub async fn require_user_exists(
     user_id: i32,
     db: &DatabaseConnection,
-) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    let exists = crate::auth::user_exists(user_id, db).await.map_err(|e| {
-        tracing::error!("Database error checking user existence: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Database error".to_string(),
-            }),
-        )
-    })?;
-
+) -> Result<(), ApiError> {
+    let exists = crate::auth::user_exists(user_id, db).await?;
     if !exists {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: format!("User with id {} not found", user_id),
-            }),
-        ));
+        return Err(bad_request(format!(
+            "User with id {user_id} not found"
+        )));
     }
-
     Ok(())
 }
 
@@ -112,27 +332,131 @@ pub async fn require_user_exists(
 pub async fn require_group_exists(
     group_id: i32,
     db: &DatabaseConnection,
-) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    let exists = crate::auth::group_exists(group_id, db).await.map_err(|e| {
-        tracing::error!("Database error checking group existence: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Database error".to_string(),
-            }),
-        )
-    })?;
-
+) -> Result<(), ApiError> {
+    let exists = crate::auth::group_exists(group_id, db).await?;
     if !exists {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: format!("Group with id {} not found", group_id),
-            }),
-        ));
+        return Err(bad_request(format!(
+            "Group with id {group_id} not found"
+        )));
+    }
+    Ok(())
+}
+
+/// Load all group ids the given user belongs to.
+pub async fn user_group_ids(
+    db: &DatabaseConnection,
+    user_id: i32,
+) -> Result<Vec<i32>, ApiError> {
+    use crate::entity::group_user;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    Ok(group_user::Entity::find()
+        .filter(group_user::Column::UserId.eq(user_id))
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|gu| gu.group_id)
+        .collect())
+}
+
+/// Authorization check for accessing a storage.
+///
+/// A user may access a storage if any of the following holds:
+/// - they are an admin;
+/// - they are the storage's default owner (`storage.default_user`);
+/// - they are a member of the storage's default group (`storage.default_group`);
+/// - there is a share (in the `shared` table) whose `user_ids` contains the user
+///   or whose `group_ids` intersects the user's groups, referencing any entry
+///   within this storage.
+///
+/// Use this on every storage file/entry handler to prevent IDOR. Returns `Ok`
+/// on success; returns [`ApiError::Forbidden`] on denial.
+pub async fn require_storage_access(
+    auth: &Auth,
+    storage: &crate::entity::storage::Model,
+    db: &DatabaseConnection,
+) -> Result<(), ApiError> {
+    // Admins can access everything.
+    if auth.user.admin {
+        return Ok(());
+    }
+    let user_id = auth.user.id;
+
+    // Direct ownership.
+    if is_owner(storage, user_id) {
+        return Ok(());
     }
 
-    Ok(())
+    // The user's group memberships — loaded ONCE and reused for both the
+    // storage-default-group check and the share-recipient check.
+    let groups = user_group_ids(db, user_id).await?;
+
+    // Membership in the storage's default group.
+    if groups.contains(&storage.default_group) {
+        return Ok(());
+    }
+
+    // Shares referencing any entry in this storage.
+    if has_share_for_storage(db, storage.id, user_id, &groups).await? {
+        return Ok(());
+    }
+
+    Err(forbidden("Access denied to this storage"))
+}
+
+/// The user is the storage's default owner.
+fn is_owner(storage: &crate::entity::storage::Model, user_id: i32) -> bool {
+    storage.default_user == user_id
+}
+
+/// The user belongs to at least one of the storage's groups.
+#[allow(dead_code)]
+fn is_group_member(groups: &[i32], group_id: i32) -> bool {
+    groups.contains(&group_id)
+}
+
+/// There is a share in this storage whose `user_ids` contains the user or
+/// whose `group_ids` intersects `groups`.
+async fn has_share_for_storage(
+    db: &DatabaseConnection,
+    storage_id: i32,
+    user_id: i32,
+    groups: &[i32],
+) -> Result<bool, ApiError> {
+    use crate::entity::{entry, shared};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    // Any entry id in this storage (shares reference entries by id via path_id).
+    let entry_ids: Vec<i32> = entry::Entity::find()
+        .filter(entry::Column::StorageId.eq(storage_id))
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|e| e.id)
+        .collect();
+
+    if entry_ids.is_empty() {
+        return Ok(false);
+    }
+
+    // Load all shares targeting entries in this storage, then check
+    // user/group membership in Rust (the user_ids/group_ids are Postgres
+    // array columns; materializing them is simplest and correct).
+    let shares = shared::Entity::find()
+        .filter(shared::Column::PathId.is_in(entry_ids))
+        .all(db)
+        .await?;
+
+    for share in shares {
+        if share.user_ids.contains(&user_id) {
+            return Ok(true);
+        }
+        if share.group_ids.iter().any(|g| groups.contains(g)) {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 pub struct AppState {
@@ -299,7 +623,7 @@ pub async fn run(config: Config, db: DatabaseConnection, job_sender: JobSender) 
     jinja.add_filter("basename", |path: String| {
         path.trim_end_matches('/')
             .split('/')
-            .last()
+            .next_back()
             .unwrap_or(&path)
             .to_string()
     });

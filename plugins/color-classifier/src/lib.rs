@@ -48,14 +48,11 @@ impl ClassifierPlugin for ColorClassifier {
     }
 
     fn classify(&self, ctx: &FileContext) -> Result<Option<ClassificationResult>, String> {
-        let img = image::load_from_memory(ctx.data)
-            .map_err(|e| format!("image decode: {e}"))?;
+        let img = image::load_from_memory(ctx.data).map_err(|e| format!("image decode: {e}"))?;
         let thumb = img.resize_exact(64, 64, image::imageops::FilterType::Triangle);
 
-        let pixels: Vec<(u8, u8, u8)> = thumb
-            .pixels()
-            .map(|(_, _, p)| (p[0], p[1], p[2]))
-            .collect();
+        let pixels: Vec<(u8, u8, u8)> =
+            thumb.pixels().map(|(_, _, p)| (p[0], p[1], p[2])).collect();
 
         let avg = compute_average(&pixels);
         let raw_colors = top_n_colors(&pixels, 3);
@@ -81,9 +78,7 @@ impl ClassifierPlugin for ColorClassifier {
         });
 
         let mut result = ClassificationResult::default();
-        result
-            .custom
-            .insert("colors".to_string(), colors_json);
+        result.custom.insert("colors".to_string(), colors_json);
 
         Ok(Some(result))
     }
@@ -130,7 +125,7 @@ fn top_n_colors(pixels: &[(u8, u8, u8)], n: usize) -> Vec<(u8, u8, u8)> {
         .enumerate()
         .filter(|&(_, count)| count > 0)
         .collect();
-    indices.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+    indices.sort_unstable_by_key(|b| std::cmp::Reverse(b.1));
     indices
         .iter()
         .take(n)

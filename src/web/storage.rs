@@ -1,26 +1,26 @@
 use crate::auth::Auth;
 use crate::entity::entry::EntryType;
-use crate::entity::{entry, group_user, meta, shared, storage};
+use crate::entity::{entry, meta, shared, storage};
 use crate::storage::{
     determine_content_type, thumbnail, validate_storage_path, DirectoryEntry,
     Storage as StorageWrapper,
 };
-use crate::web::{require_admin, require_group_exists, require_user_exists, AppState, ErrorResponse};
+use crate::web::{
+    bad_request, conflict, forbidden, internal, not_found, not_found_msg, require_admin,
+    require_group_exists, require_storage_access, require_user_exists, save_or_err,
+    storage_name_taken, storage_path_taken, unauthorized_msg, user_group_ids, ApiError, AppState,
+    ErrorResponse,
+};
 use axum::{
     body::Body,
     extract::{Path as AxumPath, Query, State},
     http::{header, Request, StatusCode},
     response::{Html, IntoResponse},
-    routing::{delete, get, post, put},
+    routing::{get, post, put},
     Json, Router,
 };
-use chrono;
-use sea_orm::{
-    sea_query::Expr, ActiveModelTrait, ColumnTrait, Condition, EntityTrait, PaginatorTrait,
-    QueryFilter, Set,
-};
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use sea_orm::{sea_query::Expr, ActiveModelTrait, ColumnTrait, Condition, EntityTrait, PaginatorTrait, QueryFilter, Set};
+use serde::Deserialize;
 use std::sync::Arc;
 use tokio::fs;
 use tokio::io::AsyncReadExt;
@@ -28,9 +28,8 @@ use tower::Service;
 use tower_http::services::ServeFile;
 use tracing::instrument;
 
-
 /// Storage response
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
 pub struct StorageResponse {
     pub id: i32,
     pub name: String,
@@ -91,6 +90,105 @@ pub struct RenameEntryRequest {
     pub new_path: String,
 }
 
+/// Meta response
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct MetaResponse {
+    pub hash: String,
+    pub tags: Vec<i32>,
+    pub keywords: Vec<String>,
+    pub custom: serde_json::Value,
+}
+
+impl From<meta::Model> for MetaResponse {
+    fn from(m: meta::Model) -> Self {
+        Self {
+            hash: hex::encode(&m.hash),
+            tags: m.tags,
+            keywords: m.keywords,
+            custom: m.custom,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Local helpers (DRY-1: map StorageWrapper errors preserving legacy messages)
+// ---------------------------------------------------------------------------
+
+/// Map a `StorageWrapper::find_by_id` DbErr to an ApiError, preserving the
+/// legacy "Storage {id} not found" message for the RecordNotFound case (the
+/// wrapper's own message is "Storage with id X not found").
+fn storage_lookup_err(e: sea_orm::DbErr, storage_id: i32) -> ApiError {
+    if matches!(e, sea_orm::DbErr::RecordNotFound(_)) {
+        not_found_msg(format!("Storage {} not found", storage_id))
+    } else {
+        ApiError::Db(e)
+    }
+}
+
+/// Dispatch background `ProcessFile` jobs for any unhashed files in `entries`.
+fn dispatch_hash_jobs(state: &AppState, entries: &[DirectoryEntry]) {
+    entries
+        .iter()
+        .filter(|e| e.hash.is_none() && e.entry_type == EntryType::File)
+        .for_each(|e| {
+            state
+                .job_sender
+                .send(crate::job::Job::ProcessFile {
+                    storage_id: e.storage_id,
+                    path: e.path.clone(),
+                    mode: crate::job::ProcessMode::Auto,
+                })
+                .ok();
+        });
+}
+
+/// Build a one-shot [`ServeFile`] response with a forced Content-Type header.
+async fn serve_file_response(
+    full_path: std::path::PathBuf,
+    content_type: &'static str,
+    req: Request<Body>,
+) -> axum::response::Response {
+    let mut service = ServeFile::new(full_path);
+    let mut res = Service::<Request<Body>>::call(&mut service, req)
+        .await
+        .map_err(|e| match e {})
+        .unwrap()
+        .into_response();
+    res.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static(content_type),
+    );
+    res
+}
+
+/// Detect content type from a file's first kilobyte, falling back to
+/// `application/octet-stream` if the file cannot be opened.
+async fn detect_content_type(full_path: &std::path::Path) -> &'static str {
+    match fs::File::open(full_path).await {
+        Ok(mut file) => {
+            let mut buffer = [0u8; 1024];
+            let n = file.read(&mut buffer).await.unwrap_or(0);
+            determine_content_type(full_path, &buffer[..n])
+        }
+        Err(_) => "application/octet-stream",
+    }
+}
+
+/// Build a fully-qualified path under a share's base entry.
+fn join_share_path(base_path: &str, sub_path: &str) -> String {
+    let base = base_path.trim_matches('/');
+    let sub = sub_path.trim_matches('/');
+    match (base.is_empty(), sub.is_empty()) {
+        (true, _) => sub.to_string(),
+        (_, true) => base.to_string(),
+        _ => format!("{base}/{sub}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Router
+// ---------------------------------------------------------------------------
+
 /// Create storage router with all storage-related endpoints
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
@@ -114,7 +212,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/:id/raw/*path", get(download_file_handler))
         .route("/:id/create/*path", post(create_entry_handler))
         .route("/:id/rename/*path", post(rename_entry_handler))
-        .route("/:id/remove/*path", delete(remove_entry_handler))
+        .route("/:id/remove/*path", axum::routing::delete(remove_entry_handler))
         .route("/:id/hash/*path", post(trigger_hash_handler))
         .route("/:id/share/*path", get(list_shares_handler))
         .route("/:id/share/*path", post(share_entry_handler))
@@ -137,31 +235,15 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/share/:share_id/rename/*path", post(share_rename_handler))
         .route(
             "/share/:share_id/remove/*path",
-            delete(share_remove_handler),
+            axum::routing::delete(share_remove_handler),
         )
         .route("/thumbnail/:hash/:size", get(thumbnail_handler))
         .route("/meta/:hash", get(get_meta_handler))
 }
 
-/// Meta response
-#[derive(Debug, Serialize, utoipa::ToSchema)]
-pub struct MetaResponse {
-    pub hash: String,
-    pub tags: Vec<i32>,
-    pub keywords: Vec<String>,
-    pub custom: serde_json::Value,
-}
-
-impl From<meta::Model> for MetaResponse {
-    fn from(m: meta::Model) -> Self {
-        Self {
-            hash: hex::encode(&m.hash),
-            tags: m.tags,
-            keywords: m.keywords,
-            custom: m.custom,
-        }
-    }
-}
+// ---------------------------------------------------------------------------
+// Meta + thumbnail handlers
+// ---------------------------------------------------------------------------
 
 /// Get meta information by hash
 /// GET /api/storage/meta/:hash
@@ -184,36 +266,14 @@ pub(crate) async fn get_meta_handler(
     _auth: Auth,
     AxumPath(hash): AxumPath<String>,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<MetaResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let hash_bytes = hex::decode(&hash).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Invalid hex hash format".to_string(),
-            }),
-        )
-    })?;
+) -> Result<Json<MetaResponse>, ApiError> {
+    let hash_bytes =
+        hex::decode(&hash).map_err(|_| bad_request("Invalid hex hash format"))?;
 
     let meta = meta::Entity::find_by_id(hash_bytes)
         .one(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database error fetching meta: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Database error".to_string(),
-                }),
-            )
-        })?
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: "Meta not found".to_string(),
-                }),
-            )
-        })?;
+        .await?
+        .ok_or_else(|| not_found_msg("Meta not found"))?;
 
     Ok(Json(MetaResponse::from(meta)))
 }
@@ -238,41 +298,37 @@ pub(crate) async fn get_meta_handler(
 pub(crate) async fn thumbnail_handler(
     AxumPath((hash, size)): AxumPath<(String, String)>,
     State(state): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
+) -> Result<impl IntoResponse, ApiError> {
     // Validate hash format (basic validation)
     if hash.is_empty() || hash.len() < 6 || hash.len() > 64 {
-        return Err((StatusCode::BAD_REQUEST, "Invalid hash format".to_string()));
+        return Err(bad_request("Invalid hash format"));
     }
 
     // Validate size
     if !["small", "large", "mini"].contains(&size.as_str()) {
-        return Err((StatusCode::BAD_REQUEST, "Invalid size".to_string()));
+        return Err(bad_request("Invalid size"));
     }
 
     // Construct thumbnail path using the hash and size with distributed directory structure
-    // /1234/56/rest_of_hash_size.png
-    let thumbnail_dir = PathBuf::from(&state.config.thumbnail_storage);
+    let thumbnail_dir = std::path::PathBuf::from(&state.config.thumbnail_storage);
     let thumbnail_path = thumbnail::get_thumbnail_path(&thumbnail_dir, &hash, &size);
 
-    // Check if thumbnail exists
     if !thumbnail_path.exists() {
-        return Err((StatusCode::NOT_FOUND, format!("Thumbnail file not found")));
+        return Err(not_found_msg("Thumbnail file not found"));
     }
 
-    // Read the thumbnail file
-    let thumbnail_data = fs::read(&thumbnail_path).await.map_err(|e| {
-        tracing::error!("Failed to read thumbnail {}/{}: {}", hash, size, e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to read thumbnail".to_string(),
-        )
-    })?;
+    let thumbnail_data = fs::read(&thumbnail_path)
+        .await
+        .map_err(|e| internal(format!("Failed to read thumbnail {hash}/{size}: {e}")))?;
 
-    // Determine content type based on file extension or first bytes
     let content_type = determine_content_type(&thumbnail_path, &thumbnail_data);
 
     Ok(([(header::CONTENT_TYPE, content_type)], thumbnail_data))
 }
+
+// ---------------------------------------------------------------------------
+// Storage CRUD
+// ---------------------------------------------------------------------------
 
 /// Create new storage
 /// POST /api/storage
@@ -293,74 +349,35 @@ async fn create_storage_handler(
     auth: Auth,
     State(state): State<Arc<AppState>>,
     Json(payload): Json<CreateStorageRequest>,
-) -> Result<Json<StorageResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<StorageResponse>, ApiError> {
     require_admin(&auth)?;
 
     // Validate path exists and is accessible
-    validate_storage_path(&payload.path).await.map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-    })?;
-
-    // Check if path already exists in storage
-    let existing_path = storage::Entity::find()
-        .filter(storage::Column::Path.eq(&payload.path))
-        .one(&state.db)
+    validate_storage_path(&payload.path)
         .await
-        .map_err(|e| {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Database error".to_string(),
-                }),
-            )
-        })?;
+        .map_err(|e| bad_request(e.to_string()))?;
 
-    if existing_path.is_some() {
-        return Err((
-            StatusCode::CONFLICT,
-            Json(ErrorResponse {
-                error: format!("Storage with path '{}' already exists", payload.path),
-            }),
-        ));
+    // DRY-2: uniqueness checks
+    if storage_path_taken(&state.db, &payload.path).await? {
+        return Err(conflict(format!(
+            "Storage with path '{}' already exists",
+            payload.path
+        )));
     }
-
-    // Check if name already exists
-    let existing_name = storage::Entity::find()
-        .filter(storage::Column::Name.eq(&payload.name))
-        .one(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Database error".to_string(),
-                }),
-            )
-        })?;
-
-    if existing_name.is_some() {
-        return Err((
-            StatusCode::CONFLICT,
-            Json(ErrorResponse {
-                error: format!("Storage with name '{}' already exists", payload.name),
-            }),
-        ));
+    if storage_name_taken(&state.db, &payload.name).await? {
+        return Err(conflict(format!(
+            "Storage with name '{}' already exists",
+            payload.name
+        )));
     }
 
     // Verify default_user and default_group exist
     require_user_exists(payload.default_user, &state.db).await?;
     require_group_exists(payload.default_group, &state.db).await?;
 
-    let ignore_patterns = payload.ignore_patterns.unwrap_or_else(|| {
-        crate::config::Config::get().ignore_patterns.join(",")
-    });
+    let ignore_patterns = payload
+        .ignore_patterns
+        .unwrap_or_else(|| crate::config::Config::get().ignore_patterns.join(","));
 
     let new_storage = storage::ActiveModel {
         name: Set(payload.name),
@@ -372,15 +389,7 @@ async fn create_storage_handler(
         ..Default::default()
     };
 
-    let created_storage = new_storage.insert(&state.db).await.map_err(|e| {
-        tracing::error!("Database error: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Failed to create storage".to_string(),
-            }),
-        )
-    })?;
+    let created_storage = new_storage.insert(&state.db).await?;
 
     Ok(Json(StorageResponse::from(created_storage)))
 }
@@ -404,27 +413,13 @@ async fn get_storage_handler(
     auth: Auth,
     AxumPath(storage_id): AxumPath<i32>,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<StorageResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<StorageResponse>, ApiError> {
     require_admin(&auth)?;
 
     let storage = storage::Entity::find_by_id(storage_id)
         .one(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Database error".to_string(),
-                }),
-            )
-        })?
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("Storage {} not found", storage_id),
-            }),
-        ))?;
+        .await?
+        .ok_or_else(|| not_found("Storage", storage_id))?;
 
     Ok(Json(StorageResponse::from(storage)))
 }
@@ -452,92 +447,37 @@ async fn update_storage_handler(
     AxumPath(storage_id): AxumPath<i32>,
     State(state): State<Arc<AppState>>,
     Json(payload): Json<UpdateStorageRequest>,
-) -> Result<Json<StorageResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<StorageResponse>, ApiError> {
     require_admin(&auth)?;
 
-    // Find the storage
     let storage = storage::Entity::find_by_id(storage_id)
         .one(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Database error".to_string(),
-                }),
-            )
-        })?
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("Storage {} not found", storage_id),
-            }),
-        ))?;
+        .await?
+        .ok_or_else(|| not_found("Storage", storage_id))?;
 
     // Validate path if being changed
     if let Some(ref new_path) = payload.path {
         if new_path != &storage.path {
-            validate_storage_path(new_path).await.map_err(|e| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse {
-                        error: e.to_string(),
-                    }),
-                )
-            })?;
-
-            // Check if path already exists
-            let existing = storage::Entity::find()
-                .filter(storage::Column::Path.eq(new_path))
-                .one(&state.db)
+            validate_storage_path(new_path)
                 .await
-                .map_err(|e| {
-                    tracing::error!("Database error: {}", e);
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse {
-                            error: "Database error".to_string(),
-                        }),
-                    )
-                })?;
+                .map_err(|e| bad_request(e.to_string()))?;
 
-            if existing.is_some() {
-                return Err((
-                    StatusCode::CONFLICT,
-                    Json(ErrorResponse {
-                        error: format!("Storage with path '{}' already exists", new_path),
-                    }),
-                ));
+            if storage_path_taken(&state.db, new_path).await? {
+                return Err(conflict(format!(
+                    "Storage with path '{}' already exists",
+                    new_path
+                )));
             }
         }
     }
 
-    // Check if name is being changed and if it conflicts
+    // Check name conflict if changed
     if let Some(ref new_name) = payload.name {
-        if new_name != &storage.name {
-            let existing = storage::Entity::find()
-                .filter(storage::Column::Name.eq(new_name))
-                .one(&state.db)
-                .await
-                .map_err(|e| {
-                    tracing::error!("Database error: {}", e);
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse {
-                            error: "Database error".to_string(),
-                        }),
-                    )
-                })?;
-
-            if existing.is_some() {
-                return Err((
-                    StatusCode::CONFLICT,
-                    Json(ErrorResponse {
-                        error: format!("Storage with name '{}' already exists", new_name),
-                    }),
-                ));
-            }
+        if new_name != &storage.name && storage_name_taken(&state.db, new_name).await? {
+            return Err(conflict(format!(
+                "Storage with name '{}' already exists",
+                new_name
+            )));
         }
     }
 
@@ -571,15 +511,8 @@ async fn update_storage_handler(
     if let Some(ignore_patterns) = payload.ignore_patterns {
         active_storage.ignore_patterns = Set(ignore_patterns);
     }
-    let updated_storage = active_storage.update(&state.db).await.map_err(|e| {
-        tracing::error!("Database error: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Failed to update storage".to_string(),
-            }),
-        )
-    })?;
+
+    let updated_storage = save_or_err(active_storage, &state.db).await?;
 
     Ok(Json(StorageResponse::from(updated_storage)))
 }
@@ -604,69 +537,29 @@ async fn delete_storage_handler(
     auth: Auth,
     AxumPath(storage_id): AxumPath<i32>,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     require_admin(&auth)?;
 
-    // Check if storage exists
     let storage = storage::Entity::find_by_id(storage_id)
         .one(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Database error".to_string(),
-                }),
-            )
-        })?
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("Storage {} not found", storage_id),
-            }),
-        ))?;
+        .await?
+        .ok_or_else(|| not_found("Storage", storage_id))?;
 
-    // Check if storage has entries
     let entry_count = entry::Entity::find()
         .filter(entry::Column::StorageId.eq(storage_id))
         .count(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Database error".to_string(),
-                }),
-            )
-        })?;
+        .await?;
 
     if entry_count > 0 {
-        return Err((
-            StatusCode::CONFLICT,
-            Json(ErrorResponse {
-                error: format!(
-                    "Cannot delete storage with {} entries. Delete entries first.",
-                    entry_count
-                ),
-            }),
-        ));
+        return Err(conflict(format!(
+            "Cannot delete storage with {} entries. Delete entries first.",
+            entry_count
+        )));
     }
 
-    // Delete the storage
     storage::Entity::delete_by_id(storage_id)
         .exec(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Failed to delete storage".to_string(),
-                }),
-            )
-        })?;
+        .await?;
 
     Ok(Json(serde_json::json!({
         "message": format!("Storage '{}' deleted successfully", storage.name),
@@ -688,50 +581,46 @@ async fn delete_storage_handler(
 async fn list_storages_handler(
     _auth: Auth,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<StorageResponse>>, (StatusCode, Json<ErrorResponse>)> {
-    let storages = storage::Entity::find().all(&state.db).await.map_err(|e| {
-        tracing::error!("Database error: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Database error".to_string(),
-            }),
-        )
-    })?;
+) -> Result<Json<Vec<StorageResponse>>, ApiError> {
+    let storages = storage::Entity::find().all(&state.db).await?;
 
     Ok(Json(
         storages.into_iter().map(StorageResponse::from).collect(),
     ))
 }
 
-/// Helper handler for listing the root directory (no trailing slash)
+// ---------------------------------------------------------------------------
+// Directory listing / index (KISS-5: collapse wrappers, keep shared impl)
+// ---------------------------------------------------------------------------
+
+/// Helper handler for listing the root directory (no trailing slash).
 async fn list_directory_root_handler(
     auth: Auth,
     AxumPath(storage_id): AxumPath<i32>,
     state: State<Arc<AppState>>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<impl IntoResponse, ApiError> {
     list_directory_handler(auth, AxumPath((storage_id, String::new())), state).await
 }
 
 /// Directory index root handler - serves Kodi-compatible directory listing
 async fn directory_index_root_handler(
-    _auth: Auth,
+    auth: Auth,
     AxumPath(storage_id): AxumPath<i32>,
     State(state): State<Arc<AppState>>,
     req: Request<Body>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    directory_index_impl(storage_id, String::new(), state, req).await
+) -> Result<impl IntoResponse, ApiError> {
+    directory_index_impl(storage_id, String::new(), state, req, &auth).await
 }
 
 /// Directory index handler - serves Kodi-compatible directory listing or file content
-#[instrument(skip(state, _auth, req))]
+#[instrument(skip(state, auth, req))]
 async fn directory_index_handler(
-    _auth: Auth,
+    auth: Auth,
     AxumPath((storage_id, path)): AxumPath<(i32, String)>,
     State(state): State<Arc<AppState>>,
     req: Request<Body>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    directory_index_impl(storage_id, path, state, req).await
+) -> Result<impl IntoResponse, ApiError> {
+    directory_index_impl(storage_id, path, state, req, &auth).await
 }
 
 async fn directory_index_impl(
@@ -739,95 +628,40 @@ async fn directory_index_impl(
     path: String,
     state: Arc<AppState>,
     req: Request<Body>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    auth: &Auth,
+) -> Result<impl IntoResponse, ApiError> {
     let storage = StorageWrapper::find_by_id(&state.db, storage_id)
         .await
-        .map_err(|e| {
-            if matches!(e, sea_orm::DbErr::RecordNotFound(_)) {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorResponse {
-                        error: format!("Storage {} not found", storage_id),
-                    }),
-                )
-            } else {
-                tracing::error!("Database error: {}", e);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: "Database error".to_string(),
-                    }),
-                )
-            }
-        })?;
+        .map_err(|e| storage_lookup_err(e, storage_id))?;
+
+    // Authorization: must have access to this storage.
+    require_storage_access(auth, &storage.model, &state.db).await?;
 
     let normalized_path = path.trim_matches('/');
     let full_path = storage.get_full_path(normalized_path);
 
     // If it's a file, serve it directly with content-type
     if full_path.is_file() {
-        let content_type = match fs::File::open(&full_path).await {
-            Ok(mut file) => {
-                let mut buffer = [0u8; 1024];
-                let n = file.read(&mut buffer).await.unwrap_or(0);
-                determine_content_type(&full_path, &buffer[..n])
-            }
-            Err(_) => "application/octet-stream",
-        };
-
-        let mut service = ServeFile::new(full_path);
-        let mut res = Service::<Request<Body>>::call(&mut service, req)
+        let content_type = detect_content_type(&full_path).await;
+        return Ok(serve_file_response(full_path, content_type, req)
             .await
-            .map_err(|e| match e {})
-            .unwrap();
-
-        res.headers_mut().insert(
-            header::CONTENT_TYPE,
-            header::HeaderValue::from_static(content_type),
-        );
-
-        return Ok(res.into_response());
+            .into_response());
     }
 
     // It's a directory - list entries and return HTML
     let entries = storage
         .list_directory(&state.db, normalized_path)
         .await
+        .map_err(|e| internal(format!("Error listing directory: {e}")))?;
+
+    dispatch_hash_jobs(&state, &entries);
+
+    let html = generate_directory_index(&state, storage_id, normalized_path, &entries)
         .map_err(|e| {
-            tracing::error!("Storage error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Error listing directory: {}", e),
-                }),
-            )
+            tracing::error!("Template error: {}", e);
+            internal("Internal server error")
         })?;
 
-    entries
-        .iter()
-        .filter(|e| e.hash.is_none() && e.entry_type == EntryType::File)
-        .for_each(|e| {
-            state
-                .job_sender
-                .send(crate::job::Job::ProcessFile {
-                    storage_id: e.storage_id,
-                    path: e.path.clone(),
-                    mode: crate::job::ProcessMode::Auto,
-                })
-                .unwrap();
-        });
-
-    let html = generate_directory_index(&state, storage_id, normalized_path, &entries).map_err(
-        |e| {
-            tracing::error!("Template error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Internal server error".to_string(),
-                }),
-            )
-        },
-    )?;
     Ok(Html(html).into_response())
 }
 
@@ -853,7 +687,7 @@ pub(crate) async fn get_file_content_handler(
     AxumPath((storage_id, path)): AxumPath<(i32, String)>,
     State(state): State<Arc<AppState>>,
     req: Request<Body>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<impl IntoResponse, ApiError> {
     serve_file_with_content_type(storage_id, path, state, req, None).await
 }
 
@@ -879,7 +713,7 @@ pub(crate) async fn download_file_handler(
     AxumPath((storage_id, path)): AxumPath<(i32, String)>,
     State(state): State<Arc<AppState>>,
     req: Request<Body>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<impl IntoResponse, ApiError> {
     serve_file_with_content_type(
         storage_id,
         path,
@@ -897,79 +731,28 @@ async fn serve_file_with_content_type(
     state: Arc<AppState>,
     req: Request<Body>,
     forced_content_type: Option<&'static str>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    // Find storage
+) -> Result<impl IntoResponse, ApiError> {
     let storage = StorageWrapper::find_by_id(&state.db, storage_id)
         .await
-        .map_err(|e| {
-            if matches!(e, sea_orm::DbErr::RecordNotFound(_)) {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorResponse {
-                        error: format!("Storage {} not found", storage_id),
-                    }),
-                )
-            } else {
-                tracing::error!("Database error: {}", e);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: "Database error".to_string(),
-                    }),
-                )
-            }
-        })?;
+        .map_err(|e| storage_lookup_err(e, storage_id))?;
 
     let full_path = storage.get_full_path(&path);
 
     if !full_path.exists() {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("File not found: {}", path),
-            }),
-        ));
+        return Err(not_found_msg(format!("File not found: {path}")));
     }
 
     if full_path.is_dir() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: format!("Requested path is a directory: {}", path),
-            }),
-        ));
+        return Err(bad_request(format!("Requested path is a directory: {path}")));
     }
 
-    let content_type = if let Some(ct) = forced_content_type {
-        ct
-    } else {
-        // Read first few bytes to determine content type
-        match fs::File::open(&full_path).await {
-            Ok(mut file) => {
-                let mut buffer = [0u8; 1024];
-                let n = file.read(&mut buffer).await.unwrap_or(0);
-                determine_content_type(&full_path, &buffer[..n])
-            }
-            Err(_) => "application/octet-stream",
-        }
+    let content_type = match forced_content_type {
+        Some(ct) => ct,
+        None => detect_content_type(&full_path).await,
     };
 
-    // Use tower-http's ServeFile which handles Range requests, ETag, etc.
-    let mut service = ServeFile::new(full_path);
-
-    let mut res = Service::<Request<Body>>::call(&mut service, req)
-        .await
-        .map_err(|e| {
-            match e {} // e is Infallible
-        })
-        .unwrap();
-
-    res.headers_mut().insert(
-        header::CONTENT_TYPE,
-        header::HeaderValue::from_static(content_type),
-    );
-
-    Ok(res.into_response())
+    let res = serve_file_response(full_path, content_type, req).await;
+    Ok(res)
 }
 
 /// Update file content
@@ -995,39 +778,15 @@ pub(crate) async fn update_file_content_handler(
     AxumPath((storage_id, path)): AxumPath<(i32, String)>,
     State(state): State<Arc<AppState>>,
     body: axum::body::Bytes,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    // Find storage
+) -> Result<impl IntoResponse, ApiError> {
     let storage = StorageWrapper::find_by_id(&state.db, storage_id)
         .await
-        .map_err(|e| {
-            if matches!(e, sea_orm::DbErr::RecordNotFound(_)) {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorResponse {
-                        error: format!("Storage {} not found", storage_id),
-                    }),
-                )
-            } else {
-                tracing::error!("Database error: {}", e);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: "Database error".to_string(),
-                    }),
-                )
-            }
-        })?;
+        .map_err(|e| storage_lookup_err(e, storage_id))?;
 
-    // Save file
-    storage.save_file(&path, &body).await.map_err(|e| {
-        tracing::error!("Error saving file: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Error saving file: {}", e),
-            }),
-        )
-    })?;
+    storage
+        .save_file(&path, &body)
+        .await
+        .map_err(|e| internal(format!("Error saving file: {e}")))?;
 
     Ok(Json(serde_json::json!({
         "message": "File updated successfully",
@@ -1051,70 +810,39 @@ pub(crate) async fn update_file_content_handler(
     ),
     security(("bearer" = []))
 )]
-#[instrument(skip(state, _auth))]
+#[instrument(skip(state, auth))]
 pub(crate) async fn create_entry_handler(
-    _auth: Auth,
+    auth: Auth,
     AxumPath((storage_id, path)): AxumPath<(i32, String)>,
     State(state): State<Arc<AppState>>,
     Json(payload): Json<CreateEntryRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<impl IntoResponse, ApiError> {
     let storage = StorageWrapper::find_by_id(&state.db, storage_id)
         .await
-        .map_err(|e| {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Database error".to_string(),
-                }),
-            )
-        })?;
+        .map_err(|e| storage_lookup_err(e, storage_id))?;
+
+    require_storage_access(&auth, &storage.model, &state.db).await?;
 
     match payload.entry_type {
         EntryType::Directory => {
-            storage.create_directory(&path).await.map_err(|e| {
-                tracing::error!("Error creating directory: {}", e);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: format!("Error creating directory: {}", e),
-                    }),
-                )
-            })?;
+            storage
+                .create_directory(&path)
+                .await
+                .map_err(|e| internal(format!("Error creating directory: {e}")))?;
             if payload.notify {
                 storage
                     .set_notify(&state.db, &path, true)
                     .await
-                    .map_err(|e| {
-                        tracing::error!("Error setting notify: {}", e);
-                        (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(ErrorResponse {
-                                error: format!("Error setting notify: {}", e),
-                            }),
-                        )
-                    })?;
+                    .map_err(|e| internal(format!("Error setting notify: {e}")))?;
             }
         }
         EntryType::File => {
-            storage.create_file(&path).await.map_err(|e| {
-                tracing::error!("Error creating file: {}", e);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: format!("Error creating file: {}", e),
-                    }),
-                )
-            })?;
+            storage
+                .create_file(&path)
+                .await
+                .map_err(|e| internal(format!("Error creating file: {e}")))?;
         }
-        _ => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: "Unsupported entry type".to_string(),
-                }),
-            ))
-        }
+        _ => return Err(bad_request("Unsupported entry type")),
     }
 
     Ok(Json(
@@ -1139,37 +867,23 @@ pub(crate) async fn create_entry_handler(
     ),
     security(("bearer" = []))
 )]
-#[instrument(skip(state, _auth))]
+#[instrument(skip(state, auth))]
 pub(crate) async fn rename_entry_handler(
-    _auth: Auth,
+    auth: Auth,
     AxumPath((storage_id, old_path)): AxumPath<(i32, String)>,
     State(state): State<Arc<AppState>>,
     Json(payload): Json<RenameEntryRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<impl IntoResponse, ApiError> {
     let storage = StorageWrapper::find_by_id(&state.db, storage_id)
         .await
-        .map_err(|e| {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Database error".to_string(),
-                }),
-            )
-        })?;
+        .map_err(|e| storage_lookup_err(e, storage_id))?;
+
+    require_storage_access(&auth, &storage.model, &state.db).await?;
 
     storage
         .rename_entry(&old_path, &payload.new_path)
         .await
-        .map_err(|e| {
-            tracing::error!("Error renaming entry: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Error renaming entry: {}", e),
-                }),
-            )
-        })?;
+        .map_err(|e| internal(format!("Error renaming entry: {e}")))?;
 
     Ok(Json(
         serde_json::json!({ "message": "Entry renamed successfully" }),
@@ -1192,33 +906,22 @@ pub(crate) async fn rename_entry_handler(
     ),
     security(("bearer" = []))
 )]
-#[instrument(skip(state, _auth))]
+#[instrument(skip(state, auth))]
 pub(crate) async fn remove_entry_handler(
-    _auth: Auth,
+    auth: Auth,
     AxumPath((storage_id, path)): AxumPath<(i32, String)>,
     State(state): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<impl IntoResponse, ApiError> {
     let storage = StorageWrapper::find_by_id(&state.db, storage_id)
         .await
-        .map_err(|e| {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Database error".to_string(),
-                }),
-            )
-        })?;
+        .map_err(|e| storage_lookup_err(e, storage_id))?;
 
-    storage.remove_entry(&path).await.map_err(|e| {
-        tracing::error!("Error removing entry: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Error removing entry: {}", e),
-            }),
-        )
-    })?;
+    require_storage_access(&auth, &storage.model, &state.db).await?;
+
+    storage
+        .remove_entry(&path)
+        .await
+        .map_err(|e| internal(format!("Error removing entry: {e}")))?;
 
     Ok(Json(
         serde_json::json!({ "message": "Entry removed successfully" }),
@@ -1241,62 +944,26 @@ pub(crate) async fn remove_entry_handler(
     ),
     security(("bearer" = []))
 )]
-#[instrument(skip(state, _auth))]
+#[instrument(skip(state, auth))]
 pub(crate) async fn list_directory_handler(
-    _auth: Auth,
+    auth: Auth,
     AxumPath((id, path)): AxumPath<(i32, String)>,
     State(state): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<impl IntoResponse, ApiError> {
     tracing::info!("Listing directory for storage {} at path {}", id, path);
-    // Get storage wrapper
+
     let storage = StorageWrapper::find_by_id(&state.db, id)
         .await
-        .map_err(|e| {
-            if matches!(e, sea_orm::DbErr::RecordNotFound(_)) {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorResponse {
-                        error: format!("Storage {} not found", id),
-                    }),
-                )
-            } else {
-                tracing::error!("Database error: {}", e);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: "Database error".to_string(),
-                    }),
-                )
-            }
-        })?;
+        .map_err(|e| storage_lookup_err(e, id))?;
 
-    // List directory using merged FS/DB state
+    require_storage_access(&auth, &storage.model, &state.db).await?;
+
     let entries = storage
         .list_directory(&state.db, &path)
         .await
-        .map_err(|e| {
-            tracing::error!("Storage error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Error listing directory: {}", e),
-                }),
-            )
-        })?;
+        .map_err(|e| internal(format!("Error listing directory: {e}")))?;
 
-    entries
-        .iter()
-        .filter(|e| e.hash.is_none() && e.entry_type == EntryType::File)
-        .for_each(|e| {
-            state
-                .job_sender
-                .send(crate::job::Job::ProcessFile {
-                    storage_id: e.storage_id,
-                    path: e.path.clone(),
-                    mode: crate::job::ProcessMode::Auto,
-                })
-                .unwrap();
-        });
+    dispatch_hash_jobs(&state, &entries);
 
     let normalized_path = path.trim_matches('/');
 
@@ -1321,7 +988,7 @@ fn generate_directory_index(
     };
 
     let parent_path = if !path.is_empty() {
-        Some(path.rsplitn(2, '/').nth(1).unwrap_or(""))
+        Some(path.rsplit_once('/').map(|x| x.0).unwrap_or(""))
     } else {
         None
     };
@@ -1333,13 +1000,13 @@ fn generate_directory_index(
             .path
             .trim_end_matches('/')
             .split('/')
-            .last()
+            .next_back()
             .unwrap_or(&a.path);
         let b_name = b
             .path
             .trim_end_matches('/')
             .split('/')
-            .last()
+            .next_back()
             .unwrap_or(&b.path);
 
         match (
@@ -1362,6 +1029,10 @@ fn generate_directory_index(
     }))
 }
 
+// ---------------------------------------------------------------------------
+// Shares
+// ---------------------------------------------------------------------------
+
 /// Share entry request
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ShareEntryRequest {
@@ -1373,7 +1044,7 @@ pub struct ShareEntryRequest {
 }
 
 /// Share response
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
 pub struct ShareResponse {
     pub id: i32,
     pub storage_id: i32,
@@ -1422,52 +1093,28 @@ pub(crate) async fn list_shares_handler(
     _auth: Auth,
     AxumPath((storage_id, path)): AxumPath<(i32, String)>,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<ShareResponse>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<Vec<ShareResponse>>, ApiError> {
     let _storage = StorageWrapper::find_by_id(&state.db, storage_id)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?;
+        .map_err(|e| storage_lookup_err(e, storage_id))?;
 
     let sub_path = path.trim_matches('/');
 
-    // Find entry
     let entry_record = entry::Entity::find()
         .filter(entry::Column::StorageId.eq(storage_id))
         .filter(entry::Column::Path.eq(sub_path))
         .one(&state.db)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?;
+        .await?;
 
     let entry_model = match entry_record {
         Some(m) => m,
-        None => return Ok(Json(vec![])), // No entry, so no shares
+        None => return Ok(Json(vec![])),
     };
 
     let shares = shared::Entity::find()
         .filter(shared::Column::PathId.eq(entry_model.id))
         .all(&state.db)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?;
+        .await?;
 
     Ok(Json(
         shares
@@ -1492,29 +1139,13 @@ pub(crate) async fn list_shares_handler(
 pub(crate) async fn list_all_user_shares_handler(
     auth: Auth,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<ShareResponse>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<Vec<ShareResponse>>, ApiError> {
     let user_id = auth.user.id;
 
-    // Find groups the user is in
-    let user_groups = group_user::Entity::find()
-        .filter(group_user::Column::UserId.eq(user_id))
-        .all(&state.db)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?
-        .into_iter()
-        .map(|gu| gu.group_id)
-        .collect::<Vec<i32>>();
+    // DRY-4: shared group-id loader
+    let user_groups = user_group_ids(&state.db, user_id).await?;
 
-    // Query shares using the provided logic:
-    // This shared->entry->user.id = current_user.id
-    // group_user.user_id = current_user.id and group_user.group_id = shared->entry.group_id
+    // Shares whose entry is owned by this user or belongs to one of their groups.
     let shares_with_entries = shared::Entity::find()
         .find_also_related(entry::Entity)
         .filter(
@@ -1523,15 +1154,7 @@ pub(crate) async fn list_all_user_shares_handler(
                 .add(entry::Column::GroupId.is_in(user_groups)),
         )
         .all(&state.db)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?;
+        .await?;
 
     let response = shares_with_entries
         .into_iter()
@@ -1556,45 +1179,25 @@ pub(crate) async fn list_all_user_shares_handler(
 pub(crate) async fn list_shares_with_me_handler(
     auth: Auth,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<ShareResponse>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<Vec<ShareResponse>>, ApiError> {
     let user_id = auth.user.id;
 
-    // Find groups the user is in
-    let user_groups = group_user::Entity::find()
-        .filter(group_user::Column::UserId.eq(user_id))
-        .all(&state.db)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?
-        .into_iter()
-        .map(|gu| gu.group_id)
-        .collect::<Vec<i32>>();
+    // DRY-4: shared group-id loader
+    let user_groups = user_group_ids(&state.db, user_id).await?;
 
-    // Query shares where user_ids contains current user OR group_ids contains one of user's groups
-    // We need to use raw SQL or custom expressions for array containment
+    // Query shares where user_ids contains the user OR group_ids intersects.
     let shares_with_entries = shared::Entity::find()
         .find_also_related(entry::Entity)
         .filter(
             Condition::any()
                 .add(Expr::cust_with_expr("$1 = ANY(user_ids)", user_id))
-                .add(Expr::cust_with_expr("group_ids && $1", user_groups.clone())),
+                .add(Expr::cust_with_expr(
+                    "group_ids && $1",
+                    user_groups.clone(),
+                )),
         )
         .all(&state.db)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?;
+        .await?;
 
     let response = shares_with_entries
         .into_iter()
@@ -1627,36 +1230,20 @@ pub(crate) async fn share_entry_handler(
     AxumPath((storage_id, path)): AxumPath<(i32, String)>,
     State(state): State<Arc<AppState>>,
     Json(payload): Json<ShareEntryRequest>,
-) -> Result<Json<ShareResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<ShareResponse>, ApiError> {
     let storage = StorageWrapper::find_by_id(&state.db, storage_id)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?;
+        .map_err(|e| storage_lookup_err(e, storage_id))?;
 
     let sub_path = path.trim_matches('/');
 
     // Ensure entry exists in DB (create if missing)
-    let entry_record = entry::Entity::find()
+    let entry_id = match entry::Entity::find()
         .filter(entry::Column::StorageId.eq(storage_id))
         .filter(entry::Column::Path.eq(sub_path))
         .one(&state.db)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?;
-
-    let entry_id = match entry_record {
+        .await?
+    {
         Some(m) => m.id,
         None => {
             // Create entry if it exists on disk
@@ -1665,19 +1252,9 @@ pub(crate) async fn share_entry_handler(
                 .await
                 .map_err(|e| {
                     if e.to_string().contains("not found on disk") {
-                        (
-                            StatusCode::NOT_FOUND,
-                            Json(ErrorResponse {
-                                error: "Path not found".to_string(),
-                            }),
-                        )
+                        not_found_msg("Path not found")
                     } else {
-                        (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(ErrorResponse {
-                                error: e.to_string(),
-                            }),
-                        )
+                        internal(e.to_string())
                     }
                 })?
                 .id
@@ -1705,35 +1282,12 @@ pub(crate) async fn share_entry_handler(
         ..Default::default()
     };
 
-    let created = new_shared.insert(&state.db).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-    })?;
+    let created = new_shared.insert(&state.db).await?;
 
-    // Fetch the entry model to build the response
     let entry_model = entry::Entity::find_by_id(created.path_id)
         .one(&state.db)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?
-        .ok_or_else(|| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Entry not found after sharing".to_string(),
-                }),
-            )
-        })?;
+        .await?
+        .ok_or_else(|| internal("Entry not found after sharing"))?;
 
     Ok(Json(ShareResponse::from_model(created, entry_model)))
 }
@@ -1755,18 +1309,10 @@ pub(crate) async fn delete_share_handler(
     _auth: Auth,
     AxumPath(share_id): AxumPath<i32>,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     shared::Entity::delete_by_id(share_id)
         .exec(&state.db)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?;
+        .await?;
 
     Ok(Json(
         serde_json::json!({ "message": "Share deleted successfully" }),
@@ -1793,26 +1339,11 @@ pub(crate) async fn update_share_handler(
     AxumPath(share_id): AxumPath<i32>,
     State(state): State<Arc<AppState>>,
     Json(payload): Json<ShareEntryRequest>,
-) -> Result<Json<ShareResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<ShareResponse>, ApiError> {
     let share = shared::Entity::find_by_id(share_id)
         .one(&state.db)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: "Share not found".to_string(),
-                }),
-            )
-        })?;
+        .await?
+        .ok_or_else(|| not_found_msg("Share not found"))?;
 
     let expires_at = payload.expires_in_days.and_then(|days| {
         if days > 0 {
@@ -1839,202 +1370,94 @@ pub(crate) async fn update_share_handler(
     active_share.group_ids = Set(payload.group_ids);
     active_share.expires_at = Set(expires_at);
 
-    let updated = active_share.update(&state.db).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-    })?;
+    let updated = save_or_err(active_share, &state.db).await?;
 
     let entry_model = entry::Entity::find_by_id(updated.path_id)
         .one(&state.db)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?
-        .ok_or_else(|| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Entry not found".to_string(),
-                }),
-            )
-        })?;
+        .await?
+        .ok_or_else(|| internal("Entry not found"))?;
 
     Ok(Json(ShareResponse::from_model(updated, entry_model)))
 }
 
-/// Helper function to verify share access for the current user
+// ---------------------------------------------------------------------------
+// Share-based access helpers
+// ---------------------------------------------------------------------------
+
+/// Helper function to verify share access for the current user.
+///
+/// Uses the shared [`user_group_ids`] helper (DRY-4) rather than re-querying
+/// the group_user table inline.
 async fn verify_share_access(
     auth: &Auth,
     share: &shared::Model,
     db: &sea_orm::DatabaseConnection,
-) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+) -> Result<(), ApiError> {
     let user_id = auth.user.id;
 
-    // Check if user is in user_ids
     if share.user_ids.contains(&user_id) {
         return Ok(());
     }
 
-    // Check if user's groups overlap with group_ids
-    let user_groups = group_user::Entity::find()
-        .filter(group_user::Column::UserId.eq(user_id))
-        .all(db)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?
-        .into_iter()
-        .map(|gu| gu.group_id)
-        .collect::<Vec<i32>>();
-
-    for gid in &share.group_ids {
-        if user_groups.contains(gid) {
-            return Ok(());
-        }
+    let user_groups = user_group_ids(db, user_id).await?;
+    if share.group_ids.iter().any(|g| user_groups.contains(g)) {
+        return Ok(());
     }
 
-    Err((
-        StatusCode::FORBIDDEN,
-        Json(ErrorResponse {
-            error: "Access denied to this share".to_string(),
-        }),
-    ))
+    Err(forbidden("Access denied to this share"))
 }
 
-/// Helper to get share, entry, and storage for share-based access
-/// The share_identifier can be either a numeric ID or a token string
+/// Resolve the `(share, entry, storage)` triple for a share-based request.
+///
+/// `share_identifier` may be either a numeric share ID (requires authorization)
+/// or a token string (public link — access granted).
 async fn get_share_context(
     share_identifier: &str,
     auth: Option<&Auth>,
     state: &AppState,
-) -> Result<(shared::Model, entry::Model, StorageWrapper), (StatusCode, Json<ErrorResponse>)> {
-    // Try to parse as numeric ID first, otherwise treat as token
+) -> Result<(shared::Model, entry::Model, StorageWrapper), ApiError> {
+    let looked_up_by_id = share_identifier.parse::<i32>().is_ok();
+
+    // Look up the share by id or token.
     let share = if let Ok(share_id) = share_identifier.parse::<i32>() {
-        shared::Entity::find_by_id(share_id)
-            .one(&state.db)
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: e.to_string(),
-                    }),
-                )
-            })?
+        shared::Entity::find_by_id(share_id).one(&state.db).await?
     } else {
-        // Treat as token
         shared::Entity::find()
             .filter(shared::Column::Token.eq(share_identifier))
             .one(&state.db)
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: e.to_string(),
-                    }),
-                )
-            })?
-    };
+            .await?
+    }
+    .ok_or_else(|| not_found_msg("Share not found"))?;
 
-    let share = share.ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: "Share not found".to_string(),
-            }),
-        )
-    })?;
-
-    // Check expiration
+    // Check expiration.
     if let Some(expires_at) = share.expires_at {
         if expires_at < chrono::Utc::now().naive_utc() {
-            return Err((
-                StatusCode::GONE,
-                Json(ErrorResponse {
-                    error: "Share has expired".to_string(),
-                }),
-            ));
+            return Err(ApiError::Gone {
+                msg: "Share has expired".to_string(),
+            });
         }
     }
 
-    // Verify access
-    // If we looked up by ID (numeric), we MUST verify auth/permissions.
-    // If we looked up by token (string), access is granted (public link).
-
-    let looked_up_by_id = share_identifier.parse::<i32>().is_ok();
-
+    // Verify access.
     if looked_up_by_id {
-        // Accessing by ID requires explicit authorization (even if it has a token)
         let auth_val = auth.ok_or_else(|| {
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse {
-                    error: "Authentication required for share access by ID".to_string(),
-                }),
-            )
+            unauthorized_msg("Authentication required for share access by ID")
         })?;
         verify_share_access(auth_val, &share, &state.db).await?;
-    } else {
-        // Accessing by token
-        // Ensure the share actually HAS a token (it should if we found it via token query)
-        if share.token.is_none() {
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: "Invalid share token".to_string(),
-                }),
-            ));
-        }
-        // Access granted for public token
+    } else if share.token.is_none() {
+        return Err(not_found_msg("Invalid share token"));
     }
 
-    // Get the entry
+    // Get the entry.
     let entry_model = entry::Entity::find_by_id(share.path_id)
         .one(&state.db)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: "Shared entry not found".to_string(),
-                }),
-            )
-        })?;
+        .await?
+        .ok_or_else(|| not_found_msg("Shared entry not found"))?;
 
-    // Get the storage
+    // Get the storage.
     let storage = StorageWrapper::find_by_id(&state.db, entry_model.storage_id)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?;
+        .map_err(|e| storage_lookup_err(e, entry_model.storage_id))?;
 
     Ok((share, entry_model, storage))
 }
@@ -2055,7 +1478,7 @@ pub(crate) async fn get_share_info_handler(
     auth: Option<Auth>,
     AxumPath(share_id): AxumPath<String>,
     State(state): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<impl IntoResponse, ApiError> {
     let (share, entry_model, _) = get_share_context(&share_id, auth.as_ref(), &state).await?;
 
     Ok(Json(serde_json::json!({
@@ -2087,7 +1510,7 @@ pub(crate) async fn share_list_root_handler(
     auth: Option<Auth>,
     AxumPath(share_id): AxumPath<String>,
     State(state): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<impl IntoResponse, ApiError> {
     share_list_impl(auth, share_id, String::new(), state).await
 }
 
@@ -2111,7 +1534,7 @@ pub(crate) async fn share_list_handler(
     auth: Option<Auth>,
     AxumPath((share_id, path)): AxumPath<(String, String)>,
     State(state): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<impl IntoResponse, ApiError> {
     share_list_impl(auth, share_id, path, state).await
 }
 
@@ -2120,66 +1543,22 @@ async fn share_list_impl(
     share_id: String,
     sub_path: String,
     state: Arc<AppState>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let (share, entry_model, storage) = get_share_context(&share_id, auth.as_ref(), &state).await?;
+) -> Result<impl IntoResponse, ApiError> {
+    let (share, entry_model, storage) =
+        get_share_context(&share_id, auth.as_ref(), &state).await?;
 
-    // Calculate full path relative to storage
     let base_path = entry_model.path.trim_matches('/');
     let sub_path_clean = sub_path.trim_matches('/');
-    let full_path = if base_path.is_empty() {
-        sub_path_clean.to_string()
-    } else if sub_path_clean.is_empty() {
-        base_path.to_string()
-    } else {
-        format!("{}/{}", base_path, sub_path_clean)
-    };
+    let full_path = join_share_path(base_path, sub_path_clean);
 
-    // List directory
     let entries = storage
         .list_directory(&state.db, &full_path)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Error listing directory: {}", e),
-                }),
-            )
-        })?;
+        .map_err(|e| internal(format!("Error listing directory: {e}")))?;
 
-    entries
-        .iter()
-        .filter(|e| e.hash.is_none() && e.entry_type == EntryType::File)
-        .for_each(|e| {
-            state
-                .job_sender
-                .send(crate::job::Job::ProcessFile {
-                    storage_id: e.storage_id,
-                    path: e.path.clone(),
-                    mode: crate::job::ProcessMode::Auto,
-                })
-                .unwrap();
-        });
+    dispatch_hash_jobs(&state, &entries);
 
-    // Transform entries to have paths relative to the share's base path
-    let relative_entries: Vec<_> = entries
-        .into_iter()
-        .map(|mut entry| {
-            // Remove the base path prefix from entry path
-            let entry_path = entry.path.trim_matches('/');
-            let relative_path = if base_path.is_empty() {
-                entry_path.to_string()
-            } else if entry_path.starts_with(base_path) {
-                entry_path[base_path.len()..]
-                    .trim_start_matches('/')
-                    .to_string()
-            } else {
-                entry_path.to_string()
-            };
-            entry.path = relative_path;
-            entry
-        })
-        .collect();
+    let relative_entries = make_entries_relative(entries, base_path);
 
     Ok(Json(serde_json::json!({
         "share_id": share.id,
@@ -2195,7 +1574,7 @@ async fn share_index_root_handler(
     AxumPath(share_id): AxumPath<String>,
     State(state): State<Arc<AppState>>,
     req: Request<Body>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<impl IntoResponse, ApiError> {
     share_index_impl(auth, share_id, String::new(), state, req).await
 }
 
@@ -2206,7 +1585,7 @@ async fn share_index_handler(
     AxumPath((share_id, path)): AxumPath<(String, String)>,
     State(state): State<Arc<AppState>>,
     req: Request<Body>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<impl IntoResponse, ApiError> {
     share_index_impl(auth, share_id, path, state, req).await
 }
 
@@ -2216,12 +1595,12 @@ async fn share_index_impl(
     sub_path: String,
     state: Arc<AppState>,
     req: Request<Body>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<impl IntoResponse, ApiError> {
     let ctx = get_share_context(&share_id, auth.as_ref(), &state).await;
-    // If auth is required (numeric share ID) but missing, return proper basic auth challenge
     let (_share, entry_model, storage) = match ctx {
-        Ok(ctx) => ctx,
-        Err((StatusCode::UNAUTHORIZED, _)) => {
+        Ok(c) => c,
+        Err(ApiError::Unauthorized | ApiError::UnauthorizedMsg { .. }) => {
+            // Issue a Basic-auth challenge for missing auth.
             return Ok((
                 StatusCode::UNAUTHORIZED,
                 [(header::WWW_AUTHENTICATE, "Basic realm=\"Cloud\"")],
@@ -2234,67 +1613,25 @@ async fn share_index_impl(
 
     let base_path = entry_model.path.trim_matches('/');
     let sub_path_clean = sub_path.trim_matches('/');
-    let full_path = if base_path.is_empty() {
-        sub_path_clean.to_string()
-    } else if sub_path_clean.is_empty() {
-        base_path.to_string()
-    } else {
-        format!("{}/{}", base_path, sub_path_clean)
-    };
+    let full_path = join_share_path(base_path, sub_path_clean);
 
     let abs_path = storage.get_full_path(&full_path);
 
     // If it's a file, serve it directly
     if abs_path.is_file() {
-        let content_type = match fs::File::open(&abs_path).await {
-            Ok(mut file) => {
-                let mut buffer = [0u8; 1024];
-                let n = file.read(&mut buffer).await.unwrap_or(0);
-                determine_content_type(&abs_path, &buffer[..n])
-            }
-            Err(_) => "application/octet-stream",
-        };
-
-        let mut service = ServeFile::new(&abs_path);
-        let mut res = Service::<Request<Body>>::call(&mut service, req)
+        let content_type = detect_content_type(&abs_path).await;
+        return Ok(serve_file_response(abs_path, content_type, req)
             .await
-            .map_err(|e| match e {})
-            .unwrap();
-
-        res.headers_mut().insert(
-            header::CONTENT_TYPE,
-            header::HeaderValue::from_static(content_type),
-        );
-
-        return Ok(res.into_response());
+            .into_response());
     }
 
-    // It's a directory - list entries and return HTML
+    // Directory listing → HTML
     let entries = storage
         .list_directory(&state.db, &full_path)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Error listing directory: {}", e),
-                }),
-            )
-        })?;
+        .map_err(|e| internal(format!("Error listing directory: {e}")))?;
 
-    entries
-        .iter()
-        .filter(|e| e.hash.is_none() && e.entry_type == EntryType::File)
-        .for_each(|e| {
-            state
-                .job_sender
-                .send(crate::job::Job::ProcessFile {
-                    storage_id: e.storage_id,
-                    path: e.path.clone(),
-                    mode: crate::job::ProcessMode::Auto,
-                })
-                .unwrap();
-        });
+    dispatch_hash_jobs(&state, &entries);
 
     let relative_entries = make_entries_relative(entries, base_path);
 
@@ -2305,13 +1642,10 @@ async fn share_index_impl(
         &relative_entries,
     )
     .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
+        tracing::error!("Template error: {}", e);
+        internal("Internal server error")
     })?;
+
     Ok(Html(html).into_response())
 }
 
@@ -2323,10 +1657,8 @@ fn make_entries_relative(entries: Vec<DirectoryEntry>, base_path: &str) -> Vec<D
             let entry_path = entry.path.trim_matches('/');
             let relative_path = if base_path.is_empty() {
                 entry_path.to_string()
-            } else if entry_path.starts_with(base_path) {
-                entry_path[base_path.len()..]
-                    .trim_start_matches('/')
-                    .to_string()
+            } else if let Some(rest) = entry_path.strip_prefix(base_path) {
+                rest.trim_start_matches('/').to_string()
             } else {
                 entry_path.to_string()
             };
@@ -2357,68 +1689,26 @@ pub(crate) async fn share_show_handler(
     AxumPath((share_id, path)): AxumPath<(String, String)>,
     State(state): State<Arc<AppState>>,
     req: Request<Body>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<impl IntoResponse, ApiError> {
     let (_share, entry_model, storage) =
         get_share_context(&share_id, auth.as_ref(), &state).await?;
 
-    // Calculate full path (relative to storage root)
     let base_path = entry_model.path.trim_matches('/');
     let sub_path_clean = path.trim_matches('/');
-    let relative_path = if base_path.is_empty() {
-        sub_path_clean.to_string()
-    } else if sub_path_clean.is_empty() {
-        base_path.to_string()
-    } else {
-        format!("{}/{}", base_path, sub_path_clean)
-    };
+    let relative_path = join_share_path(base_path, sub_path_clean);
 
-    // Security check: prevent path traversal
     if relative_path.contains("..") {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Invalid path: traversal detected".to_string(),
-            }),
-        ));
+        return Err(bad_request("Invalid path: traversal detected"));
     }
 
     let abs_path = storage.get_full_path(&relative_path);
 
     if !abs_path.exists() || !abs_path.is_file() {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: "File not found".to_string(),
-            }),
-        ));
+        return Err(not_found_msg("File not found"));
     }
 
-    // Detect content type
-    let content_type = match fs::File::open(&abs_path).await {
-        Ok(mut file) => {
-            let mut buffer = [0u8; 1024];
-            let n = file.read(&mut buffer).await.unwrap_or(0);
-            determine_content_type(&abs_path, &buffer[..n])
-        }
-        Err(_) => "application/octet-stream",
-    };
-
-    // Use tower-http's ServeFile which handles Range requests
-    let mut service = ServeFile::new(&abs_path);
-
-    // Call the service
-    // Note: ServeFile error type is Infallible in newer versions or io::Error in older?
-    // Based on existing code usage, we assume Infallible if pattern matching empty enum works.
-    let mut res = Service::<Request<Body>>::call(&mut service, req)
-        .await
-        .map_err(|e| match e {})
-        .unwrap();
-
-    res.headers_mut().insert(
-        header::CONTENT_TYPE,
-        header::HeaderValue::from_static(content_type),
-    );
-
+    let content_type = detect_content_type(&abs_path).await;
+    let res = serve_file_response(abs_path, content_type, req).await;
     Ok(res)
 }
 
@@ -2444,39 +1734,20 @@ pub(crate) async fn share_update_handler(
     AxumPath((share_id, path)): AxumPath<(String, String)>,
     State(state): State<Arc<AppState>>,
     body: axum::body::Bytes,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let (share, entry_model, storage) = get_share_context(&share_id, auth.as_ref(), &state).await?;
+) -> Result<impl IntoResponse, ApiError> {
+    let (share, entry_model, storage) =
+        get_share_context(&share_id, auth.as_ref(), &state).await?;
 
-    // Check write permission
     if !share.can_write {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse {
-                error: "This share does not allow write access".to_string(),
-            }),
-        ));
+        return Err(forbidden("This share does not allow write access"));
     }
 
-    // Calculate full path
-    let base_path = entry_model.path.trim_matches('/');
-    let sub_path_clean = path.trim_matches('/');
-    let full_path = if base_path.is_empty() {
-        sub_path_clean.to_string()
-    } else if sub_path_clean.is_empty() {
-        base_path.to_string()
-    } else {
-        format!("{}/{}", base_path, sub_path_clean)
-    };
+    let full_path = join_share_path(&entry_model.path, &path);
 
-    // Save the file
-    storage.save_file(&full_path, &body).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Error saving file: {}", e),
-            }),
-        )
-    })?;
+    storage
+        .save_file(&full_path, &body)
+        .await
+        .map_err(|e| internal(format!("Error saving file: {e}")))?;
 
     Ok(Json(serde_json::json!({
         "message": "File updated successfully",
@@ -2505,60 +1776,30 @@ pub(crate) async fn share_create_handler(
     AxumPath((share_id, path)): AxumPath<(String, String)>,
     State(state): State<Arc<AppState>>,
     Json(payload): Json<CreateEntryRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let (share, entry_model, storage) = get_share_context(&share_id, auth.as_ref(), &state).await?;
+) -> Result<impl IntoResponse, ApiError> {
+    let (share, entry_model, storage) =
+        get_share_context(&share_id, auth.as_ref(), &state).await?;
 
-    // Check write permission
     if !share.can_write {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse {
-                error: "This share does not allow write access".to_string(),
-            }),
-        ));
+        return Err(forbidden("This share does not allow write access"));
     }
 
-    // Calculate full path
-    let base_path = entry_model.path.trim_matches('/');
-    let sub_path_clean = path.trim_matches('/');
-    let full_path = if base_path.is_empty() {
-        sub_path_clean.to_string()
-    } else if sub_path_clean.is_empty() {
-        base_path.to_string()
-    } else {
-        format!("{}/{}", base_path, sub_path_clean)
-    };
+    let full_path = join_share_path(&entry_model.path, &path);
 
-    // Create the entry
     match payload.entry_type {
         EntryType::Directory => {
-            storage.create_directory(&full_path).await.map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: format!("Error creating directory: {}", e),
-                    }),
-                )
-            })?;
+            storage
+                .create_directory(&full_path)
+                .await
+                .map_err(|e| internal(format!("Error creating directory: {e}")))?;
         }
         EntryType::File => {
-            storage.create_file(&full_path).await.map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: format!("Error creating file: {}", e),
-                    }),
-                )
-            })?;
+            storage
+                .create_file(&full_path)
+                .await
+                .map_err(|e| internal(format!("Error creating file: {e}")))?;
         }
-        _ => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: "Unsupported entry type".to_string(),
-                }),
-            ))
-        }
+        _ => return Err(bad_request("Unsupported entry type")),
     }
 
     Ok(Json(serde_json::json!({
@@ -2588,54 +1829,26 @@ pub(crate) async fn share_rename_handler(
     AxumPath((share_id, path)): AxumPath<(String, String)>,
     State(state): State<Arc<AppState>>,
     Json(payload): Json<RenameEntryRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let (share, entry_model, storage) = get_share_context(&share_id, auth.as_ref(), &state).await?;
+) -> Result<impl IntoResponse, ApiError> {
+    let (share, entry_model, storage) =
+        get_share_context(&share_id, auth.as_ref(), &state).await?;
 
-    // Check write permission
     if !share.can_write {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse {
-                error: "This share does not allow write access".to_string(),
-            }),
-        ));
+        return Err(forbidden("This share does not allow write access"));
     }
 
-    // Calculate full paths
     let base_path = entry_model.path.trim_matches('/');
-    let sub_path_clean = path.trim_matches('/');
-    let old_full_path = if base_path.is_empty() {
-        sub_path_clean.to_string()
-    } else if sub_path_clean.is_empty() {
-        base_path.to_string()
-    } else {
-        format!("{}/{}", base_path, sub_path_clean)
-    };
+    let old_full_path = join_share_path(base_path, &path);
+    let new_full_path = join_share_path(base_path, &payload.new_path);
 
-    // New path is relative to share, so we need to add base_path
-    let new_sub_path = payload.new_path.trim_matches('/');
-    let new_full_path = if base_path.is_empty() {
-        new_sub_path.to_string()
-    } else {
-        format!("{}/{}", base_path, new_sub_path)
-    };
-
-    // Rename the entry
     storage
         .rename_entry(&old_full_path, &new_full_path)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Error renaming entry: {}", e),
-                }),
-            )
-        })?;
+        .map_err(|e| internal(format!("Error renaming entry: {e}")))?;
 
-    Ok(Json(serde_json::json!({
-        "message": "Entry renamed successfully",
-    })))
+    Ok(Json(
+        serde_json::json!({ "message": "Entry renamed successfully" }),
+    ))
 }
 
 /// Delete file or folder via share
@@ -2658,48 +1871,30 @@ pub(crate) async fn share_remove_handler(
     auth: Option<Auth>,
     AxumPath((share_id, path)): AxumPath<(String, String)>,
     State(state): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let (share, entry_model, storage) = get_share_context(&share_id, auth.as_ref(), &state).await?;
+) -> Result<impl IntoResponse, ApiError> {
+    let (share, entry_model, storage) =
+        get_share_context(&share_id, auth.as_ref(), &state).await?;
 
-    // Check write permission
     if !share.can_write {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse {
-                error: "This share does not allow write access".to_string(),
-            }),
-        ));
+        return Err(forbidden("This share does not allow write access"));
     }
 
-    // Calculate full path
     let base_path = entry_model.path.trim_matches('/');
     let sub_path_clean = path.trim_matches('/');
-    let full_path = if base_path.is_empty() {
-        sub_path_clean.to_string()
-    } else if sub_path_clean.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Cannot delete share root".to_string(),
-            }),
-        ));
+    let full_path = if sub_path_clean.is_empty() {
+        return Err(bad_request("Cannot delete share root"));
     } else {
-        format!("{}/{}", base_path, sub_path_clean)
+        join_share_path(base_path, sub_path_clean)
     };
 
-    // Remove the entry
-    storage.remove_entry(&full_path).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Error removing entry: {}", e),
-            }),
-        )
-    })?;
+    storage
+        .remove_entry(&full_path)
+        .await
+        .map_err(|e| internal(format!("Error removing entry: {e}")))?;
 
-    Ok(Json(serde_json::json!({
-        "message": "Entry removed successfully",
-    })))
+    Ok(Json(
+        serde_json::json!({ "message": "Entry removed successfully" }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -2729,7 +1924,7 @@ pub(crate) async fn trigger_hash_handler(
     AxumPath((storage_id, path)): AxumPath<(i32, String)>,
     Query(query): Query<ProcessQuery>,
     State(state): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<impl IntoResponse, ApiError> {
     require_admin(&auth)?;
 
     let mode = match query.mode.as_deref() {
@@ -2745,15 +1940,7 @@ pub(crate) async fn trigger_hash_handler(
             path: path.trim_matches('/').to_string(),
             mode,
         })
-        .map_err(|e| {
-            tracing::error!("Failed to send job: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Failed to queue job".to_string(),
-                }),
-            )
-        })?;
+        .map_err(|_| internal("Failed to queue job"))?;
 
     Ok(Json(
         serde_json::json!({ "message": "Hash calculation queued" }),

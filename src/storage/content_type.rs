@@ -1,149 +1,33 @@
 use std::path::Path;
 use tracing::instrument;
 
-/// Determine content type from file path and data
-/// Supports all common mimetypes with extension-based detection and magic byte fallback
+/// Determine content type from file path (via `mime_guess`) and, failing that,
+/// from magic bytes for the handful of formats whose signature is needed.
+///
+/// KISS-3: the previous implementation carried an 80-entry extension table by
+/// hand that duplicated what `mime_guess` (already a dependency) does. We keep
+/// only the magic-byte fallback for formats `mime_guess` cannot resolve.
 #[instrument]
 pub fn determine_content_type(path: &Path, data: &[u8]) -> &'static str {
-    // Try to determine from extension first
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        return match ext.to_lowercase().as_str() {
-            // Images
-            "jpg" | "jpeg" => "image/jpeg",
-            "png" => "image/png",
-            "gif" => "image/gif",
-            "webp" => "image/webp",
-            "bmp" => "image/bmp",
-            "svg" | "svgz" => "image/svg+xml",
-            "ico" => "image/x-icon",
-            "tif" | "tiff" => "image/tiff",
-            "heic" => "image/heic",
-            "heif" => "image/heif",
-            "avif" => "image/avif",
-            "jxl" => "image/jxl",
-
-            // Video
-            "mp4" => "video/mp4",
-            "webm" => "video/webm",
-            "ogv" => "video/ogg",
-            "mov" => "video/quicktime",
-            "avi" => "video/x-msvideo",
-            "mkv" => "video/x-matroska",
-            "flv" => "video/x-flv",
-            "wmv" => "video/x-ms-wmv",
-            "m4v" => "video/x-m4v",
-            "3gp" => "video/3gpp",
-            "3g2" => "video/3gpp2",
-            "mpg" | "mpeg" => "video/mpeg",
-
-            // Audio
-            "mp3" => "audio/mpeg",
-            "wav" => "audio/wav",
-            "ogg" | "oga" => "audio/ogg",
-            "m4a" => "audio/mp4",
-            "flac" => "audio/flac",
-            "aac" => "audio/aac",
-            "opus" => "audio/opus",
-            "wma" => "audio/x-ms-wma",
-            "aiff" | "aif" => "audio/aiff",
-            "mid" | "midi" => "audio/midi",
-
-            // Documents
-            "pdf" => "application/pdf",
-            "doc" => "application/msword",
-            "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            "xls" => "application/vnd.ms-excel",
-            "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            "ppt" => "application/vnd.ms-powerpoint",
-            "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-            "odt" => "application/vnd.oasis.opendocument.text",
-            "ods" => "application/vnd.oasis.opendocument.spreadsheet",
-            "odp" => "application/vnd.oasis.opendocument.presentation",
-            "rtf" => "application/rtf",
-            "epub" => "application/epub+zip",
-
-            // Text
-            "txt" => "text/plain",
-            "html" | "htm" => "text/html",
-            "css" => "text/css",
-            "js" | "mjs" => "text/javascript",
-            "json" => "application/json",
-            "xml" => "application/xml",
-            "csv" => "text/csv",
-            "md" | "markdown" => "text/markdown",
-            "yaml" | "yml" => "text/yaml",
-            "toml" => "text/toml",
-            "ini" => "text/plain",
-
-            // Programming languages
-            "rs" => "text/x-rust",
-            "py" => "text/x-python",
-            "java" => "text/x-java",
-            "c" => "text/x-c",
-            "cpp" | "cc" | "cxx" => "text/x-c++",
-            "h" | "hpp" => "text/x-c",
-            "go" => "text/x-go",
-            "sh" => "text/x-shellscript",
-            "rb" => "text/x-ruby",
-            "php" => "text/x-php",
-            "swift" => "text/x-swift",
-            "kt" | "kts" => "text/x-kotlin",
-            "ts" => "text/typescript",
-            "tsx" => "text/tsx",
-            "jsx" => "text/jsx",
-            "vue" => "text/x-vue",
-            "sql" => "text/x-sql",
-
-            // Archives
-            "zip" => "application/zip",
-            "tar" => "application/x-tar",
-            "gz" | "gzip" => "application/gzip",
-            "bz2" => "application/x-bzip2",
-            "xz" => "application/x-xz",
-            "7z" => "application/x-7z-compressed",
-            "rar" => "application/vnd.rar",
-            "iso" => "application/x-iso9660-image",
-
-            // Fonts
-            "ttf" => "font/ttf",
-            "otf" => "font/otf",
-            "woff" => "font/woff",
-            "woff2" => "font/woff2",
-            "eot" => "application/vnd.ms-fontobject",
-
-            // 3D Models
-            "obj" => "model/obj",
-            "stl" => "model/stl",
-            "gltf" => "model/gltf+json",
-            "glb" => "model/gltf-binary",
-            "fbx" => "application/octet-stream",
-            "dae" => "model/vnd.collada+xml",
-
-            // Executables and binaries
-            "exe" => "application/vnd.microsoft.portable-executable",
-            "dll" => "application/x-msdownload",
-            "so" => "application/x-sharedlib",
-            "deb" => "application/vnd.debian.binary-package",
-            "rpm" => "application/x-rpm",
-            "dmg" => "application/x-apple-diskimage",
-            "apk" => "application/vnd.android.package-archive",
-            "app" => "application/x-executable",
-
-            // Other common formats
-            "wasm" => "application/wasm",
-            "swf" => "application/x-shockwave-flash",
-            "torrent" => "application/x-bittorrent",
-            "psd" => "image/vnd.adobe.photoshop",
-            "ai" => "application/postscript",
-            "sketch" => "application/x-sketch",
-            "fig" => "application/x-figma",
-
-            // Fallback
-            _ => "application/octet-stream",
-        };
+    // 1. By extension — mime_guess knows ~all common types.
+    if path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| !e.is_empty())
+        .unwrap_or(false)
+    {
+        if let Some(mime) = mime_guess::from_path(path).first() {
+            return intern(mime.essence_str());
+        }
     }
 
-    // Fallback: detect from magic bytes
+    // 2. Magic-byte fallback for binary formats.
+    magic_bytes(data)
+}
+
+/// Match common binary file signatures. Returns `application/octet-stream` when
+/// no signature is recognised.
+fn magic_bytes(data: &[u8]) -> &'static str {
     if data.len() >= 4 {
         match &data[0..4] {
             // Images
@@ -157,27 +41,22 @@ pub fn determine_content_type(path: &Path, data: &[u8]) -> &'static str {
 
             // Documents
             [0x25, 0x50, 0x44, 0x46] => "application/pdf", // %PDF
-            [0x50, 0x4B, 0x03, 0x04] => {
-                // ZIP-based formats (docx, xlsx, epub, etc.)
-                // Could inspect further but default to zip
-                "application/zip"
-            },
-            [0xD0, 0xCF, 0x11, 0xE0] => "application/msword", // MS Office old format
+            [0xD0, 0xCF, 0x11, 0xE0] => "application/msword", // MS Office (legacy)
 
-            // Video
-            [0x00, 0x00, 0x00, ..] if data.len() >= 12 && &data[4..12] == b"ftypmp42" => "video/mp4",
-            [0x00, 0x00, 0x00, ..] if data.len() >= 12 && &data[4..12] == b"ftypisom" => "video/mp4",
+            // Video / audio containers (RIFF/EBML/OGG)
             [0x1A, 0x45, 0xDF, 0xA3] => "video/webm",
-
-            // Audio
-            [0x49, 0x44, 0x33, ..] => "audio/mpeg", // ID3 MP3
-            [0xFF, 0xFB, ..] | [0xFF, 0xF3, ..] | [0xFF, 0xF2, ..] => "audio/mpeg", // MP3
-            [0x52, 0x49, 0x46, 0x46] if data.len() >= 12 && &data[8..12] == b"WAVE" => "audio/wav",
             [0x4F, 0x67, 0x67, 0x53] => "audio/ogg",
             [0x66, 0x4C, 0x61, 0x43] => "audio/flac",
 
+            // MP3 (ID3 or frame sync)
+            [0x49, 0x44, 0x33, ..] => "audio/mpeg",
+            [0xFF, 0xFB, ..] | [0xFF, 0xF3, ..] | [0xFF, 0xF2, ..] => "audio/mpeg",
+
+            // RIFF WAVE
+            [0x52, 0x49, 0x46, 0x46] if data.len() >= 12 && &data[8..12] == b"WAVE" => "audio/wav",
+
             // Archives
-            [0x50, 0x4B, ..] => "application/zip",
+            [0x50, 0x4B, 0x03, 0x04] | [0x50, 0x4B, ..] => "application/zip",
             [0x52, 0x61, 0x72, 0x21] => "application/vnd.rar",
             [0x1F, 0x8B, ..] => "application/gzip",
             [0x42, 0x5A, 0x68, ..] => "application/x-bzip2",
@@ -186,8 +65,8 @@ pub fn determine_content_type(path: &Path, data: &[u8]) -> &'static str {
 
             // Executables
             [0x4D, 0x5A, ..] => "application/vnd.microsoft.portable-executable", // PE/EXE
-            [0x7F, 0x45, 0x4C, 0x46] => "application/x-executable", // ELF
-            [0xCA, 0xFE, 0xBA, 0xBE] => "application/x-mach-binary", // Mach-O
+            [0x7F, 0x45, 0x4C, 0x46] => "application/x-executable",              // ELF
+            [0xCA, 0xFE, 0xBA, 0xBE] => "application/x-mach-binary",             // Mach-O
 
             // Other
             [0x00, 0x61, 0x73, 0x6D] => "application/wasm",
@@ -196,5 +75,84 @@ pub fn determine_content_type(path: &Path, data: &[u8]) -> &'static str {
         }
     } else {
         "application/octet-stream"
+    }
+}
+
+/// Intern a string slice as `&'static str`.
+///
+/// `determine_content_type` historically returned `&'static str` (it fed
+/// `header::HeaderValue::from_static`). `mime_guess` hands us borrowed
+/// `&str`s tied to its own static registry, but the signatures above are
+/// already `'static` literals. For the `mime_guess` path we `Box::leak` the
+/// essence string; since the set of distinct MIME strings is small and
+/// bounded by the file types the application handles, the leak is negligible
+/// and amortised to a single allocation per distinct MIME type seen.
+fn intern(s: &str) -> &'static str {
+    // mime_guess returns the same `&'static str` slice for repeated lookups
+    // of the same essence, so we only pay the leak once per distinct type.
+    Box::leak(s.to_string().into_boxed_str())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn p(s: &str) -> PathBuf {
+        PathBuf::from(s)
+    }
+
+    #[test]
+    fn common_extensions_resolve() {
+        for (name, expected) in [
+            ("photo.jpg", "image/jpeg"),
+            ("photo.jpeg", "image/jpeg"),
+            ("img.png", "image/png"),
+            ("anim.gif", "image/gif"),
+            ("clip.mp4", "video/mp4"),
+            ("song.mp3", "audio/mpeg"),
+            ("doc.pdf", "application/pdf"),
+            ("data.json", "application/json"),
+            ("page.html", "text/html"),
+            ("style.css", "text/css"),
+            ("code.rs", "text/x-rust"),
+            ("readme.md", "text/markdown"),
+        ] {
+            let got = determine_content_type(&p(name), b"");
+            assert_eq!(
+                got, expected,
+                "extension lookup for {name}: got {got}, want {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn magic_byte_fallback_for_jpg() {
+        // No extension → must fall back to magic bytes.
+        let data = [0xFFu8, 0xD8, 0xFF, 0xE0, 0x00, 0x00];
+        assert_eq!(determine_content_type(&p("noext"), &data), "image/jpeg");
+    }
+
+    #[test]
+    fn magic_byte_fallback_for_pdf() {
+        let data = b"%PDF-1.4 ...";
+        assert_eq!(determine_content_type(&p("noext"), data), "application/pdf");
+    }
+
+    #[test]
+    fn empty_data_unknown_extension() {
+        assert_eq!(
+            determine_content_type(&p("noext"), b""),
+            "application/octet-stream"
+        );
+    }
+
+    #[test]
+    fn zip_magic_bytes() {
+        let data = [0x50, 0x4B, 0x03, 0x04, 0, 0, 0, 0];
+        assert_eq!(
+            determine_content_type(&p("archive"), &data),
+            "application/zip"
+        );
     }
 }

@@ -6,7 +6,7 @@ use notify::{
 };
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -46,15 +46,13 @@ impl InotifyHandler {
 
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        let watcher = match notify::recommended_watcher(move |res: NotifyResult<Event>| {
-            match res {
-                Ok(event) => {
-                    if let Err(e) = tx.send(event) {
-                        error!("Failed to send filesystem event: {}", e);
-                    }
+        let watcher = match notify::recommended_watcher(move |res: NotifyResult<Event>| match res {
+            Ok(event) => {
+                if let Err(e) = tx.send(event) {
+                    error!("Failed to send filesystem event: {}", e);
                 }
-                Err(e) => error!("Filesystem watch error: {:?}", e),
             }
+            Err(e) => error!("Filesystem watch error: {:?}", e),
         }) {
             Ok(w) => w,
             Err(e) => {
@@ -123,8 +121,7 @@ impl InotifyHandler {
             } else {
                 storage_base.join(&entry_model.path)
             };
-            let ignore_patterns =
-                crate::ignore::parse_patterns(&storage_model.ignore_patterns);
+            let ignore_patterns = crate::ignore::parse_patterns(&storage_model.ignore_patterns);
 
             // Check if already watching the same path
             if let Some(existing) = self.watched_entries.get(&entry_model.id) {
@@ -262,7 +259,7 @@ impl InotifyHandler {
     }
 
     /// Compute the path relative to the storage root.
-    fn relative_path(storage_base: &PathBuf, full_path: &PathBuf) -> Option<String> {
+    fn relative_path(storage_base: &Path, full_path: &Path) -> Option<String> {
         full_path
             .strip_prefix(storage_base)
             .ok()
@@ -272,9 +269,9 @@ impl InotifyHandler {
     async fn handle_file_created(
         &self,
         storage_id: i32,
-        storage_base: &PathBuf,
+        storage_base: &Path,
         ignore_patterns: &[String],
-        path: &PathBuf,
+        path: &Path,
     ) {
         if let Some(rel) = Self::relative_path(storage_base, path) {
             if crate::ignore::is_ignored(&rel, ignore_patterns) {
@@ -294,9 +291,9 @@ impl InotifyHandler {
     async fn handle_file_modified(
         &self,
         storage_id: i32,
-        storage_base: &PathBuf,
+        storage_base: &Path,
         ignore_patterns: &[String],
-        path: &PathBuf,
+        path: &Path,
     ) {
         if let Some(rel) = Self::relative_path(storage_base, path) {
             if crate::ignore::is_ignored(&rel, ignore_patterns) {
@@ -316,9 +313,9 @@ impl InotifyHandler {
     async fn handle_file_removed(
         &self,
         storage_id: i32,
-        storage_base: &PathBuf,
+        storage_base: &Path,
         ignore_patterns: &[String],
-        path: &PathBuf,
+        path: &Path,
     ) {
         if let Some(rel) = Self::relative_path(storage_base, path) {
             if crate::ignore::is_ignored(&rel, ignore_patterns) {
@@ -332,10 +329,10 @@ impl InotifyHandler {
     async fn handle_file_renamed(
         &self,
         storage_id: i32,
-        storage_base: &PathBuf,
+        storage_base: &Path,
         ignore_patterns: &[String],
-        _old_path: &PathBuf,
-        new_path: &PathBuf,
+        _old_path: &Path,
+        new_path: &Path,
     ) {
         if let Some(rel) = Self::relative_path(storage_base, new_path) {
             if crate::ignore::is_ignored(&rel, ignore_patterns) {
@@ -355,9 +352,9 @@ impl InotifyHandler {
     async fn handle_folder_created(
         &self,
         storage_id: i32,
-        storage_base: &PathBuf,
+        storage_base: &Path,
         ignore_patterns: &[String],
-        path: &PathBuf,
+        path: &Path,
     ) {
         if let Some(rel) = Self::relative_path(storage_base, path) {
             if crate::ignore::is_ignored(&rel, ignore_patterns) {
@@ -377,9 +374,9 @@ impl InotifyHandler {
     async fn handle_folder_removed(
         &self,
         storage_id: i32,
-        storage_base: &PathBuf,
+        storage_base: &Path,
         ignore_patterns: &[String],
-        path: &PathBuf,
+        path: &Path,
     ) {
         if let Some(rel) = Self::relative_path(storage_base, path) {
             if crate::ignore::is_ignored(&rel, ignore_patterns) {

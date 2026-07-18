@@ -1,13 +1,15 @@
 use crate::auth::Auth;
 use crate::entity::group;
-use crate::web::{require_admin, AppState, ErrorResponse};
+use crate::web::{
+    conflict, not_found, require_admin, save_or_err, group_name_taken, ApiError, AppState,
+    ErrorResponse,
+};
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
     routing::get,
     Json, Router,
 };
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+use sea_orm::{ActiveModelTrait, EntityTrait, Set};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -70,18 +72,10 @@ pub fn router() -> Router<Arc<AppState>> {
 async fn list_groups_handler(
     auth: Auth,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<GroupResponse>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<Vec<GroupResponse>>, ApiError> {
     require_admin(&auth)?;
 
-    let groups = group::Entity::find().all(&state.db).await.map_err(|e| {
-        tracing::error!("Database error: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Database error".to_string(),
-            }),
-        )
-    })?;
+    let groups = group::Entity::find().all(&state.db).await?;
 
     Ok(Json(groups.into_iter().map(GroupResponse::from).collect()))
 }
@@ -104,27 +98,13 @@ async fn get_group_handler(
     auth: Auth,
     Path(group_id): Path<i32>,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<GroupResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<GroupResponse>, ApiError> {
     require_admin(&auth)?;
 
     let group = group::Entity::find_by_id(group_id)
         .one(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Database error".to_string(),
-                }),
-            )
-        })?
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("Group {} not found", group_id),
-            }),
-        ))?;
+        .await?
+        .ok_or_else(|| not_found("Group", group_id))?;
 
     Ok(Json(GroupResponse::from(group)))
 }
@@ -147,31 +127,14 @@ async fn create_group_handler(
     auth: Auth,
     State(state): State<Arc<AppState>>,
     Json(payload): Json<CreateGroupRequest>,
-) -> Result<Json<GroupResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<GroupResponse>, ApiError> {
     require_admin(&auth)?;
 
-    // Check if name already exists
-    let existing = group::Entity::find()
-        .filter(group::Column::Name.eq(&payload.name))
-        .one(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Database error".to_string(),
-                }),
-            )
-        })?;
-
-    if existing.is_some() {
-        return Err((
-            StatusCode::CONFLICT,
-            Json(ErrorResponse {
-                error: format!("Group with name '{}' already exists", payload.name),
-            }),
-        ));
+    if group_name_taken(&state.db, &payload.name).await? {
+        return Err(conflict(format!(
+            "Group with name '{}' already exists",
+            payload.name
+        )));
     }
 
     let new_group = group::ActiveModel {
@@ -180,15 +143,7 @@ async fn create_group_handler(
         ..Default::default()
     };
 
-    let created_group = new_group.insert(&state.db).await.map_err(|e| {
-        tracing::error!("Database error: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Failed to create group".to_string(),
-            }),
-        )
-    })?;
+    let created_group = new_group.insert(&state.db).await?;
 
     Ok(Json(GroupResponse::from(created_group)))
 }
@@ -214,54 +169,20 @@ async fn update_group_handler(
     Path(group_id): Path<i32>,
     State(state): State<Arc<AppState>>,
     Json(payload): Json<UpdateGroupRequest>,
-) -> Result<Json<GroupResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<GroupResponse>, ApiError> {
     require_admin(&auth)?;
 
-    // Find the group
     let group = group::Entity::find_by_id(group_id)
         .one(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Database error".to_string(),
-                }),
-            )
-        })?
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("Group {} not found", group_id),
-            }),
-        ))?;
+        .await?
+        .ok_or_else(|| not_found("Group", group_id))?;
 
-    // Check if name is being changed and if it conflicts
     if let Some(ref new_name) = payload.name {
-        if new_name != &group.name {
-            let existing = group::Entity::find()
-                .filter(group::Column::Name.eq(new_name))
-                .one(&state.db)
-                .await
-                .map_err(|e| {
-                    tracing::error!("Database error: {}", e);
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse {
-                            error: "Database error".to_string(),
-                        }),
-                    )
-                })?;
-
-            if existing.is_some() {
-                return Err((
-                    StatusCode::CONFLICT,
-                    Json(ErrorResponse {
-                        error: format!("Group with name '{}' already exists", new_name),
-                    }),
-                ));
-            }
+        if new_name != &group.name && group_name_taken(&state.db, new_name).await? {
+            return Err(conflict(format!(
+                "Group with name '{}' already exists",
+                new_name
+            )));
         }
     }
 
@@ -274,15 +195,7 @@ async fn update_group_handler(
         active_group.description = Set(Some(description));
     }
 
-    let updated_group = active_group.update(&state.db).await.map_err(|e| {
-        tracing::error!("Database error: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Failed to update group".to_string(),
-            }),
-        )
-    })?;
+    let updated_group = save_or_err(active_group, &state.db).await?;
 
     Ok(Json(GroupResponse::from(updated_group)))
 }
@@ -306,42 +219,15 @@ async fn delete_group_handler(
     auth: Auth,
     Path(group_id): Path<i32>,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     require_admin(&auth)?;
 
-    // Check if group exists
     let group = group::Entity::find_by_id(group_id)
         .one(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Database error".to_string(),
-                }),
-            )
-        })?
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("Group {} not found", group_id),
-            }),
-        ))?;
+        .await?
+        .ok_or_else(|| not_found("Group", group_id))?;
 
-    // Delete the group
-    group::Entity::delete_by_id(group_id)
-        .exec(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Failed to delete group".to_string(),
-                }),
-            )
-        })?;
+    group::Entity::delete_by_id(group_id).exec(&state.db).await?;
 
     Ok(Json(serde_json::json!({
         "message": format!("Group '{}' deleted successfully", group.name),

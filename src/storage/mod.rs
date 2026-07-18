@@ -5,7 +5,7 @@ use chrono::{TimeZone, Utc};
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use serde::{Deserialize, Serialize};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::fs;
 use tracing::instrument;
 
@@ -70,13 +70,12 @@ impl Storage {
     #[instrument]
     pub async fn list_directory_fs(&self, sub_path: &str) -> io::Result<Vec<DirectoryEntry>> {
         let base_path = PathBuf::from(&self.model.path);
-        let mut full_path = base_path.clone();
-
-        // Sanitize sub_path to prevent path traversal
-        let sanitized_path = sub_path.trim_start_matches('/');
-        if !sanitized_path.is_empty() {
-            full_path.push(sanitized_path);
-        }
+        // Canonicalize the root once for safe relative-path computation below.
+        let canon_root = tokio::fs::canonicalize(&base_path)
+            .await
+            .unwrap_or_else(|_| base_path.clone());
+        // Resolve the requested directory safely (rejects traversal).
+        let full_path = self.resolve_safe_path(sub_path).await?;
 
         let mut read_dir = fs::read_dir(&full_path).await?;
         let mut entries = Vec::new();
@@ -87,15 +86,16 @@ impl Storage {
 
             // Get relative path as string
             let relative_path = path
-                .strip_prefix(&base_path)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
+                .strip_prefix(&canon_root)
+                .or_else(|_| path.strip_prefix(&base_path))
+                .map_err(io::Error::other)?
                 .to_string_lossy()
                 .into_owned();
 
             let modified_at = metadata
                 .modified()
                 .ok()
-                .map(|t| chrono::DateTime::<chrono::Utc>::from(t))
+                .map(chrono::DateTime::<chrono::Utc>::from)
                 .unwrap();
 
             let entry_type = if metadata.is_dir() {
@@ -117,7 +117,7 @@ impl Storage {
                 entry_type,
                 notify: false,
                 size: metadata.len().try_into().unwrap(),
-                created_at: modified_at.clone(),
+                created_at: modified_at,
                 modified_at,
             });
         }
@@ -214,7 +214,14 @@ impl Storage {
         Ok(result)
     }
 
-    /// Get the full filesystem path for a subpath within this storage
+    /// Get the full filesystem path for a subpath within this storage.
+    ///
+    /// **Security:** This only performs lexical joining; it does NOT verify the
+    /// resolved path stays inside the storage root. Prefer [`Self::resolve_safe_path`]
+    /// for any operation driven by user input, which canonicalizes the path and
+    /// rejects traversal (`..`) escapes. Use `get_full_path` only when the sub_path
+    /// is trusted (e.g. constructed internally) or for paths that may not yet exist
+    /// (canonicalize requires the file to be present).
     #[instrument]
     pub fn get_full_path(&self, sub_path: &str) -> PathBuf {
         let mut full_path = PathBuf::from(&self.model.path);
@@ -225,27 +232,132 @@ impl Storage {
         full_path
     }
 
-    /// Open a file and return its handle and metadata
+    /// Resolve a user-supplied sub-path to an absolute filesystem path,
+    /// verifying it stays inside this storage's root directory.
+    ///
+    /// This defends against path-traversal attacks (e.g. `../../etc/passwd`) by
+    /// canonicalizing the resulting path and checking it starts with the
+    /// canonicalized storage root. Use this for any read/write/delete operation
+    /// driven by request input.
+    ///
+    /// Returns [`io::ErrorKind::NotFound`] if the path does not exist yet
+    /// (canonicalize requires existence); for not-yet-created paths use
+    /// [`Self::resolve_safe_path_lexical`].
+    #[instrument]
+    pub async fn resolve_safe_path(&self, sub_path: &str) -> io::Result<PathBuf> {
+        let root = tokio::fs::canonicalize(&self.model.path)
+            .await
+            .map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("storage root '{}' inaccessible: {}", self.model.path, e),
+                )
+            })?;
+
+        let candidate = self.join_sub_path(&root, sub_path);
+        let canonical = tokio::fs::canonicalize(&candidate).await.map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("path '{}' inaccessible: {}", candidate.display(), e),
+            )
+        })?;
+
+        if !canonical.starts_with(&root) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "resolved path escapes storage root",
+            ));
+        }
+        Ok(canonical)
+    }
+
+    /// Lexically resolve a user-supplied sub-path against the storage root,
+    /// rejecting any `..` component that would escape the root.
+    ///
+    /// Use this for paths that do not yet exist on disk (create/rename) where
+    /// `canonicalize` would fail. The parent directory, if it exists, is
+    /// canonicalized to confirm containment.
+    #[instrument]
+    pub async fn resolve_safe_path_lexical(&self, sub_path: &str) -> io::Result<PathBuf> {
+        let root = tokio::fs::canonicalize(&self.model.path)
+            .await
+            .map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("storage root '{}' inaccessible: {}", self.model.path, e),
+                )
+            })?;
+
+        let candidate = self.join_sub_path(&root, sub_path);
+
+        // Walk components manually to reject traversal without requiring existence.
+        let mut depth: i32 = 0;
+        for comp in candidate
+            .strip_prefix(&root)
+            .unwrap_or(candidate.as_path())
+            .components()
+        {
+            match comp {
+                std::path::Component::ParentDir => {
+                    depth -= 1;
+                    if depth < 0 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "path escapes storage root",
+                        ));
+                    }
+                }
+                std::path::Component::Normal(_) => depth += 1,
+                std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "absolute path not allowed within storage",
+                    ));
+                }
+                std::path::Component::CurDir => {}
+            }
+        }
+
+        Ok(candidate)
+    }
+
+    /// Join a sub-path onto a given base, stripping a leading slash.
+    fn join_sub_path(&self, base: &Path, sub_path: &str) -> PathBuf {
+        let sanitized = sub_path.trim_start_matches('/');
+        let mut full = base.to_path_buf();
+        if !sanitized.is_empty() {
+            full.push(sanitized);
+        }
+        full
+    }
+
+    /// Open a file and return its handle and metadata.
+    ///
+    /// The sub-path is resolved safely and verified to stay within the storage
+    /// root (rejects `..` traversal).
     #[instrument]
     pub async fn open_file(
         &self,
         sub_path: &str,
     ) -> io::Result<(tokio::fs::File, std::fs::Metadata)> {
-        let full_path = self.get_full_path(sub_path);
+        let full_path = self.resolve_safe_path(sub_path).await?;
         let file = tokio::fs::File::open(&full_path).await?;
         let metadata = file.metadata().await?;
 
         if metadata.is_dir() {
-            return Err(io::Error::new(io::ErrorKind::Other, "Path is a directory"));
+            return Err(io::Error::other("Path is a directory"));
         }
 
         Ok((file, metadata))
     }
 
-    /// Save file content to the filesystem
+    /// Save file content to the filesystem.
+    ///
+    /// The sub-path is resolved safely (lexical, since the file may not exist
+    /// yet) and verified to stay within the storage root.
     #[instrument(skip(data))]
     pub async fn save_file(&self, sub_path: &str, data: &[u8]) -> io::Result<()> {
-        let full_path = self.get_full_path(sub_path);
+        let full_path = self.resolve_safe_path_lexical(sub_path).await?;
 
         // Ensure parent directory exists
         if let Some(parent) = full_path.parent() {
@@ -255,17 +367,23 @@ impl Storage {
         tokio::fs::write(full_path, data).await
     }
 
-    /// Create a new directory
+    /// Create a new directory.
+    ///
+    /// The sub-path is resolved safely (lexical) and verified to stay within
+    /// the storage root.
     #[instrument]
     pub async fn create_directory(&self, sub_path: &str) -> io::Result<()> {
-        let full_path = self.get_full_path(sub_path);
+        let full_path = self.resolve_safe_path_lexical(sub_path).await?;
         tokio::fs::create_dir_all(full_path).await
     }
 
-    /// Create an empty file
+    /// Create an empty file.
+    ///
+    /// The sub-path is resolved safely (lexical) and verified to stay within
+    /// the storage root.
     #[instrument]
     pub async fn create_file(&self, sub_path: &str) -> io::Result<()> {
-        let full_path = self.get_full_path(sub_path);
+        let full_path = self.resolve_safe_path_lexical(sub_path).await?;
 
         // Ensure parent directory exists
         if let Some(parent) = full_path.parent() {
@@ -276,11 +394,14 @@ impl Storage {
         Ok(())
     }
 
-    /// Rename or move an entry
+    /// Rename or move an entry.
+    ///
+    /// Both source and destination are resolved safely (lexical) and verified
+    /// to stay within the storage root.
     #[instrument]
     pub async fn rename_entry(&self, old_path: &str, new_path: &str) -> io::Result<()> {
-        let old_full_path = self.get_full_path(old_path);
-        let new_full_path = self.get_full_path(new_path);
+        let old_full_path = self.resolve_safe_path(old_path).await?;
+        let new_full_path = self.resolve_safe_path_lexical(new_path).await?;
 
         // Ensure parent directory for the new path exists
         if let Some(parent) = new_full_path.parent() {
@@ -290,10 +411,13 @@ impl Storage {
         tokio::fs::rename(old_full_path, new_full_path).await
     }
 
-    /// Remove an entry (file or directory)
+    /// Remove an entry (file or directory).
+    ///
+    /// The sub-path is resolved safely and verified to stay within the storage
+    /// root.
     #[instrument]
     pub async fn remove_entry(&self, sub_path: &str) -> io::Result<()> {
-        let full_path = self.get_full_path(sub_path);
+        let full_path = self.resolve_safe_path(sub_path).await?;
         let metadata = tokio::fs::metadata(&full_path).await?;
 
         if metadata.is_dir() {
@@ -366,7 +490,10 @@ impl Storage {
         Ok(inserted.id)
     }
 
-    /// Find or create a database entry for a given sub-path
+    /// Find or create a database entry for a given sub-path.
+    ///
+    /// The sub-path is resolved safely (rejecting traversal escapes) and
+    /// metadata is read asynchronously (no blocking `std::fs` call).
     #[instrument(skip(self, db))]
     pub async fn ensure_entry(
         &self,
@@ -374,7 +501,7 @@ impl Storage {
         sub_path: &str,
     ) -> Result<entry::Model> {
         let normalized_path = sub_path.trim_matches('/').to_string();
-        let full_path = self.get_full_path(&normalized_path);
+        let full_path = self.resolve_safe_path(&normalized_path).await?;
 
         anyhow::ensure!(full_path.exists(), "Path {} not found on disk", sub_path);
 
@@ -393,7 +520,7 @@ impl Storage {
         } else {
             None
         };
-        let metadata = std::fs::metadata(&full_path)?;
+        let metadata = tokio::fs::metadata(&full_path).await?;
 
         let entry_type = if metadata.is_dir() {
             EntryType::Directory
@@ -451,9 +578,10 @@ pub async fn validate_storage_path(path: &str) -> Result<()> {
     anyhow::ensure!(path_buf.exists(), "Path does not exist: {}", path);
     anyhow::ensure!(path_buf.is_dir(), "Path is not a directory: {}", path);
 
-    let _ = fs::read_dir(&path_buf)
-        .await
-        .context(format!("Cannot read directory (permission denied): {}", path))?;
+    let _ = fs::read_dir(&path_buf).await.context(format!(
+        "Cannot read directory (permission denied): {}",
+        path
+    ))?;
 
     Ok(())
 }
