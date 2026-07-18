@@ -24,7 +24,7 @@ impl Storage {
         let fs_modified = tokio::fs::metadata(&full_path)
             .await?
             .modified()
-            .map(|t| chrono::DateTime::<chrono::Utc>::from(t))
+            .map(chrono::DateTime::<chrono::Utc>::from)
             .unwrap()
             .naive_utc();
 

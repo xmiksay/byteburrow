@@ -117,7 +117,10 @@ async fn main() {
                 std::process::exit(1);
             }
         }
-        Commands::FaceMatch { contact_id, threshold } => {
+        Commands::FaceMatch {
+            contact_id,
+            threshold,
+        } => {
             if let Err(e) = face_match(&config, *contact_id, *threshold).await {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
@@ -301,14 +304,12 @@ async fn face_list(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let contacts = contact::Entity::find().all(&db).await?;
-    let contact_map: std::collections::HashMap<i32, String> = contacts
-        .into_iter()
-        .map(|c| (c.id, c.name))
-        .collect();
+    let contact_map: std::collections::HashMap<i32, String> =
+        contacts.into_iter().map(|c| (c.id, c.name)).collect();
 
     println!(
-        "\n{:<5} {:<66} {:<6} {:<10} {:<20} {:<9} {}",
-        "ID", "Hash", "Face#", "Confirmed", "Contact", "Embed", "Bbox"
+        "\n{:<5} {:<66} {:<6} {:<10} {:<20} {:<9} Bbox",
+        "ID", "Hash", "Face#", "Confirmed", "Contact", "Embed"
     );
     println!("{}", "-".repeat(130));
 
@@ -329,7 +330,10 @@ async fn face_list(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
             if r.confirmed { "YES" } else { "no" },
             contact_name,
             format!("{}d", embed_dim),
-            r.bbox_w, r.bbox_h, r.bbox_x, r.bbox_y,
+            r.bbox_w,
+            r.bbox_h,
+            r.bbox_x,
+            r.bbox_y,
         );
     }
     println!("\nTotal: {} face references", refs.len());
@@ -380,14 +384,11 @@ async fn face_match(
 
     // Load all other face references
     let all_refs = face_reference::Entity::find().all(&db).await?;
-    let source_ids: std::collections::HashSet<i32> =
-        source_refs.iter().map(|r| r.id).collect();
+    let source_ids: std::collections::HashSet<i32> = source_refs.iter().map(|r| r.id).collect();
 
     let contacts = contact::Entity::find().all(&db).await?;
-    let contact_map: std::collections::HashMap<i32, String> = contacts
-        .into_iter()
-        .map(|c| (c.id, c.name))
-        .collect();
+    let contact_map: std::collections::HashMap<i32, String> =
+        contacts.into_iter().map(|c| (c.id, c.name)).collect();
 
     let mut matches: Vec<(f32, &face_reference::Model)> = Vec::new();
 
@@ -440,7 +441,10 @@ async fn face_match(
 
             println!(
                 "{:<10.4} {:<5} {:<66} {:<6} {:<10} {:<20}",
-                sim, r.id, hash_hex, r.face_index,
+                sim,
+                r.id,
+                hash_hex,
+                r.face_index,
                 if r.confirmed { "YES" } else { "no" },
                 contact_name,
             );
@@ -452,7 +456,11 @@ async fn face_match(
             active.update(&db).await?;
             saved += 1;
         }
-        println!("\n{} matches found, {} saved (unconfirmed)", matches.len(), saved);
+        println!(
+            "\n{} matches found, {} saved (unconfirmed)",
+            matches.len(),
+            saved
+        );
     }
 
     Ok(())

@@ -219,7 +219,7 @@ impl PluginRegistry {
 }
 
 /// Aggregated results from all plugins for a single file.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct MergedClassification {
     pub keywords: Vec<String>,
     pub custom: serde_json::Map<String, serde_json::Value>,

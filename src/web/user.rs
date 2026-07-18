@@ -1,14 +1,17 @@
 use crate::auth::{Auth, AuthError};
 use crate::entity::user;
-use crate::web::{require_admin, AppState, ErrorResponse};
+use crate::web::{
+    bad_request, conflict, forbidden, internal, not_found, require_admin, save_or_err,
+    user_name_taken, ApiError, AppState, ErrorResponse,
+};
 use axum::{
     extract::{Path, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+use sea_orm::{ActiveModelTrait, EntityTrait, Set};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use utoipa::ToSchema;
@@ -114,50 +117,26 @@ async fn change_password_handler(
     Path(id): Path<i32>,
     State(state): State<Arc<AppState>>,
     Json(payload): Json<ChangePasswordRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    // Check permission: user can change own password, admin can change any
+) -> Result<impl IntoResponse, AuthOrApiError> {
+    // Check permission: user can change own password, admin can change any.
     if auth.user.id != id && !auth.user.admin {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse {
-                error: "Permission denied".to_string(),
-            }),
-        ));
+        return Err(AuthOrApiError::Api(forbidden("Permission denied")));
     }
 
     // Find user
     let user = user::Entity::find_by_id(id)
         .one(&state.db)
-        .await
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Database error".to_string(),
-                }),
-            )
-        })?
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: "User not found".to_string(),
-            }),
-        ))?;
+        .await?
+        .ok_or_else(|| not_found("User", id))?;
 
     // Update password
     let mut active_user: user::ActiveModel = user.into();
     active_user.password = Set(Auth::hash_string(&payload.password));
+    active_user.update(&state.db).await?;
 
-    active_user.update(&state.db).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-    })?;
-
-    Ok(Json(serde_json::json!({ "message": "Password changed successfully" })))
+    Ok(Json(
+        serde_json::json!({ "message": "Password changed successfully" }),
+    ))
 }
 
 /// Login endpoint - accepts JSON payload with username/password
@@ -177,7 +156,7 @@ async fn login_handler(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(payload): Json<LoginRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<impl IntoResponse, AuthOrApiError> {
     // Extract user agent from headers
     let user_agent = headers
         .get(axum::http::header::USER_AGENT)
@@ -195,33 +174,14 @@ async fn login_handler(
     // Authenticate user
     let auth = Auth::from_user_password(&payload.username, &payload.password, &state.db)
         .await
-        .map_err(|e| {
-            let (status, message) = match e {
-                AuthError::InvalidCredentials => (StatusCode::UNAUTHORIZED, "Invalid credentials"),
-                AuthError::UserDisabled => (StatusCode::FORBIDDEN, "User account is disabled"),
-                _ => (StatusCode::INTERNAL_SERVER_ERROR, "Authentication error"),
-            };
-            (
-                status,
-                Json(ErrorResponse {
-                    error: message.to_string(),
-                }),
-            )
-        })?;
+        .map_err(AuthOrApiError::Auth)?;
 
     // Create token with user agent and IP address
     let config = crate::config::Config::get();
     let token = auth
         .create_token(&state.db, user_agent, ip_address)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Failed to create token: {:?}", e),
-                }),
-            )
-        })?;
+        .map_err(|e| AuthOrApiError::Api(internal(format!("Failed to create token: {e:?}"))))?;
 
     // Build Set-Cookie header for HttpOnly session cookie
     let max_age = config.token_expiration_days * 24 * 60 * 60;
@@ -268,8 +228,6 @@ async fn me_handler(auth: Auth) -> impl IntoResponse {
 // CRUD Operations (Admin Only)
 // ============================================================================
 
-
-
 /// List all users
 /// GET /api/user
 #[utoipa::path(
@@ -285,21 +243,10 @@ async fn me_handler(auth: Auth) -> impl IntoResponse {
 async fn list_users_handler(
     auth: Auth,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<UserResponse>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<Vec<UserResponse>>, ApiError> {
     require_admin(&auth)?;
 
-    let users = user::Entity::find()
-        .all(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Database error".to_string(),
-                }),
-            )
-        })?;
+    let users = user::Entity::find().all(&state.db).await?;
 
     Ok(Json(users.into_iter().map(UserResponse::from).collect()))
 }
@@ -322,27 +269,13 @@ async fn get_user_handler(
     auth: Auth,
     Path(user_id): Path<i32>,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<UserResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<UserResponse>, ApiError> {
     require_admin(&auth)?;
 
     let user = user::Entity::find_by_id(user_id)
         .one(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Database error".to_string(),
-                }),
-            )
-        })?
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("User {} not found", user_id),
-            }),
-        ))?;
+        .await?
+        .ok_or_else(|| not_found("User", user_id))?;
 
     Ok(Json(UserResponse::from(user)))
 }
@@ -365,31 +298,14 @@ async fn create_user_handler(
     auth: Auth,
     State(state): State<Arc<AppState>>,
     Json(payload): Json<CreateUserRequest>,
-) -> Result<Json<UserResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<UserResponse>, ApiError> {
     require_admin(&auth)?;
 
-    // Check if username already exists
-    let existing = user::Entity::find()
-        .filter(user::Column::Username.eq(&payload.username))
-        .one(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Database error".to_string(),
-                }),
-            )
-        })?;
-
-    if existing.is_some() {
-        return Err((
-            StatusCode::CONFLICT,
-            Json(ErrorResponse {
-                error: format!("Username '{}' already exists", payload.username),
-            }),
-        ));
+    if user_name_taken(&state.db, &payload.username).await? {
+        return Err(conflict(format!(
+            "Username '{}' already exists",
+            payload.username
+        )));
     }
 
     // Hash password
@@ -405,15 +321,7 @@ async fn create_user_handler(
         ..Default::default()
     };
 
-    let created_user = new_user.insert(&state.db).await.map_err(|e| {
-        tracing::error!("Database error: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Failed to create user".to_string(),
-            }),
-        )
-    })?;
+    let created_user = new_user.insert(&state.db).await?;
 
     Ok(Json(UserResponse::from(created_user)))
 }
@@ -439,54 +347,20 @@ async fn update_user_handler(
     Path(user_id): Path<i32>,
     State(state): State<Arc<AppState>>,
     Json(payload): Json<UpdateUserRequest>,
-) -> Result<Json<UserResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<UserResponse>, ApiError> {
     require_admin(&auth)?;
 
-    // Find the user
     let user = user::Entity::find_by_id(user_id)
         .one(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Database error".to_string(),
-                }),
-            )
-        })?
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("User {} not found", user_id),
-            }),
-        ))?;
+        .await?
+        .ok_or_else(|| not_found("User", user_id))?;
 
-    // Check if username is being changed and if it conflicts
     if let Some(ref new_username) = payload.username {
-        if new_username != &user.username {
-            let existing = user::Entity::find()
-                .filter(user::Column::Username.eq(new_username))
-                .one(&state.db)
-                .await
-                .map_err(|e| {
-                    tracing::error!("Database error: {}", e);
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse {
-                            error: "Database error".to_string(),
-                        }),
-                    )
-                })?;
-
-            if existing.is_some() {
-                return Err((
-                    StatusCode::CONFLICT,
-                    Json(ErrorResponse {
-                        error: format!("Username '{}' already exists", new_username),
-                    }),
-                ));
-            }
+        if new_username != &user.username && user_name_taken(&state.db, new_username).await? {
+            return Err(conflict(format!(
+                "Username '{}' already exists",
+                new_username
+            )));
         }
     }
 
@@ -511,15 +385,7 @@ async fn update_user_handler(
         active_user.admin = Set(admin);
     }
 
-    let updated_user = active_user.update(&state.db).await.map_err(|e| {
-        tracing::error!("Database error: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Failed to update user".to_string(),
-            }),
-        )
-    })?;
+    let updated_user = save_or_err(active_user, &state.db).await?;
 
     Ok(Json(UserResponse::from(updated_user)))
 }
@@ -543,54 +409,54 @@ async fn delete_user_handler(
     auth: Auth,
     Path(user_id): Path<i32>,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     require_admin(&auth)?;
 
     // Prevent deleting yourself
     if auth.user.id == user_id {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Cannot delete your own account".to_string(),
-            }),
-        ));
+        return Err(bad_request("Cannot delete your own account"));
     }
 
-    // Check if user exists
     let user = user::Entity::find_by_id(user_id)
         .one(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Database error".to_string(),
-                }),
-            )
-        })?
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("User {} not found", user_id),
-            }),
-        ))?;
+        .await?
+        .ok_or_else(|| not_found("User", user_id))?;
 
-    // Delete the user
-    user::Entity::delete_by_id(user_id)
-        .exec(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Failed to delete user".to_string(),
-                }),
-            )
-        })?;
+    user::Entity::delete_by_id(user_id).exec(&state.db).await?;
 
     Ok(Json(serde_json::json!({
         "message": format!("User '{}' deleted successfully", user.username),
     })))
+}
+
+// ---------------------------------------------------------------------------
+// Local error wrapper: handlers that authenticate via username/password must
+// return `AuthError` directly (it carries the WWW-Authenticate header on 401),
+// while everything else uses `ApiError`. This enum picks either.
+// ---------------------------------------------------------------------------
+
+enum AuthOrApiError {
+    Auth(AuthError),
+    Api(ApiError),
+}
+
+impl IntoResponse for AuthOrApiError {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            AuthOrApiError::Auth(e) => e.into_response(),
+            AuthOrApiError::Api(e) => e.into_response(),
+        }
+    }
+}
+
+impl From<sea_orm::DbErr> for AuthOrApiError {
+    fn from(e: sea_orm::DbErr) -> Self {
+        Self::Api(ApiError::Db(e))
+    }
+}
+
+impl From<ApiError> for AuthOrApiError {
+    fn from(e: ApiError) -> Self {
+        Self::Api(e)
+    }
 }

@@ -1,14 +1,16 @@
 use crate::auth::Auth;
 use crate::entity::{entry, photo};
 use crate::job::Job;
-use crate::web::{require_admin, AppState, ErrorResponse};
+use crate::web::{
+    bad_request, internal, not_found_msg, require_admin, ApiError, AppState, ErrorResponse,
+};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
     routing::{get, post},
     Json, Router,
 };
-use chrono::NaiveDate;
+use chrono::{NaiveDate, NaiveDateTime};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -37,7 +39,7 @@ pub fn router() -> Router<Arc<AppState>> {
 async fn enrich_photos(
     db: &sea_orm::DatabaseConnection,
     photos: Vec<photo::Model>,
-) -> Result<Vec<PhotoResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Vec<PhotoResponse>, ApiError> {
     if photos.is_empty() {
         return Ok(vec![]);
     }
@@ -46,8 +48,7 @@ async fn enrich_photos(
     let entries = entry::Entity::find()
         .filter(entry::Column::Hash.is_in(hashes))
         .all(db)
-        .await
-        .map_err(db_error)?;
+        .await?;
 
     let entry_map: HashMap<Vec<u8>, &entry::Model> = entries
         .iter()
@@ -71,6 +72,45 @@ async fn enrich_photos(
         .collect())
 }
 
+/// Compute the inclusive-start / exclusive-end `NaiveDateTime` range covering
+/// the given year (and optional month/day). Returns a bad-request error when
+/// the date components are invalid.
+fn date_range(
+    year: i32,
+    month: Option<u32>,
+    day: Option<u32>,
+) -> Result<(NaiveDateTime, NaiveDateTime), ApiError> {
+    let start = NaiveDate::from_ymd_opt(year, month.unwrap_or(1), day.unwrap_or(1))
+        .ok_or_else(|| bad_request("Invalid date"))?
+        .and_hms_opt(0, 0, 0)
+        .unwrap();
+
+    // Exclusive end: next day for day scopes, first-of-next-month otherwise.
+    let end = match (month, day) {
+        (Some(m), Some(d)) => {
+            NaiveDate::from_ymd_opt(year, m, d)
+                .ok_or_else(|| bad_request("Invalid date"))?
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                + chrono::Duration::days(1)
+        }
+        (Some(12), _) => NaiveDate::from_ymd_opt(year + 1, 1, 1)
+            .ok_or_else(|| bad_request("Invalid date"))?
+            .and_hms_opt(0, 0, 0)
+            .unwrap(),
+        (Some(m), _) => NaiveDate::from_ymd_opt(year, m + 1, 1)
+            .ok_or_else(|| bad_request("Invalid date"))?
+            .and_hms_opt(0, 0, 0)
+            .unwrap(),
+        (None, _) => NaiveDate::from_ymd_opt(year + 1, 1, 1)
+            .ok_or_else(|| bad_request("Invalid date"))?
+            .and_hms_opt(0, 0, 0)
+            .unwrap(),
+    };
+
+    Ok((start, end))
+}
+
 /// List all photos without a date
 /// GET /api/photo
 #[utoipa::path(
@@ -85,12 +125,11 @@ async fn enrich_photos(
 pub(crate) async fn list_photos(
     _auth: Auth,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<PhotoResponse>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<Vec<PhotoResponse>>, ApiError> {
     let photos = photo::Entity::find()
         .filter(photo::Column::Date.is_null())
         .all(&state.db)
-        .await
-        .map_err(db_error)?;
+        .await?;
 
     Ok(Json(enrich_photos(&state.db, photos).await?))
 }
@@ -112,23 +151,15 @@ pub(crate) async fn list_by_year(
     _auth: Auth,
     Path(year): Path<i32>,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<PhotoResponse>>, (StatusCode, Json<ErrorResponse>)> {
-    let start = NaiveDate::from_ymd_opt(year, 1, 1)
-        .ok_or_else(|| bad_request("Invalid year"))?
-        .and_hms_opt(0, 0, 0)
-        .unwrap();
-    let end = NaiveDate::from_ymd_opt(year + 1, 1, 1)
-        .ok_or_else(|| bad_request("Invalid year"))?
-        .and_hms_opt(0, 0, 0)
-        .unwrap();
+) -> Result<Json<Vec<PhotoResponse>>, ApiError> {
+    let (start, end) = date_range(year, None, None)?;
 
     let photos = photo::Entity::find()
         .filter(photo::Column::Date.gte(start))
         .filter(photo::Column::Date.lt(end))
         .order_by_desc(photo::Column::Date)
         .all(&state.db)
-        .await
-        .map_err(db_error)?;
+        .await?;
 
     Ok(Json(enrich_photos(&state.db, photos).await?))
 }
@@ -153,28 +184,15 @@ pub(crate) async fn list_by_year_month(
     _auth: Auth,
     Path((year, month)): Path<(i32, u32)>,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<PhotoResponse>>, (StatusCode, Json<ErrorResponse>)> {
-    let start = NaiveDate::from_ymd_opt(year, month, 1)
-        .ok_or_else(|| bad_request("Invalid year/month"))?
-        .and_hms_opt(0, 0, 0)
-        .unwrap();
-    let (next_year, next_month) = if month == 12 {
-        (year + 1, 1)
-    } else {
-        (year, month + 1)
-    };
-    let end = NaiveDate::from_ymd_opt(next_year, next_month, 1)
-        .ok_or_else(|| bad_request("Invalid year/month"))?
-        .and_hms_opt(0, 0, 0)
-        .unwrap();
+) -> Result<Json<Vec<PhotoResponse>>, ApiError> {
+    let (start, end) = date_range(year, Some(month), None)?;
 
     let photos = photo::Entity::find()
         .filter(photo::Column::Date.gte(start))
         .filter(photo::Column::Date.lt(end))
         .order_by_desc(photo::Column::Date)
         .all(&state.db)
-        .await
-        .map_err(db_error)?;
+        .await?;
 
     Ok(Json(enrich_photos(&state.db, photos).await?))
 }
@@ -200,20 +218,15 @@ pub(crate) async fn list_by_year_month_day(
     _auth: Auth,
     Path((year, month, day)): Path<(i32, u32, u32)>,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<PhotoResponse>>, (StatusCode, Json<ErrorResponse>)> {
-    let start = NaiveDate::from_ymd_opt(year, month, day)
-        .ok_or_else(|| bad_request("Invalid date"))?
-        .and_hms_opt(0, 0, 0)
-        .unwrap();
-    let end = start + chrono::Duration::days(1);
+) -> Result<Json<Vec<PhotoResponse>>, ApiError> {
+    let (start, end) = date_range(year, Some(month), Some(day))?;
 
     let photos = photo::Entity::find()
         .filter(photo::Column::Date.gte(start))
         .filter(photo::Column::Date.lt(end))
         .order_by_desc(photo::Column::Date)
         .all(&state.db)
-        .await
-        .map_err(db_error)?;
+        .await?;
 
     Ok(Json(enrich_photos(&state.db, photos).await?))
 }
@@ -235,7 +248,7 @@ pub(crate) async fn regenerate_thumbnail(
     auth: Auth,
     Path(hash): Path<String>,
     State(state): State<Arc<AppState>>,
-) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<StatusCode, ApiError> {
     require_admin(&auth)?;
 
     let hash_bytes = hex::decode(&hash).map_err(|_| bad_request("Invalid hash"))?;
@@ -243,48 +256,17 @@ pub(crate) async fn regenerate_thumbnail(
     // Verify the photo exists
     photo::Entity::find_by_id(hash_bytes.clone())
         .one(&state.db)
-        .await
-        .map_err(db_error)?
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: "Photo not found".to_string(),
-                }),
-            )
-        })?;
+        .await?
+        .ok_or_else(|| not_found_msg("Photo not found"))?;
 
     // Dispatch job to regenerate thumbnails
     state
         .job_sender
-        .send(Job::CreateThumbnail { hash: hash_bytes, regenerate: true })
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Failed to dispatch regeneration job".to_string(),
-                }),
-            )
-        })?;
+        .send(Job::CreateThumbnail {
+            hash: hash_bytes,
+            regenerate: true,
+        })
+        .map_err(|_| internal("Failed to dispatch regeneration job"))?;
 
     Ok(StatusCode::ACCEPTED)
-}
-
-fn db_error(e: sea_orm::DbErr) -> (StatusCode, Json<ErrorResponse>) {
-    tracing::error!("Database error: {}", e);
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ErrorResponse {
-            error: "Database error".to_string(),
-        }),
-    )
-}
-
-fn bad_request(msg: &str) -> (StatusCode, Json<ErrorResponse>) {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(ErrorResponse {
-            error: msg.to_string(),
-        }),
-    )
 }

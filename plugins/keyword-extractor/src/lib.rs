@@ -157,9 +157,10 @@ impl ClassifierPlugin for KeywordExtractor {
             self.model = model.clone();
         }
 
-        if let Some(timeout) = config
-            .get("ollama_timeout")
-            .or(std::env::var("BYTEBURROW_OLLAMA_TIMEOUT").ok().as_ref())
+        if let Some(timeout) =
+            config
+                .get("ollama_timeout")
+                .or(std::env::var("BYTEBURROW_OLLAMA_TIMEOUT").ok().as_ref())
         {
             let secs: u64 = timeout
                 .parse()

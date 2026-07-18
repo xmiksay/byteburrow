@@ -28,6 +28,8 @@ pub enum AuthError {
     InvalidCredentials,
     MissingCredentials,
     UserDisabled,
+    /// Generating a fresh random token failed (RNG unavailable).
+    TokenGenerationFailed,
     DbError(sea_orm::DbErr),
 }
 
@@ -48,6 +50,10 @@ impl IntoResponse for AuthError {
                 "Missing authentication credentials",
             ),
             AuthError::UserDisabled => (StatusCode::FORBIDDEN, "User account is disabled"),
+            AuthError::TokenGenerationFailed => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to generate token",
+            ),
             AuthError::DbError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Database error"),
         };
 
@@ -89,51 +95,64 @@ impl FromRequestParts<Arc<AppState>> for Auth {
             .or_else(|| parts.headers.get("x-real-ip").and_then(|v| v.to_str().ok()))
             .map(|s| s.trim().to_string());
 
-        // Try Bearer token first
-        if let Ok(TypedHeader(Authorization(bearer))) =
-            parts.extract::<TypedHeader<Authorization<Bearer>>>().await
-        {
-            return Auth::from_token(bearer.token(), &state.db, user_agent, ip_address).await;
-        }
-
-        // Try Basic Auth
+        // KISS-7: Basic auth needs the DB (verifies a password), so check it
+        // first as a special case. Bearer / query-param / cookie are unified
+        // into [`extract_token`].
         if let Ok(TypedHeader(Authorization(basic))) =
             parts.extract::<TypedHeader<Authorization<Basic>>>().await
         {
             return Auth::from_basic_auth(&basic, &state.db).await;
         }
 
-        // Try Query Parameter ?token=... for media streaming etc
-        if let Some(query) = parts.uri.query() {
-            for pair in query.split('&') {
-                if let Some((key, value)) = pair.split_once('=') {
-                    if key == "token" {
-                        return Auth::from_token(value, &state.db, user_agent.clone(), ip_address.clone()).await;
-                    }
-                }
-            }
-        }
-
-        // Try Cookie: session_token=...
-        if let Some(cookie_header) = parts.headers.get(axum::http::header::COOKIE) {
-            if let Ok(cookies) = cookie_header.to_str() {
-                for cookie in cookies.split(';') {
-                    let cookie = cookie.trim();
-                    if let Some(token_value) = cookie.strip_prefix("session_token=") {
-                        return Auth::from_token(
-                            token_value.trim(),
-                            &state.db,
-                            user_agent,
-                            ip_address,
-                        )
-                        .await;
-                    }
-                }
-            }
-        }
-
-        Err(AuthError::MissingCredentials)
+        let token = extract_token(parts)
+            .await
+            .ok_or(AuthError::MissingCredentials)?;
+        Self::from_token(&token, &state.db, user_agent, ip_address).await
     }
+}
+
+/// Try the non-DB credential sources in priority order and return the first
+/// token string found, or `None` when no credentials are present.
+///
+/// Sources checked (in order):
+///   1. `Authorization: Bearer <token>` header
+///   2. `?token=` query parameter
+///   3. `session_token=<...>` cookie
+///
+/// (Basic auth is handled separately in [`Auth::from_request_parts`] because it
+/// requires database access to verify the password.)
+async fn extract_token(parts: &mut Parts) -> Option<String> {
+    // 1. Bearer token in Authorization header.
+    if let Ok(TypedHeader(Authorization(bearer))) =
+        parts.extract::<TypedHeader<Authorization<Bearer>>>().await
+    {
+        return Some(bearer.token().to_string());
+    }
+
+    // 2. Query parameter ?token=...
+    if let Some(query) = parts.uri.query() {
+        for pair in query.split('&') {
+            if let Some((key, value)) = pair.split_once('=') {
+                if key == "token" {
+                    return Some(value.to_string());
+                }
+            }
+        }
+    }
+
+    // 3. Cookie: session_token=...
+    if let Some(cookie_header) = parts.headers.get(axum::http::header::COOKIE) {
+        if let Ok(cookies) = cookie_header.to_str() {
+            for cookie in cookies.split(';') {
+                let cookie = cookie.trim();
+                if let Some(token_value) = cookie.strip_prefix("session_token=") {
+                    return Some(token_value.trim().to_string());
+                }
+            }
+        }
+    }
+
+    None
 }
 
 // ============================================================================
@@ -248,14 +267,24 @@ impl Auth {
     ) -> Result<String, AuthError> {
         let config = crate::config::Config::get();
 
-        // Generate random token using UUIDs
-        let num_uuids = (config.token_length + 31) / 32; // Each UUID as simple string is 32 chars
-        let mut token_parts = Vec::with_capacity(num_uuids);
-        for _ in 0..num_uuids {
-            token_parts.push(uuid::Uuid::new_v4().as_simple().to_string());
-        }
-        let combined = token_parts.join("");
-        let raw_token = combined[..config.token_length.min(combined.len())].to_string();
+        // KISS-7: generate `token_length` random bytes and hex-encode them,
+        // giving a token of length `2 * token_length`. We previously
+        // concatenated N UUIDs and truncated — a single `getrandom` fill is
+        // both simpler and cryptographically sound.
+        //
+        // `token_length` is interpreted as the *raw* byte count to match the
+        // historical effective entropy (the UUID loop produced ~32 hex chars
+        // per UUID and was truncated to `token_length`, so the final token had
+        // `token_length` hex chars ≈ `token_length/2` bytes of entropy). To
+        // keep the generated token length equal to the configured
+        // `token_length`, we produce `ceil(token_length / 2)` random bytes.
+        let byte_count = config.token_length.div_ceil(2);
+        let mut buf = vec![0u8; byte_count];
+        // getrandom::fill writes random bytes into the buffer or returns an
+        // error; on supported platforms (Linux getrandom, /dev/urandom, etc.)
+        // it cannot fail in practice for non-huge sizes.
+        getrandom::fill(&mut buf).map_err(|_| AuthError::TokenGenerationFailed)?;
+        let raw_token = hex::encode(&buf);
 
         let now = Utc::now();
 
@@ -265,7 +294,7 @@ impl Auth {
             expires_at: Set(now + Duration::days(config.token_expiration_days)),
             user_agent: Set(user_agent),
             ip_address: Set(ip_address),
-            last_activity: Set(Some(now.clone())),
+            last_activity: Set(Some(now)),
             created_at: Set(now),
         };
 

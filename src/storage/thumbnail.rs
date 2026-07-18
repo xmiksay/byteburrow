@@ -1,6 +1,6 @@
+use std::io;
 use std::path::{Path, PathBuf};
 use tokio::fs;
-use std::io;
 
 /// Returns the path to a thumbnail based on its hash and size
 /// Structure: {thumbnail_dir}/{first_4_chars}/{next_2_chars}/{rest_of_hash}_{size}.png
@@ -9,11 +9,11 @@ pub fn get_thumbnail_path(thumbnail_dir: &Path, hash: &str, size: &str) -> PathB
         // Fallback for short hashes, though they shouldn't happen with hex-encoded hashes
         return thumbnail_dir.join(format!("{}_{}.png", hash, size));
     }
-    
+
     let part1 = &hash[0..4];
     let part2 = &hash[4..6];
     let rest = &hash[6..];
-    
+
     thumbnail_dir
         .join(part1)
         .join(part2)

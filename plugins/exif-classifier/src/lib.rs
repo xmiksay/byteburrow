@@ -56,8 +56,7 @@ impl ClassifierPlugin for ExifClassifier {
         }
 
         // Date extraction
-        if let Some(dt_field) =
-            exif_data.get_field(exif::Tag::DateTimeOriginal, exif::In::PRIMARY)
+        if let Some(dt_field) = exif_data.get_field(exif::Tag::DateTimeOriginal, exif::In::PRIMARY)
         {
             if let exif::Value::Ascii(ref vec) = dt_field.value {
                 if let Some(bytes) = vec.first() {
@@ -136,7 +135,11 @@ fn dms_to_decimal(dms: &[exif::Rational], reference: &str) -> Option<f64> {
     })
 }
 
-fn extract_gps_coord(exif_data: &exif::Exif, coord_tag: exif::Tag, ref_tag: exif::Tag) -> Option<f64> {
+fn extract_gps_coord(
+    exif_data: &exif::Exif,
+    coord_tag: exif::Tag,
+    ref_tag: exif::Tag,
+) -> Option<f64> {
     let coord_field = exif_data.get_field(coord_tag, exif::In::PRIMARY)?;
     let ref_field = exif_data.get_field(ref_tag, exif::In::PRIMARY)?;
 
@@ -150,7 +153,13 @@ fn extract_gps_coord(exif_data: &exif::Exif, coord_tag: exif::Tag, ref_tag: exif
 
 fn get_ascii_field(exif_data: &exif::Exif, tag: exif::Tag) -> Option<String> {
     let field = exif_data.get_field(tag, exif::In::PRIMARY)?;
-    Some(field.display_value().to_string().trim_matches('"').to_string())
+    Some(
+        field
+            .display_value()
+            .to_string()
+            .trim_matches('"')
+            .to_string(),
+    )
 }
 
 fn get_rational_field(exif_data: &exif::Exif, tag: exif::Tag) -> Option<f64> {
@@ -181,13 +190,9 @@ fn datetime_to_unix(dt: &exif::DateTime) -> Option<i64> {
     let (y, m) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
 
     // Days from epoch (March 1, year 0) then adjust to Unix epoch
-    let days = 365 * y + y / 4 - y / 100 + y / 400 + (m * 306 + 5) / 10 + d - 1
-        - 719468; // offset from March 1, year 0 to Jan 1, 1970
+    let days = 365 * y + y / 4 - y / 100 + y / 400 + (m * 306 + 5) / 10 + d - 1 - 719468; // offset from March 1, year 0 to Jan 1, 1970
 
-    let secs = days * 86400
-        + dt.hour as i64 * 3600
-        + dt.minute as i64 * 60
-        + dt.second as i64;
+    let secs = days * 86400 + dt.hour as i64 * 3600 + dt.minute as i64 * 60 + dt.second as i64;
 
     Some(secs)
 }

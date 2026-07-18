@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use byteburrow::{
-    config::Config, db_connect, inotify::InotifyHandler, job::JobRunner,
-    migration::Migrator, plugin::PluginRegistry,
+    config::Config, db_connect, inotify::InotifyHandler, job::JobRunner, migration::Migrator,
+    plugin::PluginRegistry,
 };
 use sea_orm_migration::MigratorTrait;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -13,8 +13,9 @@ async fn main() {
     // Initialize tracing
     tracing_subscriber::registry()
         .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "byteburrow=debug,tower_http=debug,sea_orm=info,sqlx=warn".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                "byteburrow=debug,tower_http=debug,sea_orm=info,sqlx=warn".into()
+            }),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -32,10 +33,8 @@ async fn main() {
 
     // Load classifier plugins
     let plugin_config = HashMap::new();
-    let plugins = PluginRegistry::load_from_directory(
-        Path::new(&config.plugin_dir),
-        &plugin_config,
-    );
+    let plugins =
+        PluginRegistry::load_from_directory(Path::new(&config.plugin_dir), &plugin_config);
 
     plugins.log_summary();
 
