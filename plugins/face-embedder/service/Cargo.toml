@@ -1,3 +1,5 @@
+[workspace]
+
 [package]
 name = "face-embed-service"
 version = "0.1.0"
