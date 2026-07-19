@@ -62,14 +62,23 @@ Common commands are wrapped in the root `Makefile` (`make help` for the full lis
 | `make clippy` | Lint the whole workspace (`-D warnings`) |
 | `make frontend-typecheck` | Type-check the frontend (`vue-tsc --noEmit`) |
 | `make lint` | `fmt-check` + `clippy` + `frontend-typecheck` |
-| `make test-unit` | In-module `#[cfg(test)]` unit tests |
-| `make test-integration` | Integration tests under `tests/` (currently empty — see `docs/adr/0002-code-quality-remediation.md`) |
+| `make test-unit` | In-module `#[cfg(test)]` unit tests (no DB needed) |
+| `make test-integration` | Integration tests under `tests/*.rs` — needs `DATABASE_URL` pointing at a scratch Postgres (migrations run automatically) |
 | `make test` | `test-unit` + `test-integration` |
 | `make verify` | Pre-"done" gate: `lint` + `test` |
+| `make coverage` | HTML code coverage report (`cargo-llvm-cov`) into `coverage/` |
+| `make install-hooks` | Wire up `.githooks/` (adds a `pre-push` hook that runs `test-unit`) |
 | `make migrate-up` / `make migrate-down` | Apply / roll back database migrations |
 | `make clean` | Remove build artifacts |
 
 `build-plugins` builds all `plugins/*` crates in release and symlinks the resulting `.so` files into `target/plugins/`; the `frontend-*` targets handle the frontend's `nvm use` step.
+
+### Testing & CI
+
+- **Unit tests** live next to the code they cover (`#[cfg(test)] mod tests` — see `src/auth/mod.rs`, `src/job/mod.rs`, `src/plugin/mod.rs`). They don't touch a database and run in CI on every push/MR.
+- **Integration tests** live under `tests/` (e.g. `tests/auth_integration.rs`) and exercise real DB round trips against a scratch Postgres — run locally with `docker-compose up -d db` and `DATABASE_URL=postgres://user:password@localhost:5432/cloud_db make test-integration`.
+- Run `make install-hooks` once per clone to enable a `pre-push` git hook (`.githooks/pre-push`) that runs `make test-unit` before every push.
+- GitLab CI (`.gitlab-ci.yml`) runs `fmt-check` + `clippy` + `frontend-typecheck` + `test-unit`/`test-integration` on every push and MR; a `coverage` job runs `cargo-llvm-cov` and publishes an HTML report, gated to tag pipelines (releases).
 
 ## 📦 Installation & Setup
 

@@ -37,3 +37,15 @@ A code-quality audit (DRY, KISS, test coverage, CI, docs) was run as a follow-up
 ## Consequences
 
 Items 1–3 are internal refactors with no behavior change — safe to schedule independently. Items 4–5 are the highest-leverage risk reduction (the auth and core storage code paths are the most complex and currently have the least safety net) but require real implementation time, not a mechanical pass. Item 6 brings the frontend up to the same lint-clean standard already enforced on the backend. None of these are blocking — this ADR exists so they're tracked as accepted scope rather than lost as a one-off audit comment.
+
+## Update — 2026-07-19
+
+Items 4 and 5 partially landed:
+
+- **Unit tests** added for the first three items in the item-4 priority list — `src/auth/mod.rs` (`hash_string`, `extract_token` credential-source priority), `src/plugin/mod.rs` (`MergedClassification::absorb` merge/overwrite semantics), `src/job/mod.rs` (`should_classify`, `is_image_file`) — 20 new tests, 25 unit tests total (`make test-unit`).
+- **First integration test** added: `tests/auth_integration.rs` exercises `Auth` against a real Postgres (login success/failure/disabled-user, token create/authenticate/revoke, revoke-all) — 7 tests, `make test-integration`. `storage/hash.rs::calculate_hash` (item 4's last bullet) and the `web/storage.rs` handler tests (blocked on item 1's split) are still open.
+  - Gotcha for future integration tests in this crate: don't put a shared `DatabaseConnection` behind `#[tokio::test]` (each test gets its own per-test runtime that's dropped after the test, killing the pool's background tasks and hanging any later test that reuses it). Use a single process-lifetime `tokio::runtime::Runtime` static instead — see `tests/auth_integration.rs`.
+- **CI** (item 5) added: `.gitlab-ci.yml` runs `fmt-check` + `clippy` + `frontend-typecheck` + `test-unit`/`test-integration` (with a `postgres:15` service) on every push/MR; a `coverage` job (`cargo-llvm-cov`) runs only on tag pipelines and publishes an HTML report artifact.
+- Also added, not originally scoped by this ADR but needed to make "tests run before push" actually true locally: `.githooks/pre-push` (wired up via `make install-hooks`) runs `make test-unit` before every push.
+
+Items 1–3 and 6 remain open.

@@ -261,3 +261,87 @@ fn is_image_file(path: &str) -> bool {
         None => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_image_file_recognizes_known_extensions() {
+        for ext in [
+            "jpg", "jpeg", "png", "gif", "webp", "bmp", "tiff", "tif", "heic", "heif", "avif",
+        ] {
+            assert!(is_image_file(&format!("photo.{ext}")), "ext {ext}");
+            assert!(
+                is_image_file(&format!("photo.{}", ext.to_uppercase())),
+                "uppercase ext {ext}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_image_file_rejects_non_image_extensions() {
+        assert!(!is_image_file("document.pdf"));
+        assert!(!is_image_file("archive.zip"));
+        assert!(!is_image_file("no_extension"));
+        assert!(!is_image_file(""));
+    }
+
+    #[test]
+    fn is_image_file_handles_nested_paths() {
+        assert!(is_image_file("a/b/c/photo.PNG"));
+        assert!(!is_image_file("a/b/c/readme"));
+    }
+
+    #[test]
+    fn should_classify_hash_only_never_classifies() {
+        let entry = make_entry(false);
+        assert!(!JobRunner::should_classify(&entry, ProcessMode::HashOnly));
+
+        let entry = make_entry(true);
+        assert!(!JobRunner::should_classify(&entry, ProcessMode::HashOnly));
+    }
+
+    #[test]
+    fn should_classify_auto_respects_skip_plugins_flag() {
+        let entry = make_entry(false);
+        assert!(JobRunner::should_classify(&entry, ProcessMode::Auto));
+
+        let entry = make_entry(true);
+        assert!(!JobRunner::should_classify(&entry, ProcessMode::Auto));
+    }
+
+    #[test]
+    fn should_classify_force_classify_always_classifies() {
+        let entry = make_entry(true);
+        assert!(JobRunner::should_classify(
+            &entry,
+            ProcessMode::ForceClassify
+        ));
+
+        let entry = make_entry(false);
+        assert!(JobRunner::should_classify(
+            &entry,
+            ProcessMode::ForceClassify
+        ));
+    }
+
+    fn make_entry(skip_plugins: bool) -> entry::Model {
+        let now = chrono::Utc::now().naive_utc();
+        entry::Model {
+            id: 1,
+            storage_id: 1,
+            user_id: 1,
+            group_id: 1,
+            parent_id: None,
+            path: "photo.jpg".to_string(),
+            hash: None,
+            entry_type: entry::EntryType::File,
+            notify: false,
+            skip_plugins,
+            size: 0,
+            modified_at: now,
+            created_at: now,
+        }
+    }
+}

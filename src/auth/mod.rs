@@ -362,3 +362,127 @@ pub async fn group_exists<C: ConnectionTrait>(
     let group = group::Entity::find_by_id(group_id).one(db).await?;
     Ok(group.is_some())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::Request;
+    use std::sync::{Arc, Once};
+
+    /// `Config` is a process-wide `OnceLock` — initialize it once for all
+    /// tests in this binary that need `Auth::hash_string`.
+    fn init_test_config() {
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            crate::config::Config::set(Arc::new(crate::config::Config {
+                database_url: "postgres://unused".to_string(),
+                salt: "test-salt".to_string(),
+                server_addr: "0.0.0.0:3000".to_string(),
+                thumbnail_storage: "/tmp/thumbnails".to_string(),
+                base_url: "http://localhost:3000".to_string(),
+                token_expiration_days: 30,
+                token_length: 32,
+                plugin_dir: "/etc/byteburrow/plugins".to_string(),
+                ignore_patterns: vec![],
+            }));
+        });
+    }
+
+    #[test]
+    fn hash_string_is_deterministic() {
+        init_test_config();
+        assert_eq!(Auth::hash_string("hello"), Auth::hash_string("hello"));
+    }
+
+    #[test]
+    fn hash_string_differs_for_different_input() {
+        init_test_config();
+        assert_ne!(Auth::hash_string("hello"), Auth::hash_string("world"));
+    }
+
+    #[test]
+    fn hash_string_is_not_the_plain_input() {
+        init_test_config();
+        assert_ne!(Auth::hash_string("password123"), "password123");
+    }
+
+    async fn parts_for_uri(uri: &str) -> Parts {
+        Request::builder().uri(uri).body(()).unwrap().into_parts().0
+    }
+
+    #[tokio::test]
+    async fn extract_token_from_bearer_header() {
+        let mut parts = parts_for_uri("/anything").await;
+        parts.headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer my-bearer-token".parse().unwrap(),
+        );
+
+        assert_eq!(
+            extract_token(&mut parts).await,
+            Some("my-bearer-token".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn extract_token_from_query_param() {
+        let mut parts = parts_for_uri("/files?foo=bar&token=abc123&baz=qux").await;
+
+        assert_eq!(extract_token(&mut parts).await, Some("abc123".to_string()));
+    }
+
+    #[tokio::test]
+    async fn extract_token_from_cookie() {
+        let mut parts = parts_for_uri("/anything").await;
+        parts.headers.insert(
+            axum::http::header::COOKIE,
+            "other=1; session_token=cookie-token; more=2"
+                .parse()
+                .unwrap(),
+        );
+
+        assert_eq!(
+            extract_token(&mut parts).await,
+            Some("cookie-token".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn extract_token_prefers_bearer_over_query_and_cookie() {
+        let mut parts = parts_for_uri("/anything?token=query-token").await;
+        parts.headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer bearer-token".parse().unwrap(),
+        );
+        parts.headers.insert(
+            axum::http::header::COOKIE,
+            "session_token=cookie-token".parse().unwrap(),
+        );
+
+        assert_eq!(
+            extract_token(&mut parts).await,
+            Some("bearer-token".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn extract_token_prefers_query_over_cookie() {
+        let mut parts = parts_for_uri("/anything?token=query-token").await;
+        parts.headers.insert(
+            axum::http::header::COOKIE,
+            "session_token=cookie-token".parse().unwrap(),
+        );
+
+        assert_eq!(
+            extract_token(&mut parts).await,
+            Some("query-token".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn extract_token_returns_none_when_absent() {
+        let mut parts = parts_for_uri("/anything").await;
+
+        assert_eq!(extract_token(&mut parts).await, None);
+    }
+}
