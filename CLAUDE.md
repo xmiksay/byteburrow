@@ -4,80 +4,27 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-ByteBurrow is a modern personal cloud storage and file management system built with Rust (backend) and Vue 3 (frontend). It provides file management, user/group administration, and various protocols (WebDAV, CalDAV).
+ByteBurrow is a modern personal cloud storage and file management system built with Rust (backend) and Vue 3 (frontend). It provides file management, user/group administration, various protocols (WebDAV, CalDAV), and a plugin-based file classification pipeline (EXIF, face detection/recognition, keyword extraction, color classification).
 
 ## Development Commands
 
-### Cargo Make (recommended)
+All common commands are wrapped in the root `Makefile` — run `make help` for the full list. Highlights:
 
 ```bash
-# Build and run everything (plugins + frontend + server) in release mode
-cargo make run
-
-# Build plugins + run server (no frontend build, debug mode)
-cargo make dev
-
-# Build everything for release
-cargo make build
-
-# Build plugins only
-cargo make build-plugins
-
-# Frontend dev server with hot reload
-cargo make frontend-dev
+make run              # Build and run everything (plugins + frontend + server) in release mode
+make dev              # Build plugins, run the server in debug mode (no frontend build)
+make build            # Build everything for release
+make build-plugins    # Build all plugins and symlink to target/plugins/
+make frontend-dev     # Frontend dev server with hot reload
+make lint             # cargo fmt --check + clippy -D warnings + frontend typecheck
+make test             # test-unit + test-integration
+make verify           # lint + test — run before considering a change done
+make migrate-up       # Apply pending database migrations (also runs automatically on server startup)
 ```
 
-### Backend (Rust)
+Cross-compile for Turris Omnia (ARMv7, musl): `cross build --target armv7-unknown-linux-musleabihf --release`.
 
-```bash
-# Run the main server
-cargo run --bin byteburrow
-
-# Run database migrations (also runs automatically on server startup)
-cargo run --bin byteburrow-migration up
-
-# Rollback migrations
-cargo run --bin byteburrow-migration down
-
-# Build for production
-cargo build --release
-
-# Cross-compile for Turris Omnia (ARMv7, musl)
-cross build --target armv7-unknown-linux-musleabihf --release
-```
-
-### Plugins
-
-```bash
-# Build a single plugin
-cd plugins/exif-classifier && cargo build --release
-
-# Build all plugins and symlink to target/plugins/
-cargo make build-plugins
-```
-
-### Frontend (Vue 3)
-
-```bash
-cd frontend
-
-# Use the Node version specified in .nvmrc (requires nvm)
-nvm use
-
-# Install dependencies
-npm install
-
-# Development server with hot reload
-npm run dev
-
-# Build for production
-npm run build
-
-# Preview production build
-npm run preview
-```
-
-**Note**: The frontend uses NVM (Node Version Manager) to ensure the correct Node.js version. An `.nvmrc` file is present in the `frontend/` directory (currently set to `stable`). Run `nvm use` in the frontend directory before running npm commands.
+Frontend uses **nvm** — `make frontend-*` targets handle `nvm use` automatically; if running raw `npm` commands in `frontend/`, run `nvm use` first.
 
 ### Required Environment Variables
 
@@ -90,172 +37,13 @@ Create a `.env` file in the project root with:
 - `BASE_URL` (optional): Defaults to `http://localhost:3000`
 - `TOKEN_EXPIRATION_DAYS` (optional): Defaults to 30
 - `TOKEN_LENGTH` (optional): Defaults to 32
-- `PLUGIN_DIR` (optional): Defaults to `/etc/byteburrow/plugins` (for local dev, `cargo make` sets this to `target/plugins`)
+- `PLUGIN_DIR` (optional): Defaults to `/etc/byteburrow/plugins` (`make` targets set this to `target/plugins` via `BYTEBURROW__PLUGIN_DIR`)
 
 ## Architecture
 
-### Backend Structure
+Axum HTTP layer (`src/web/`) → `Auth` extractor → handlers → `Storage` wrapper / SeaORM entities. A background job runner (`src/job/`) processes file classification through a multi-pass plugin pipeline (`src/plugin/` + `plugins/*` cdylib crates, loaded via `byteburrow-plugin-api`'s FFI contract), running concurrently with the web server via `tokio::select!`.
 
-- **`src/web/`**: Axum HTTP layer
-  - Individual route modules: `user.rs`, `group.rs`, `storage.rs`, `tag.rs`, `photo.rs`
-  - Protocol implementations: `webdav/`, `caldav/`, `carddav/`, `upnp/`
-  - WebSocket support in `ws/`
-  - OpenAPI documentation via `utoipa` + `utoipa-swagger-ui` (available at `/swagger-ui`)
-
-- **`src/auth/mod.rs`**: Authentication system
-  - `Auth` extractor for Axum handlers (supports Bearer tokens, Basic auth, and query params)
-  - Token-based authentication with expiration and activity tracking
-  - Password hashing using SHA256 + salt
-  - User session management
-
-- **`src/storage/`**: Core filesystem abstraction
-  - `Storage` wrapper for filesystem operations
-  - `DirectoryEntry` type for representing files/folders
-  - Helper modules: `content_type.rs`, `hash.rs`, `thumbnail.rs`
-  - Handles synchronization between filesystem and database state
-
-- **`src/entity/`**: SeaORM database models
-  - Core entities: `user`, `group`, `storage`, `entry`, `tag`, `token`, `photo`, `shared`
-  - `group_user`: Many-to-many relationship between groups and users
-
-- **`src/job/`**: Background job runner
-  - Asynchronous job processing with configurable concurrency (based on CPU cores)
-  - Job types: `CheckFile`, `ChangedHash`
-  - Used for thumbnail generation, file integrity checks
-  - Runs concurrently with the web server via `tokio::select!`
-
-- **`src/migration/`**: Database schema migrations
-  - SeaORM migration system
-  - Migration files follow pattern: `m{timestamp}_{description}.rs`
-
-- **`src/plugin/`**: Dynamic plugin system
-  - `PluginRegistry`: loads `.so` files from plugin directory at startup
-  - Multi-pass classification with dependency resolution between plugins
-  - Integrates with job system — plugins run during `ChangedHash` processing
-
-- **`byteburrow-plugin-api/`**: Lightweight plugin API crate (workspace member)
-  - `ClassifierPlugin` trait — implemented by all plugins
-  - `FileContext`, `ClassificationResult`, `KindFlags` — shared types
-  - FFI contract via `#[no_mangle] extern "C"` constructor
-  - No heavy dependencies (only `serde` + `serde_json`)
-
-- **`plugins/`**: Plugin implementations (each is a `cdylib` crate)
-  - `exif-classifier/`: EXIF metadata extraction (GPS, date, camera info)
-
-- **`src/config/`**: Configuration management
-  - Global singleton config loaded from environment variables
-  - Access via `Config::get()` throughout the application
-
-### Frontend Structure
-
-- **Vue 3 + TypeScript** with Vite build system
-- **Routing**: Vue Router for SPA navigation
-- **Key libraries**:
-  - `highlight.js`: Syntax highlighting for code files
-  - `marked`: Markdown parsing and rendering
-  - `lucide-vue-next`: Icon system
-- **Components**: Located in `frontend/src/components/`
-  - Reusable UI components like FileExplorer, FileViewer, UserSelect
-
-### Application Flow
-
-1. **Startup**: `src/bin/byteburrow.rs` initializes tracing, loads config, connects to database, runs pending migrations, loads plugins
-2. **Concurrent execution**: Job runner and web server run in parallel via `tokio::select!`
-3. **Request handling**: Axum router → Auth extractor → Handler → Database/Filesystem → Response
-4. **State management**: `AppState` contains DB connection, config, Jinja templates, and job sender
-5. **Background jobs**: Handlers can enqueue jobs via `JobSender` for async processing
-
-### OpenAPI / Swagger
-
-All API endpoints are annotated with `#[utoipa::path(...)]` and grouped by tags. The central `ApiDoc` derive lives in `src/web/mod.rs`.
-
-**Tag grouping:**
-
-| Tag | Description | Module |
-|-----|-------------|--------|
-| `user` | User management (login, CRUD, password) | `src/web/user.rs` |
-| `group` | Group management (CRUD) | `src/web/group.rs` |
-| `tag` | Tag management (CRUD) | `src/web/tag.rs` |
-| `storage` | Storage CRUD (list, get, create, update, delete) | `src/web/storage.rs` |
-| `file` | File content operations (show, download, update) | `src/web/storage.rs` |
-| `entry` | Entry management (create, rename, remove, list directory) | `src/web/storage.rs` |
-| `share` | Sharing operations (create, list, update, delete, share-based access) | `src/web/storage.rs` |
-| `thumbnail` | Thumbnail serving and hash trigger | `src/web/storage.rs` |
-| `photo` | Photo listing and thumbnail regeneration | `src/web/photo.rs` |
-
-**When adding a new endpoint:**
-1. Add `#[utoipa::path(..., tag = "...", ...)]` annotation to the handler
-2. Register the handler in `ApiDoc`'s `paths(...)` in `src/web/mod.rs`
-3. Register any new request/response schemas in `components(schemas(...))`
-4. If introducing a new tag, add it to the `tags(...)` list
-5. Make the handler `pub(crate)` so the macro can reference it
-
-**Swagger UI** is available at `/swagger-ui`, OpenAPI JSON at `/api-doc/openapi.json`.
-
-## Key Patterns
-
-### Authentication
-All protected routes use the `Auth` extractor. It automatically:
-- Extracts credentials from Bearer token, Basic auth, or `?token=` query param
-- Validates token/credentials against database
-- Returns authenticated user model
-- Updates token activity timestamp
-
-Admin-only routes additionally call `require_admin(&auth)`.
-
-### Database Access
-- Use SeaORM entities from `crate::entity::{user, group, storage, entry, ...}`
-- Database connection available via `State<Arc<AppState>>` in handlers
-- Access as `state.db`
-
-### Error Responses
-Use `ErrorResponse` struct from `src/web/mod.rs` for consistent error handling:
-```rust
-(StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "Message".to_string() }))
-```
-
-### File Operations
-Use `Storage` wrapper instead of direct filesystem access to maintain database consistency:
-```rust
-let storage = Storage::find_by_id(&db, storage_id).await?;
-let entries = storage.list_directory_fs(sub_path).await?;
-```
-
-### Plugin System
-Plugins are dynamic libraries (`.so`) that classify files. Each plugin implements `ClassifierPlugin` from the `byteburrow-plugin-api` crate.
-
-**Plugin trait key methods:**
-- `mime_interests()` — MIME prefixes the plugin handles (e.g. `&["image/"]`)
-- `kind_requires()` — `KindFlags` that must be set before this plugin runs
-- `custom_requires()` — custom metadata keys that must exist (for chaining)
-- `classify(&FileContext) -> Result<Option<ClassificationResult>>` — main logic
-
-**Multi-pass execution:** Plugins declare dependencies. The host runs them in iterative passes until no new plugins become eligible:
-```
-Pass 1: EXIF plugin (no requirements) → sets Kind::Photo
-Pass 2: Face detection (requires Kind::Photo) → adds custom["faces"]
-Pass 3: Face recognition (requires custom "faces") → adds custom["people"]
-```
-
-**Creating a new plugin:**
-1. Create a new crate in `plugins/` with `crate-type = ["cdylib"]`
-2. Depend on `byteburrow-plugin-api`
-3. Implement `ClassifierPlugin` trait
-4. Export constructor: `#[no_mangle] pub extern "C" fn byteburrow_create_plugin() -> *mut dyn ClassifierPlugin`
-5. Build with `cargo make build-plugins`
-
-**ABI requirement:** Host and plugins must be compiled with the same Rust compiler version and same `byteburrow-plugin-api` crate version.
-
-### Background Jobs
-Enqueue jobs via the job sender available in AppState:
-```rust
-// Auto: check if changed, then classify (respects skip_plugins flag)
-state.job_sender.send(Job::ProcessFile { storage_id, path, mode: ProcessMode::Auto }).ok();
-// ForceClassify: re-run plugins regardless of change, ignores skip_plugins
-state.job_sender.send(Job::ProcessFile { storage_id, path, mode: ProcessMode::ForceClassify }).ok();
-// HashOnly: only recalculate hash, never run plugins
-state.job_sender.send(Job::ProcessFile { storage_id, path, mode: ProcessMode::HashOnly }).ok();
-```
+Full module map, request flow, OpenAPI tag grouping, and key patterns (auth, DB access, error responses, plugin system, background jobs): **[docs/architecture.md](docs/architecture.md)**.
 
 ## Binary Targets
 
@@ -270,6 +58,10 @@ state.job_sender.send(Job::ProcessFile { storage_id, path, mode: ProcessMode::Ha
 - CORS is permissive (`CorsLayer::permissive()`) for development
 - Structured logging via `tracing` with environment-based filtering (default: `byteburrow=debug,tower_http=debug,sea_orm=info,sqlx=warn`)
 
+## Architecture Decision Records
+
+Significant, hard-to-reverse engineering decisions (plugin FFI shape, module splits, test/CI strategy, etc.) are recorded in [`docs/adr/`](docs/adr/). Check there before re-litigating a decision; add a new ADR for the next one.
+
 ## Maintaining This File
 
-This CLAUDE.md must be kept in sync with the codebase. After any design or architectural change (new modules, new API tags, changed patterns, new binary targets, etc.), update the relevant sections here before considering the task complete.
+This CLAUDE.md and `docs/architecture.md` must be kept in sync with the codebase. After any design or architectural change (new modules, new API tags, changed patterns, new binary targets, etc.), update the relevant file before considering the task complete. Use `/arch check` to detect drift and `/arch update` to repair it.

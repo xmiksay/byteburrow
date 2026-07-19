@@ -23,6 +23,13 @@ A modern, high-performance personal cloud storage and file management system bui
 - **User & Group Management**: Comprehensive tools for managing users and organizational groups.
 - **Storage Administration**: Define and manage multiple storage backend locations with specific owner/group defaults.
 
+### 🧠 Automatic Photo Classification
+Uploaded photos are classified through a multi-pass plugin pipeline (dynamically loaded `.so` plugins, see `docs/architecture.md`):
+- **EXIF extraction**: GPS, capture date, camera info.
+- **Face detection & recognition**: detects faces and matches them against known contacts.
+- **Keyword extraction**: automatic image keyword/tagging.
+- **Color classification**: dominant color tagging.
+
 ## 🛠️ Tech Stack
 
 ### Backend (Rust)
@@ -39,6 +46,30 @@ A modern, high-performance personal cloud storage and file management system bui
 - **Highlight.js**: Client-side syntax highlighting.
 - **Marked**: High-speed Markdown parsing and rendering.
 - **Vanilla CSS**: Premium, custom-designed UI with glassmorphism and modern animations.
+
+## 🛠️ Development
+
+Common commands are wrapped in the root `Makefile` (`make help` for the full list). Prefer these over raw `cargo`/`npm` invocations:
+
+| Target | Description |
+|--------|-------------|
+| `make build` | Release build (plugins + frontend + server) |
+| `make run` | Build and run everything in release mode |
+| `make dev` | Build plugins, run the server in debug mode (no frontend build) |
+| `make frontend-dev` | Frontend dev server with hot reload |
+| `make check` | Fast workspace typecheck |
+| `make fmt` / `make fmt-check` | Apply / verify rustfmt formatting |
+| `make clippy` | Lint the whole workspace (`-D warnings`) |
+| `make frontend-typecheck` | Type-check the frontend (`vue-tsc --noEmit`) |
+| `make lint` | `fmt-check` + `clippy` + `frontend-typecheck` |
+| `make test-unit` | In-module `#[cfg(test)]` unit tests |
+| `make test-integration` | Integration tests under `tests/` (currently empty — see `docs/adr/0002-code-quality-remediation.md`) |
+| `make test` | `test-unit` + `test-integration` |
+| `make verify` | Pre-"done" gate: `lint` + `test` |
+| `make migrate-up` / `make migrate-down` | Apply / roll back database migrations |
+| `make clean` | Remove build artifacts |
+
+`build-plugins` builds all `plugins/*` crates in release and symlinks the resulting `.so` files into `target/plugins/`; the `frontend-*` targets handle the frontend's `nvm use` step.
 
 ## 📦 Installation & Setup
 
@@ -127,7 +158,10 @@ The system is designed with a clear separation of concerns:
 - **`src/web/`**: Axum routers and handlers for users, groups, and storage.
 - **`src/storage/`**: Core logic for filesystem interaction, including `StorageWrapper` for atomic operations.
 - **`src/entity/`**: Database models and shared types.
+- **`src/plugin/` + `plugins/*`**: dynamically-loaded classification pipeline (EXIF, face detection/recognition, keyword extraction, color classification).
 - **`frontend/src/components/`**: Reusable Vue components (FileExplorer, FileViewer, UserSelect, etc.).
+
+Full module map, request flow, and key patterns: [`docs/architecture.md`](docs/architecture.md). Engineering rules and dev commands: [`CLAUDE.md`](CLAUDE.md). Architecture decisions: [`docs/adr/`](docs/adr/).
 
 ---
 *Created with ❤️ by Martin Miksanik*
