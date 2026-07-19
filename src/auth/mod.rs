@@ -60,7 +60,10 @@ impl IntoResponse for AuthError {
         if status == StatusCode::UNAUTHORIZED {
             (
                 status,
-                [(axum::http::header::WWW_AUTHENTICATE, "Basic realm=\"Cloud\"")],
+                [(
+                    axum::http::header::WWW_AUTHENTICATE,
+                    "Basic realm=\"Cloud\"",
+                )],
                 message,
             )
                 .into_response()

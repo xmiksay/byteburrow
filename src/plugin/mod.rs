@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use byteburrow_plugin_api::{
-    ClassifierPlugin, ClassificationResult, FileContext, PluginConfig,
-    PluginConstructor, PLUGIN_CONSTRUCTOR_SYMBOL, API_VERSION_MAJOR,
+    ClassificationResult, ClassifierPlugin, FileContext, PluginConfig, PluginConstructor,
+    API_VERSION_MAJOR, PLUGIN_CONSTRUCTOR_SYMBOL,
 };
 use libloading::{Library, Symbol};
 use tracing::{error, info, warn};

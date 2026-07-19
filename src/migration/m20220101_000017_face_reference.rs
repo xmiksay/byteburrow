@@ -19,41 +19,17 @@ impl MigrationTrait for Migration {
                             .primary_key(),
                     )
                     .col(ColumnDef::new(FaceReference::ContactId).integer())
-                    .col(
-                        ColumnDef::new(FaceReference::Hash)
-                            .binary()
-                            .not_null(),
-                    )
+                    .col(ColumnDef::new(FaceReference::Hash).binary().not_null())
                     .col(
                         ColumnDef::new(FaceReference::FaceIndex)
                             .small_integer()
                             .not_null(),
                     )
-                    .col(
-                        ColumnDef::new(FaceReference::BboxX)
-                            .integer()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(FaceReference::BboxY)
-                            .integer()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(FaceReference::BboxW)
-                            .integer()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(FaceReference::BboxH)
-                            .integer()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(FaceReference::Embedding)
-                            .binary()
-                            .not_null(),
-                    )
+                    .col(ColumnDef::new(FaceReference::BboxX).integer().not_null())
+                    .col(ColumnDef::new(FaceReference::BboxY).integer().not_null())
+                    .col(ColumnDef::new(FaceReference::BboxW).integer().not_null())
+                    .col(ColumnDef::new(FaceReference::BboxH).integer().not_null())
+                    .col(ColumnDef::new(FaceReference::Embedding).binary().not_null())
                     .col(
                         ColumnDef::new(FaceReference::Confirmed)
                             .boolean()

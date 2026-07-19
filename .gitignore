@@ -1,4 +1,5 @@
 /target
+plugins/face-embedder/service/target
 /data
 *.log
 .env

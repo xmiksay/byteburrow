@@ -21,12 +21,7 @@ impl MigrationTrait for Migration {
             .alter_table(
                 Table::alter()
                     .table(Entry::Table)
-                    .add_column(
-                        ColumnDef::new(Entry::Kind)
-                            .integer()
-                            .not_null()
-                            .default(0),
-                    )
+                    .add_column(ColumnDef::new(Entry::Kind).integer().not_null().default(0))
                     .to_owned(),
             )
             .await

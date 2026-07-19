@@ -21,12 +21,10 @@ impl Storage {
         let normalized_path = sub_path.trim_matches('/').to_string();
         let full_path = self.get_full_path(&normalized_path);
 
-        let fs_modified = tokio::fs::metadata(&full_path)
-            .await?
-            .modified()
-            .map(chrono::DateTime::<chrono::Utc>::from)
-            .unwrap()
-            .naive_utc();
+        let fs_modified = chrono::DateTime::<chrono::Utc>::from(
+            tokio::fs::metadata(&full_path).await?.modified()?,
+        )
+        .naive_utc();
 
         let model = self.ensure_entry(db, sub_path).await?;
 

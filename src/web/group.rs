@@ -1,7 +1,7 @@
 use crate::auth::Auth;
 use crate::entity::group;
 use crate::web::{
-    conflict, not_found, require_admin, save_or_err, group_name_taken, ApiError, AppState,
+    conflict, group_name_taken, not_found, require_admin, save_or_err, ApiError, AppState,
     ErrorResponse,
 };
 use axum::{
@@ -227,7 +227,9 @@ async fn delete_group_handler(
         .await?
         .ok_or_else(|| not_found("Group", group_id))?;
 
-    group::Entity::delete_by_id(group_id).exec(&state.db).await?;
+    group::Entity::delete_by_id(group_id)
+        .exec(&state.db)
+        .await?;
 
     Ok(Json(serde_json::json!({
         "message": format!("Group '{}' deleted successfully", group.name),

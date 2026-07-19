@@ -17,18 +17,12 @@ mod m20220101_000015_storage_ignore_patterns;
 mod m20220101_000016_contact;
 mod m20220101_000017_face_reference;
 
-// Plugin migrations (feature-gated)
-#[cfg(feature = "plugin-contactlist")]
-use crate::plugins::contactlist::ContactListMigrator;
-
 pub struct Migrator;
 
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-        #[allow(unused_mut)]
-        let mut migrations: Vec<Box<dyn MigrationTrait>> = vec![
-            // Core migrations
+        vec![
             Box::new(m20220101_000001_user::Migration),
             Box::new(m20220101_000002_group::Migration),
             Box::new(m20220101_000003_group_user::Migration),
@@ -45,14 +39,6 @@ impl MigratorTrait for Migrator {
             Box::new(m20220101_000015_storage_ignore_patterns::Migration),
             Box::new(m20220101_000016_contact::Migration),
             Box::new(m20220101_000017_face_reference::Migration),
-        ];
-
-        // Plugin migrations (conditionally included based on features)
-        #[cfg(feature = "plugin-contactlist")]
-        {
-            migrations.extend(ContactListMigrator::migrations());
-        }
-
-        migrations
+        ]
     }
 }

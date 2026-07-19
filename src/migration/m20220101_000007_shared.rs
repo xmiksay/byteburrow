@@ -20,7 +20,12 @@ impl MigrationTrait for Migration {
                     )
                     .col(ColumnDef::new(Shared::PathId).integer().not_null())
                     .col(ColumnDef::new(Shared::Token).string())
-                    .col(ColumnDef::new(Shared::CanWrite).boolean().not_null().default(false))
+                    .col(
+                        ColumnDef::new(Shared::CanWrite)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
                     .col(
                         ColumnDef::new(Shared::UserIds)
                             .array(ColumnType::Integer)
