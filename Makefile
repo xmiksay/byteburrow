@@ -4,7 +4,7 @@ export BYTEBURROW__PLUGIN_DIR ?= target/plugins
 .DEFAULT_GOAL := help
 .PHONY: help build run dev build-plugins frontend-install frontend-dev frontend-build \
         check fmt fmt-check clippy lint frontend-typecheck \
-        test test-unit test-integration verify \
+        test test-unit test-integration verify coverage install-hooks \
         migrate-up migrate-down clean
 
 help: ## Show this help
@@ -66,23 +66,28 @@ frontend-typecheck: frontend-install ## Type-check the frontend (vue-tsc --noEmi
 lint: fmt-check clippy frontend-typecheck ## fmt-check + clippy + frontend typecheck
 
 ## --- Tests ---
-## NOTE: test-integration is currently a no-op — no tests/ directory exists yet
-## (see docs/adr/0002-code-quality-remediation.md, item 4). Add integration
-## tests under tests/ and this target will pick them up automatically.
 
 test-unit: ## Unit tests (in-module #[cfg(test)])
 	cargo test --workspace --lib --bins
 
-test-integration: ## Integration tests (tests/ dir — currently empty)
+test-integration: ## Integration tests (tests/*.rs — needs DATABASE_URL, e.g. via docker-compose)
 	@if ls tests/*.rs >/dev/null 2>&1; then \
 		cargo test --workspace --test '*'; \
 	else \
-		echo "No integration tests yet (tests/ is empty) — see docs/adr/0002-code-quality-remediation.md"; \
+		echo "No integration tests yet (tests/ is empty)"; \
 	fi
 
 test: test-unit test-integration ## All tests
 
 verify: lint test ## Pre-"done" gate: lint + all tests
+
+coverage: ## Generate an HTML coverage report (cargo-llvm-cov) into coverage/
+	cargo llvm-cov --workspace --lib --bins --html --output-dir coverage
+	@echo "Report: coverage/html/index.html"
+
+install-hooks: ## Wire up the repo's git hooks (pre-push: run tests before pushing)
+	git config core.hooksPath .githooks
+	@echo "Git hooks installed (core.hooksPath=.githooks)"
 
 ## --- Database ---
 

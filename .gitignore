@@ -4,3 +4,5 @@ plugins/face-embedder/service/target
 *.log
 .env
 recognition_resnet27.onnx
+/coverage
+coverage-summary.txt

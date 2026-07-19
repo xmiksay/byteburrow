@@ -1,0 +1,8 @@
+#!/bin/sh
+# Runs before `git push`. Installed via `make install-hooks`.
+# Keeps unit tests (fast, no DB) as a hard local gate; skips integration
+# tests here since they need a live Postgres (DATABASE_URL) — those run in CI.
+set -e
+
+echo "pre-push: running unit tests..."
+make test-unit
