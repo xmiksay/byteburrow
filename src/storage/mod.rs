@@ -470,7 +470,7 @@ impl Storage {
             .ok()
             .and_then(|meta| meta.modified().ok())
             .map(|t| chrono::DateTime::<chrono::Utc>::from(t).naive_utc())
-            .unwrap();
+            .unwrap_or_else(|| Utc::now().naive_utc());
 
         let active = entry::ActiveModel {
             storage_id: Set(self.model.id),
@@ -543,7 +543,7 @@ impl Storage {
                 .modified()
                 .ok()
                 .map(|t| chrono::DateTime::<chrono::Utc>::from(t).naive_utc())
-                .unwrap()),
+                .unwrap_or_else(|| Utc::now().naive_utc())),
             created_at: Set(Utc::now().naive_utc()),
             ..Default::default()
         };

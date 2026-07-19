@@ -98,7 +98,12 @@ impl JobRunner {
                 JOB_THREAD_NICE
             );
             while let Some(job) = self.rx.recv().await {
-                let permit = self.semaphore.clone().acquire_owned().await.unwrap();
+                let permit = self
+                    .semaphore
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .expect("semaphore is never closed");
                 let db = self.db.clone();
                 let plugins = self.plugins.clone();
                 tokio::spawn(async move {
