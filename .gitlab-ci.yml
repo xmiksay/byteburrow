@@ -18,6 +18,8 @@ fmt-check:
   stage: lint
   image: rust:1-bookworm
   <<: *rust-cache
+  before_script:
+    - rustup component add rustfmt
   script:
     - cargo fmt --all -- --check
 
@@ -25,6 +27,8 @@ clippy:
   stage: lint
   image: rust:1-bookworm
   <<: *rust-cache
+  before_script:
+    - rustup component add clippy
   script:
     - cargo clippy --workspace --all-targets -- -D warnings
 
