@@ -21,7 +21,7 @@ fmt-check:
   before_script:
     - rustup component add rustfmt
   script:
-    - cargo fmt --all -- --check
+    - make fmt-check
 
 clippy:
   stage: lint
@@ -30,7 +30,7 @@ clippy:
   before_script:
     - rustup component add clippy
   script:
-    - cargo clippy --workspace --all-targets -- -D warnings
+    - make clippy
 
 frontend-typecheck:
   stage: lint
@@ -69,6 +69,7 @@ coverage:
     - rustup component add llvm-tools-preview
     - cargo install cargo-llvm-cov --locked
   script:
+    - make frontend-dist-stub
     - cargo llvm-cov --workspace --lib --bins --html --output-dir coverage
     - cargo llvm-cov --workspace --lib --bins --summary-only > coverage-summary.txt
     - cat coverage-summary.txt
