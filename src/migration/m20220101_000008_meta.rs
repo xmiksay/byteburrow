@@ -11,12 +11,7 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(Meta::Table)
                     .if_not_exists()
-                    .col(
-                        ColumnDef::new(Meta::Hash)
-                            .binary()
-                            .not_null()
-                            .primary_key(),
-                    )
+                    .col(ColumnDef::new(Meta::Hash).binary().not_null().primary_key())
                     .col(
                         ColumnDef::new(Meta::Tags)
                             .array(ColumnType::Integer)

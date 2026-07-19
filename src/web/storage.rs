@@ -19,7 +19,10 @@ use axum::{
     routing::{get, post, put},
     Json, Router,
 };
-use sea_orm::{sea_query::Expr, ActiveModelTrait, ColumnTrait, Condition, EntityTrait, PaginatorTrait, QueryFilter, Set};
+use sea_orm::{
+    sea_query::Expr, ActiveModelTrait, ColumnTrait, Condition, EntityTrait, PaginatorTrait,
+    QueryFilter, Set,
+};
 use serde::Deserialize;
 use std::sync::Arc;
 use tokio::fs;
@@ -212,7 +215,10 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/:id/raw/*path", get(download_file_handler))
         .route("/:id/create/*path", post(create_entry_handler))
         .route("/:id/rename/*path", post(rename_entry_handler))
-        .route("/:id/remove/*path", axum::routing::delete(remove_entry_handler))
+        .route(
+            "/:id/remove/*path",
+            axum::routing::delete(remove_entry_handler),
+        )
         .route("/:id/hash/*path", post(trigger_hash_handler))
         .route("/:id/share/*path", get(list_shares_handler))
         .route("/:id/share/*path", post(share_entry_handler))
@@ -267,8 +273,7 @@ pub(crate) async fn get_meta_handler(
     AxumPath(hash): AxumPath<String>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<MetaResponse>, ApiError> {
-    let hash_bytes =
-        hex::decode(&hash).map_err(|_| bad_request("Invalid hex hash format"))?;
+    let hash_bytes = hex::decode(&hash).map_err(|_| bad_request("Invalid hex hash format"))?;
 
     let meta = meta::Entity::find_by_id(hash_bytes)
         .one(&state.db)
@@ -656,8 +661,8 @@ async fn directory_index_impl(
 
     dispatch_hash_jobs(&state, &entries);
 
-    let html = generate_directory_index(&state, storage_id, normalized_path, &entries)
-        .map_err(|e| {
+    let html =
+        generate_directory_index(&state, storage_id, normalized_path, &entries).map_err(|e| {
             tracing::error!("Template error: {}", e);
             internal("Internal server error")
         })?;
@@ -743,7 +748,9 @@ async fn serve_file_with_content_type(
     }
 
     if full_path.is_dir() {
-        return Err(bad_request(format!("Requested path is a directory: {path}")));
+        return Err(bad_request(format!(
+            "Requested path is a directory: {path}"
+        )));
     }
 
     let content_type = match forced_content_type {
@@ -1191,10 +1198,7 @@ pub(crate) async fn list_shares_with_me_handler(
         .filter(
             Condition::any()
                 .add(Expr::cust_with_expr("$1 = ANY(user_ids)", user_id))
-                .add(Expr::cust_with_expr(
-                    "group_ids && $1",
-                    user_groups.clone(),
-                )),
+                .add(Expr::cust_with_expr("group_ids && $1", user_groups.clone())),
         )
         .all(&state.db)
         .await?;
@@ -1440,9 +1444,8 @@ async fn get_share_context(
 
     // Verify access.
     if looked_up_by_id {
-        let auth_val = auth.ok_or_else(|| {
-            unauthorized_msg("Authentication required for share access by ID")
-        })?;
+        let auth_val =
+            auth.ok_or_else(|| unauthorized_msg("Authentication required for share access by ID"))?;
         verify_share_access(auth_val, &share, &state.db).await?;
     } else if share.token.is_none() {
         return Err(not_found_msg("Invalid share token"));
@@ -1544,8 +1547,7 @@ async fn share_list_impl(
     sub_path: String,
     state: Arc<AppState>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let (share, entry_model, storage) =
-        get_share_context(&share_id, auth.as_ref(), &state).await?;
+    let (share, entry_model, storage) = get_share_context(&share_id, auth.as_ref(), &state).await?;
 
     let base_path = entry_model.path.trim_matches('/');
     let sub_path_clean = sub_path.trim_matches('/');
@@ -1735,8 +1737,7 @@ pub(crate) async fn share_update_handler(
     State(state): State<Arc<AppState>>,
     body: axum::body::Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
-    let (share, entry_model, storage) =
-        get_share_context(&share_id, auth.as_ref(), &state).await?;
+    let (share, entry_model, storage) = get_share_context(&share_id, auth.as_ref(), &state).await?;
 
     if !share.can_write {
         return Err(forbidden("This share does not allow write access"));
@@ -1777,8 +1778,7 @@ pub(crate) async fn share_create_handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<CreateEntryRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let (share, entry_model, storage) =
-        get_share_context(&share_id, auth.as_ref(), &state).await?;
+    let (share, entry_model, storage) = get_share_context(&share_id, auth.as_ref(), &state).await?;
 
     if !share.can_write {
         return Err(forbidden("This share does not allow write access"));
@@ -1830,8 +1830,7 @@ pub(crate) async fn share_rename_handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<RenameEntryRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let (share, entry_model, storage) =
-        get_share_context(&share_id, auth.as_ref(), &state).await?;
+    let (share, entry_model, storage) = get_share_context(&share_id, auth.as_ref(), &state).await?;
 
     if !share.can_write {
         return Err(forbidden("This share does not allow write access"));
@@ -1872,8 +1871,7 @@ pub(crate) async fn share_remove_handler(
     AxumPath((share_id, path)): AxumPath<(String, String)>,
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let (share, entry_model, storage) =
-        get_share_context(&share_id, auth.as_ref(), &state).await?;
+    let (share, entry_model, storage) = get_share_context(&share_id, auth.as_ref(), &state).await?;
 
     if !share.can_write {
         return Err(forbidden("This share does not allow write access"));

@@ -78,41 +78,24 @@ pub enum ApiError {
     /// A database error (logged, maps to 500 Internal Server Error).
     Db(sea_orm::DbErr),
     /// An entity lookup returned no row (404 Not Found).
-    NotFound {
-        entity: &'static str,
-        id: i32,
-    },
+    NotFound { entity: &'static str, id: i32 },
     /// A 404 with a fully custom message (e.g. "Photo not found").
-    NotFoundMsg {
-        msg: String,
-    },
+    NotFoundMsg { msg: String },
     /// A conflicting resource already exists (409 Conflict).
-    Conflict {
-        msg: String,
-    },
+    Conflict { msg: String },
     /// The request was malformed / invalid (400 Bad Request).
-    BadRequest {
-        msg: String,
-    },
+    BadRequest { msg: String },
     /// The caller is not permitted to perform the action (403 Forbidden).
-    Forbidden {
-        msg: String,
-    },
+    Forbidden { msg: String },
     /// The caller must authenticate to perform the action (401 Unauthorized).
     Unauthorized,
     /// The caller must authenticate; carries a specific message body
     /// (401 Unauthorized + WWW-Authenticate header).
-    UnauthorizedMsg {
-        msg: String,
-    },
+    UnauthorizedMsg { msg: String },
     /// The requested share has expired (410 Gone).
-    Gone {
-        msg: String,
-    },
+    Gone { msg: String },
     /// Any other internal failure (500 Internal Server Error).
-    Internal {
-        msg: String,
-    },
+    Internal { msg: String },
 }
 
 impl IntoResponse for ApiError {
@@ -131,15 +114,12 @@ impl IntoResponse for ApiError {
             ApiError::NotFoundMsg { msg } => (StatusCode::NOT_FOUND, msg.clone()),
             ApiError::Conflict { msg } => (StatusCode::CONFLICT, msg.clone()),
             ApiError::BadRequest { msg } => (StatusCode::BAD_REQUEST, msg.clone()),
-            ApiError::Forbidden { msg } => {
-                (StatusCode::FORBIDDEN, msg.clone())
-            }
-            ApiError::Unauthorized => {
-                (StatusCode::UNAUTHORIZED, "Authentication required".to_string())
-            }
-            ApiError::UnauthorizedMsg { msg } => {
-                (StatusCode::UNAUTHORIZED, msg.clone())
-            }
+            ApiError::Forbidden { msg } => (StatusCode::FORBIDDEN, msg.clone()),
+            ApiError::Unauthorized => (
+                StatusCode::UNAUTHORIZED,
+                "Authentication required".to_string(),
+            ),
+            ApiError::UnauthorizedMsg { msg } => (StatusCode::UNAUTHORIZED, msg.clone()),
             ApiError::Gone { msg } => (StatusCode::GONE, msg.clone()),
             ApiError::Internal { msg } => {
                 tracing::error!("Internal error: {msg}");
@@ -163,9 +143,7 @@ impl IntoResponse for ApiError {
 impl From<sea_orm::DbErr> for ApiError {
     fn from(e: sea_orm::DbErr) -> Self {
         if matches!(e, sea_orm::DbErr::RecordNotFound(_)) {
-            ApiError::NotFoundMsg {
-                msg: e.to_string(),
-            }
+            ApiError::NotFoundMsg { msg: e.to_string() }
         } else {
             ApiError::Db(e)
         }
@@ -315,38 +293,25 @@ pub fn require_admin(auth: &Auth) -> Result<(), ApiError> {
 }
 
 /// Helper function to verify a user exists by ID
-pub async fn require_user_exists(
-    user_id: i32,
-    db: &DatabaseConnection,
-) -> Result<(), ApiError> {
+pub async fn require_user_exists(user_id: i32, db: &DatabaseConnection) -> Result<(), ApiError> {
     let exists = crate::auth::user_exists(user_id, db).await?;
     if !exists {
-        return Err(bad_request(format!(
-            "User with id {user_id} not found"
-        )));
+        return Err(bad_request(format!("User with id {user_id} not found")));
     }
     Ok(())
 }
 
 /// Helper function to verify a group exists by ID
-pub async fn require_group_exists(
-    group_id: i32,
-    db: &DatabaseConnection,
-) -> Result<(), ApiError> {
+pub async fn require_group_exists(group_id: i32, db: &DatabaseConnection) -> Result<(), ApiError> {
     let exists = crate::auth::group_exists(group_id, db).await?;
     if !exists {
-        return Err(bad_request(format!(
-            "Group with id {group_id} not found"
-        )));
+        return Err(bad_request(format!("Group with id {group_id} not found")));
     }
     Ok(())
 }
 
 /// Load all group ids the given user belongs to.
-pub async fn user_group_ids(
-    db: &DatabaseConnection,
-    user_id: i32,
-) -> Result<Vec<i32>, ApiError> {
+pub async fn user_group_ids(db: &DatabaseConnection, user_id: i32) -> Result<Vec<i32>, ApiError> {
     use crate::entity::group_user;
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 

@@ -1,9 +1,9 @@
 pub mod contact;
 pub mod entry;
 pub mod face_reference;
-pub mod meta;
 pub mod group;
 pub mod group_user;
+pub mod meta;
 pub mod photo;
 pub mod shared;
 pub mod storage;

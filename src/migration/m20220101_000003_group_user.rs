@@ -20,7 +20,12 @@ impl MigrationTrait for Migration {
                     )
                     .col(ColumnDef::new(GroupUser::UserId).integer().not_null())
                     .col(ColumnDef::new(GroupUser::GroupId).integer().not_null())
-                    .col(ColumnDef::new(GroupUser::Admin).boolean().not_null().default(false))
+                    .col(
+                        ColumnDef::new(GroupUser::Admin)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
                     .foreign_key(
                         ForeignKey::create()
                             .name("fk_group_user_user")
