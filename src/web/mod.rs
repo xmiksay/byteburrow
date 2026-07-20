@@ -334,6 +334,13 @@ pub async fn user_group_ids(db: &DatabaseConnection, user_id: i32) -> Result<Vec
 ///   or whose `group_ids` intersects the user's groups, referencing any entry
 ///   within this storage.
 ///
+/// This only establishes that the user has *some* connection to the storage
+/// (e.g. for metadata/listing purposes) — a share only entitles its holder to
+/// the shared entry's own subtree, not the whole storage. Handlers that serve
+/// or mutate content at a specific path must use [`require_storage_path_access`]
+/// or [`require_storage_path_write_access`] instead, which enforce that
+/// scoping.
+///
 /// Use this on every storage file/entry handler to prevent IDOR. Returns `Ok`
 /// on success; returns [`ApiError::Forbidden`] on denial.
 pub async fn require_storage_access(
@@ -413,6 +420,127 @@ async fn has_share_for_storage(
         .await?;
 
     for share in shares {
+        if share.user_ids.contains(&user_id) {
+            return Ok(true);
+        }
+        if share.group_ids.iter().any(|g| groups.contains(g)) {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+/// Authorization check for accessing a specific path within a storage
+/// (read: browsing/downloading). Unlike [`require_storage_access`], a
+/// share only grants access to the shared entry's own subtree, not the
+/// whole storage.
+pub async fn require_storage_path_access(
+    auth: &Auth,
+    storage: &crate::entity::storage::Model,
+    path: &str,
+    db: &DatabaseConnection,
+) -> Result<(), ApiError> {
+    require_storage_path_access_impl(auth, storage, path, false, db).await
+}
+
+/// Authorization check for mutating a specific path within a storage
+/// (create/rename/remove/update content). Same subtree scoping as
+/// [`require_storage_path_access`], plus the share must have `can_write`.
+pub async fn require_storage_path_write_access(
+    auth: &Auth,
+    storage: &crate::entity::storage::Model,
+    path: &str,
+    db: &DatabaseConnection,
+) -> Result<(), ApiError> {
+    require_storage_path_access_impl(auth, storage, path, true, db).await
+}
+
+async fn require_storage_path_access_impl(
+    auth: &Auth,
+    storage: &crate::entity::storage::Model,
+    path: &str,
+    require_write: bool,
+    db: &DatabaseConnection,
+) -> Result<(), ApiError> {
+    // Admins can access everything.
+    if auth.user.admin {
+        return Ok(());
+    }
+    let user_id = auth.user.id;
+
+    // Direct ownership and default-group membership grant full read/write
+    // access to the whole storage, regardless of shares.
+    if is_owner(storage, user_id) {
+        return Ok(());
+    }
+    let groups = user_group_ids(db, user_id).await?;
+    if groups.contains(&storage.default_group) {
+        return Ok(());
+    }
+
+    if has_share_for_path(db, storage.id, path, user_id, &groups, require_write).await? {
+        return Ok(());
+    }
+
+    Err(forbidden("Access denied to this path"))
+}
+
+/// The ordered list of ancestor paths of `path`, from the storage root
+/// (`""`) down to `path` itself, e.g. `"a/b/c"` -> `["", "a", "a/b", "a/b/c"]`.
+fn path_prefixes(path: &str) -> Vec<String> {
+    let normalized = path.trim_matches('/');
+    let mut prefixes = vec![String::new()];
+    let mut acc = String::new();
+    for segment in normalized.split('/').filter(|s| !s.is_empty()) {
+        if !acc.is_empty() {
+            acc.push('/');
+        }
+        acc.push_str(segment);
+        prefixes.push(acc.clone());
+    }
+    prefixes
+}
+
+/// There is a share, on an entry that is `path` itself or an ancestor
+/// directory of `path`, whose `user_ids` contains the user or whose
+/// `group_ids` intersects `groups`. When `require_write` is set, only
+/// shares with `can_write` count.
+async fn has_share_for_path(
+    db: &DatabaseConnection,
+    storage_id: i32,
+    path: &str,
+    user_id: i32,
+    groups: &[i32],
+    require_write: bool,
+) -> Result<bool, ApiError> {
+    use crate::entity::{entry, shared};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    // Entries in this storage whose path is an ancestor of (or equal to)
+    // the requested path — i.e. the requested path lies within their subtree.
+    let entry_ids: Vec<i32> = entry::Entity::find()
+        .filter(entry::Column::StorageId.eq(storage_id))
+        .filter(entry::Column::Path.is_in(path_prefixes(path)))
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|e| e.id)
+        .collect();
+
+    if entry_ids.is_empty() {
+        return Ok(false);
+    }
+
+    let shares = shared::Entity::find()
+        .filter(shared::Column::PathId.is_in(entry_ids))
+        .all(db)
+        .await?;
+
+    for share in shares {
+        if require_write && !share.can_write {
+            continue;
+        }
         if share.user_ids.contains(&user_id) {
             return Ok(true);
         }
