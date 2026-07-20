@@ -450,7 +450,7 @@ async fn create_storage_handler(
     params(("id" = i32, Path, description = "Storage ID")),
     responses(
         (status = 200, description = "Storage found", body = StorageResponse),
-        (status = 403, description = "Admin access required", body = ErrorResponse),
+        (status = 403, description = "Access denied to this storage", body = ErrorResponse),
         (status = 404, description = "Storage not found", body = ErrorResponse),
     ),
     security(("bearer" = []))
@@ -461,12 +461,12 @@ async fn get_storage_handler(
     AxumPath(storage_id): AxumPath<i32>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<StorageResponse>, ApiError> {
-    require_admin(&auth)?;
-
     let storage = storage::Entity::find_by_id(storage_id)
         .one(&state.db)
         .await?
         .ok_or_else(|| not_found("Storage", storage_id))?;
+
+    require_storage_access(&auth, &storage, &state.db).await?;
 
     Ok(Json(StorageResponse::from(storage)))
 }
@@ -613,27 +613,36 @@ async fn delete_storage_handler(
     })))
 }
 
-/// List all storages endpoint
+/// List storages the caller can access (owner, group member, share recipient,
+/// or admin — mirrors `require_storage_access`) endpoint
 /// GET /api/storage
 #[utoipa::path(
     get,
     path = "/api/storage",
     tag = "storage",
     responses(
-        (status = 200, description = "List of all storages", body = Vec<StorageResponse>),
+        (status = 200, description = "List of accessible storages", body = Vec<StorageResponse>),
     ),
     security(("bearer" = []))
 )]
-#[instrument(skip(state, _auth))]
+#[instrument(skip(state, auth))]
 async fn list_storages_handler(
-    _auth: Auth,
+    auth: Auth,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<StorageResponse>>, ApiError> {
     let storages = storage::Entity::find().all(&state.db).await?;
 
-    Ok(Json(
-        storages.into_iter().map(StorageResponse::from).collect(),
-    ))
+    let mut accessible = Vec::with_capacity(storages.len());
+    for storage in storages {
+        if require_storage_access(&auth, &storage, &state.db)
+            .await
+            .is_ok()
+        {
+            accessible.push(StorageResponse::from(storage));
+        }
+    }
+
+    Ok(Json(accessible))
 }
 
 // ---------------------------------------------------------------------------
