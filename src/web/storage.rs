@@ -177,6 +177,46 @@ async fn detect_content_type(full_path: &std::path::Path) -> &'static str {
     }
 }
 
+/// Map a path-resolution [`io::Error`] (from `resolve_safe_path*`) to an
+/// `ApiError`: `..` traversal escapes surface as 400, missing files as 404.
+fn map_path_err(e: std::io::Error, path: &str) -> ApiError {
+    match e.kind() {
+        std::io::ErrorKind::NotFound => not_found_msg(format!("File not found: {path}")),
+        std::io::ErrorKind::PermissionDenied => bad_request(format!("Invalid path: {path}")),
+        _ => internal(format!("Error accessing path '{path}': {e}")),
+    }
+}
+
+/// Verify the caller may read content-addressed metadata for `hash`.
+///
+/// Meta rows are content-addressed and not owned directly, so access is granted
+/// when the user can access at least one storage holding an entry with this
+/// hash. Admins always pass.
+async fn require_hash_access(auth: &Auth, hash: &[u8], state: &AppState) -> Result<(), ApiError> {
+    if auth.user.admin {
+        return Ok(());
+    }
+
+    let entries = entry::Entity::find()
+        .filter(entry::Column::Hash.eq(hash.to_vec()))
+        .all(&state.db)
+        .await?;
+
+    for e in entries {
+        let storage = StorageWrapper::find_by_id(&state.db, e.storage_id)
+            .await
+            .map_err(|err| storage_lookup_err(err, e.storage_id))?;
+        if require_storage_access(auth, &storage.model, &state.db)
+            .await
+            .is_ok()
+        {
+            return Ok(());
+        }
+    }
+
+    Err(forbidden("Access denied to this content"))
+}
+
 /// Build a fully-qualified path under a share's base entry.
 fn join_share_path(base_path: &str, sub_path: &str) -> String {
     let base = base_path.trim_matches('/');
@@ -267,13 +307,15 @@ pub fn router() -> Router<Arc<AppState>> {
     ),
     security(("bearer" = []))
 )]
-#[instrument(skip(_auth, state))]
+#[instrument(skip(auth, state))]
 pub(crate) async fn get_meta_handler(
-    _auth: Auth,
+    auth: Auth,
     AxumPath(hash): AxumPath<String>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<MetaResponse>, ApiError> {
     let hash_bytes = hex::decode(&hash).map_err(|_| bad_request("Invalid hex hash format"))?;
+
+    require_hash_access(&auth, &hash_bytes, &state).await?;
 
     let meta = meta::Entity::find_by_id(hash_bytes)
         .one(&state.db)
@@ -686,14 +728,14 @@ async fn directory_index_impl(
     ),
     security(("bearer" = []))
 )]
-#[instrument(skip(state, _auth, req))]
+#[instrument(skip(state, auth, req))]
 pub(crate) async fn get_file_content_handler(
-    _auth: Auth,
+    auth: Auth,
     AxumPath((storage_id, path)): AxumPath<(i32, String)>,
     State(state): State<Arc<AppState>>,
     req: Request<Body>,
 ) -> Result<impl IntoResponse, ApiError> {
-    serve_file_with_content_type(storage_id, path, state, req, None).await
+    serve_file_with_content_type(storage_id, path, state, req, None, &auth).await
 }
 
 /// Download file as octet-stream
@@ -712,9 +754,9 @@ pub(crate) async fn get_file_content_handler(
     ),
     security(("bearer" = []))
 )]
-#[instrument(skip(state, _auth, req))]
+#[instrument(skip(state, auth, req))]
 pub(crate) async fn download_file_handler(
-    _auth: Auth,
+    auth: Auth,
     AxumPath((storage_id, path)): AxumPath<(i32, String)>,
     State(state): State<Arc<AppState>>,
     req: Request<Body>,
@@ -725,6 +767,7 @@ pub(crate) async fn download_file_handler(
         state,
         req,
         Some("application/octet-stream"),
+        &auth,
     )
     .await
 }
@@ -736,16 +779,19 @@ async fn serve_file_with_content_type(
     state: Arc<AppState>,
     req: Request<Body>,
     forced_content_type: Option<&'static str>,
+    auth: &Auth,
 ) -> Result<impl IntoResponse, ApiError> {
     let storage = StorageWrapper::find_by_id(&state.db, storage_id)
         .await
         .map_err(|e| storage_lookup_err(e, storage_id))?;
 
-    let full_path = storage.get_full_path(&path);
+    require_storage_access(auth, &storage.model, &state.db).await?;
 
-    if !full_path.exists() {
-        return Err(not_found_msg(format!("File not found: {path}")));
-    }
+    // Canonicalizing resolution rejects `..` traversal escaping the storage root.
+    let full_path = storage
+        .resolve_safe_path(&path)
+        .await
+        .map_err(|e| map_path_err(e, &path))?;
 
     if full_path.is_dir() {
         return Err(bad_request(format!(
@@ -779,9 +825,9 @@ async fn serve_file_with_content_type(
     ),
     security(("bearer" = []))
 )]
-#[instrument(skip(state, _auth, body))]
+#[instrument(skip(state, auth, body))]
 pub(crate) async fn update_file_content_handler(
-    _auth: Auth,
+    auth: Auth,
     AxumPath((storage_id, path)): AxumPath<(i32, String)>,
     State(state): State<Arc<AppState>>,
     body: axum::body::Bytes,
@@ -790,10 +836,13 @@ pub(crate) async fn update_file_content_handler(
         .await
         .map_err(|e| storage_lookup_err(e, storage_id))?;
 
+    require_storage_access(&auth, &storage.model, &state.db).await?;
+
+    // `save_file` resolves the path lexically and rejects `..` traversal escapes.
     storage
         .save_file(&path, &body)
         .await
-        .map_err(|e| internal(format!("Error saving file: {e}")))?;
+        .map_err(|e| map_path_err(e, &path))?;
 
     Ok(Json(serde_json::json!({
         "message": "File updated successfully",

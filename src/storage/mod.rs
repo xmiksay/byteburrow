@@ -608,3 +608,85 @@ pub fn format_size(bytes: i64) -> String {
         format!("{:.1} {}", size, UNITS[unit_idx])
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    /// Build a `Storage` rooted at a fresh temp directory holding one file.
+    async fn temp_storage() -> Storage {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "byteburrow_storage_test_{}_{}",
+            std::process::id(),
+            n
+        ));
+        fs::create_dir_all(&root).await.unwrap();
+        fs::write(root.join("inside.txt"), b"inside").await.unwrap();
+
+        Storage::new(storage::Model {
+            id: 1,
+            name: "test".to_string(),
+            description: None,
+            path: root.to_string_lossy().into_owned(),
+            default_user: 1,
+            default_group: 1,
+            ignore_patterns: String::new(),
+        })
+    }
+
+    #[tokio::test]
+    async fn resolve_safe_path_allows_files_inside_root() {
+        let storage = temp_storage().await;
+        let resolved = storage.resolve_safe_path("inside.txt").await.unwrap();
+        assert!(resolved.ends_with("inside.txt"));
+    }
+
+    #[tokio::test]
+    async fn resolve_safe_path_rejects_parent_traversal() {
+        let storage = temp_storage().await;
+        // A real target outside the root (/etc/passwd exists) must still be
+        // rejected because it escapes the canonicalized storage root.
+        let err = storage
+            .resolve_safe_path("../../../../../../etc/passwd")
+            .await
+            .expect_err("traversal must be rejected");
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn resolve_safe_path_lexical_rejects_parent_traversal() {
+        let storage = temp_storage().await;
+        let err = storage
+            .resolve_safe_path_lexical("../escape.txt")
+            .await
+            .expect_err("traversal must be rejected");
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn resolve_safe_path_lexical_treats_leading_slash_as_relative() {
+        let storage = temp_storage().await;
+        // A leading `/` is stripped before joining, so this must resolve
+        // *inside* the storage root rather than escaping to the real /etc.
+        let resolved = storage
+            .resolve_safe_path_lexical("/etc/passwd")
+            .await
+            .expect("leading slash must not error");
+        let root = tokio::fs::canonicalize(&storage.model.path).await.unwrap();
+        assert!(resolved.starts_with(&root));
+    }
+
+    #[tokio::test]
+    async fn save_file_rejects_traversal_escape() {
+        let storage = temp_storage().await;
+        let err = storage
+            .save_file("../pwned.txt", b"data")
+            .await
+            .expect_err("write outside root must be rejected");
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+    }
+}
