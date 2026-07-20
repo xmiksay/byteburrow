@@ -424,6 +424,38 @@ async fn has_share_for_storage(
     Ok(false)
 }
 
+/// Authorization check for managing shares (list/create/update/delete) on an entry.
+///
+/// A user may manage shares on an entry if any of the following holds:
+/// - they are an admin;
+/// - they are the entry's owner (`entry.user_id`);
+/// - they are a member of the entry's owning group (`entry.group_id`).
+///
+/// This is deliberately stricter than [`require_storage_access`]: merely having
+/// a share of the entry (i.e. being a recipient) does not grant the right to
+/// manage that entry's shares.
+pub async fn require_entry_owner(
+    auth: &Auth,
+    entry: &crate::entity::entry::Model,
+    db: &DatabaseConnection,
+) -> Result<(), ApiError> {
+    if auth.user.admin {
+        return Ok(());
+    }
+    let user_id = auth.user.id;
+
+    if entry.user_id == user_id {
+        return Ok(());
+    }
+
+    let groups = user_group_ids(db, user_id).await?;
+    if groups.contains(&entry.group_id) {
+        return Ok(());
+    }
+
+    Err(forbidden("Access denied to this entry's shares"))
+}
+
 pub struct AppState {
     pub db: DatabaseConnection,
     pub config: Config,

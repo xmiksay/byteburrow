@@ -7,9 +7,9 @@ use crate::storage::{
 };
 use crate::web::{
     bad_request, conflict, forbidden, internal, not_found, not_found_msg, require_admin,
-    require_group_exists, require_storage_access, require_user_exists, save_or_err,
-    storage_name_taken, storage_path_taken, unauthorized_msg, user_group_ids, ApiError, AppState,
-    ErrorResponse,
+    require_entry_owner, require_group_exists, require_storage_access, require_user_exists,
+    save_or_err, storage_name_taken, storage_path_taken, unauthorized_msg, user_group_ids,
+    ApiError, AppState, ErrorResponse,
 };
 use axum::{
     body::Body,
@@ -1144,9 +1144,9 @@ impl ShareResponse {
     ),
     security(("bearer" = []))
 )]
-#[instrument(skip(state, _auth))]
+#[instrument(skip(state, auth))]
 pub(crate) async fn list_shares_handler(
-    _auth: Auth,
+    auth: Auth,
     AxumPath((storage_id, path)): AxumPath<(i32, String)>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<ShareResponse>>, ApiError> {
@@ -1166,6 +1166,8 @@ pub(crate) async fn list_shares_handler(
         Some(m) => m,
         None => return Ok(Json(vec![])),
     };
+
+    require_entry_owner(&auth, &entry_model, &state.db).await?;
 
     let shares = shared::Entity::find()
         .filter(shared::Column::PathId.eq(entry_model.id))
@@ -1277,9 +1279,9 @@ pub(crate) async fn list_shares_with_me_handler(
     ),
     security(("bearer" = []))
 )]
-#[instrument(skip(state, _auth))]
+#[instrument(skip(state, auth))]
 pub(crate) async fn share_entry_handler(
-    _auth: Auth,
+    auth: Auth,
     AxumPath((storage_id, path)): AxumPath<(i32, String)>,
     State(state): State<Arc<AppState>>,
     Json(payload): Json<ShareEntryRequest>,
@@ -1291,13 +1293,13 @@ pub(crate) async fn share_entry_handler(
     let sub_path = path.trim_matches('/');
 
     // Ensure entry exists in DB (create if missing)
-    let entry_id = match entry::Entity::find()
+    let entry_model = match entry::Entity::find()
         .filter(entry::Column::StorageId.eq(storage_id))
         .filter(entry::Column::Path.eq(sub_path))
         .one(&state.db)
         .await?
     {
-        Some(m) => m.id,
+        Some(m) => m,
         None => {
             // Create entry if it exists on disk
             storage
@@ -1310,9 +1312,12 @@ pub(crate) async fn share_entry_handler(
                         internal(e.to_string())
                     }
                 })?
-                .id
         }
     };
+
+    require_entry_owner(&auth, &entry_model, &state.db).await?;
+
+    let entry_id = entry_model.id;
 
     let expires_at = payload
         .expires_in_days
@@ -1357,12 +1362,24 @@ pub(crate) async fn share_entry_handler(
     ),
     security(("bearer" = []))
 )]
-#[instrument(skip(state, _auth))]
+#[instrument(skip(state, auth))]
 pub(crate) async fn delete_share_handler(
-    _auth: Auth,
+    auth: Auth,
     AxumPath(share_id): AxumPath<i32>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let share = shared::Entity::find_by_id(share_id)
+        .one(&state.db)
+        .await?
+        .ok_or_else(|| not_found_msg("Share not found"))?;
+
+    let entry_model = entry::Entity::find_by_id(share.path_id)
+        .one(&state.db)
+        .await?
+        .ok_or_else(|| internal("Entry not found"))?;
+
+    require_entry_owner(&auth, &entry_model, &state.db).await?;
+
     shared::Entity::delete_by_id(share_id)
         .exec(&state.db)
         .await?;
@@ -1386,9 +1403,9 @@ pub(crate) async fn delete_share_handler(
     ),
     security(("bearer" = []))
 )]
-#[instrument(skip(state, _auth))]
+#[instrument(skip(state, auth))]
 pub(crate) async fn update_share_handler(
-    _auth: Auth,
+    auth: Auth,
     AxumPath(share_id): AxumPath<i32>,
     State(state): State<Arc<AppState>>,
     Json(payload): Json<ShareEntryRequest>,
@@ -1397,6 +1414,13 @@ pub(crate) async fn update_share_handler(
         .one(&state.db)
         .await?
         .ok_or_else(|| not_found_msg("Share not found"))?;
+
+    let owning_entry = entry::Entity::find_by_id(share.path_id)
+        .one(&state.db)
+        .await?
+        .ok_or_else(|| internal("Entry not found"))?;
+
+    require_entry_owner(&auth, &owning_entry, &state.db).await?;
 
     let expires_at = payload.expires_in_days.and_then(|days| {
         if days > 0 {
