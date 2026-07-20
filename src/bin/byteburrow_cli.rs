@@ -146,7 +146,7 @@ async fn load_fixtures(config: &Config) -> Result<(), Box<dyn std::error::Error>
     );
 
     // Insert admin user (ignore conflicts)
-    let hashed = Auth::hash_string("admin");
+    let hashed = Auth::hash_password("admin").map_err(|_| "Failed to hash password".to_string())?;
     let admin_user = user::ActiveModel {
         id: NotSet,
         username: Set("admin".to_string()),
@@ -197,7 +197,8 @@ async fn handle_user_command(
             }
 
             // Hash the password
-            let hashed_password = Auth::hash_string(&args.password);
+            let hashed_password = Auth::hash_password(&args.password)
+                .map_err(|_| "Failed to hash password".to_string())?;
 
             // Create new user
             let new_user = user::ActiveModel {

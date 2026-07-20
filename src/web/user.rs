@@ -131,7 +131,8 @@ async fn change_password_handler(
 
     // Update password
     let mut active_user: user::ActiveModel = user.into();
-    active_user.password = Set(Auth::hash_string(&payload.password));
+    active_user.password = Set(Auth::hash_password(&payload.password)
+        .map_err(|_| AuthOrApiError::Api(internal("Failed to hash password")))?);
     active_user.update(&state.db).await?;
 
     Ok(Json(
@@ -309,7 +310,8 @@ async fn create_user_handler(
     }
 
     // Hash password
-    let password_hash = Auth::hash_string(&payload.password);
+    let password_hash =
+        Auth::hash_password(&payload.password).map_err(|_| internal("Failed to hash password"))?;
 
     let new_user = user::ActiveModel {
         name: Set(payload.name),
@@ -376,7 +378,8 @@ async fn update_user_handler(
         active_user.username = Set(username);
     }
     if let Some(password) = payload.password {
-        active_user.password = Set(Auth::hash_string(&password));
+        active_user.password =
+            Set(Auth::hash_password(&password).map_err(|_| internal("Failed to hash password"))?);
     }
     if let Some(enabled) = payload.enabled {
         active_user.enabled = Set(enabled);
