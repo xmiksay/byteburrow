@@ -30,6 +30,8 @@ pub enum AuthError {
     UserDisabled,
     /// Generating a fresh random token failed (RNG unavailable).
     TokenGenerationFailed,
+    /// Hashing a password with Argon2id failed.
+    PasswordHashFailed,
     DbError(sea_orm::DbErr),
 }
 
@@ -54,6 +56,9 @@ impl IntoResponse for AuthError {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to generate token",
             ),
+            AuthError::PasswordHashFailed => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "Failed to hash password")
+            }
             AuthError::DbError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Database error"),
         };
 
@@ -167,13 +172,51 @@ pub struct Auth {
 }
 
 impl Auth {
-    /// Hash a string using SHA256 with salt from config
+    /// Hash a string using SHA256 with salt from config.
+    ///
+    /// Only appropriate for high-entropy random values (session tokens),
+    /// where fast unsalted-per-value hashing is not a brute-force risk. Do
+    /// not use for passwords — see [`Auth::hash_password`].
     pub fn hash_string(s: &str) -> String {
         let salt = crate::config::Config::get().salt.clone();
         let mut hasher = sha2::Sha256::new();
         hasher.update(salt.as_bytes());
         hasher.update(s.as_bytes());
         format!("{:x}", hasher.finalize())
+    }
+
+    /// Hash a password with Argon2id and a fresh per-user random salt,
+    /// returning a self-describing PHC string (algorithm + params + salt +
+    /// hash all encoded together).
+    pub fn hash_password(password: &str) -> Result<String, AuthError> {
+        use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
+        use argon2::Argon2;
+
+        let salt = SaltString::generate(&mut OsRng);
+        Argon2::default()
+            .hash_password(password.as_bytes(), &salt)
+            .map(|hash| hash.to_string())
+            .map_err(|_| AuthError::PasswordHashFailed)
+    }
+
+    /// Verify a password against a stored hash.
+    ///
+    /// Accepts both current Argon2id PHC hashes (`$argon2id$...`) and
+    /// legacy SHA-256 + global-salt hashes (plain 64-char hex, no `$`
+    /// prefix) so existing accounts keep working — see
+    /// [`Auth::from_user_password`] for the transparent rehash-on-login
+    /// migration path (issue #8).
+    fn verify_password(password: &str, stored: &str) -> bool {
+        use argon2::password_hash::{PasswordHash, PasswordVerifier};
+        use argon2::Argon2;
+
+        if let Ok(parsed) = PasswordHash::new(stored) {
+            return Argon2::default()
+                .verify_password(password.as_bytes(), &parsed)
+                .is_ok();
+        }
+
+        stored == Self::hash_string(password)
     }
 
     /// Create Auth from a user model
@@ -246,7 +289,7 @@ impl Auth {
             .await?
             .ok_or(AuthError::InvalidCredentials)?;
 
-        if user.password != Self::hash_string(password) {
+        if !Self::verify_password(password, &user.password) {
             return Err(AuthError::InvalidCredentials);
         }
 
@@ -254,7 +297,38 @@ impl Auth {
             return Err(AuthError::UserDisabled);
         }
 
+        let user = Self::rehash_if_legacy(user, password, db).await;
+
         Ok(Self::new(user))
+    }
+
+    /// Transparently upgrade a legacy SHA-256 password hash to Argon2id
+    /// after a successful login (issue #8 migration path). Best-effort: a
+    /// failure here must not fail an otherwise-valid login.
+    async fn rehash_if_legacy<C: ConnectionTrait>(
+        user: user::Model,
+        password: &str,
+        db: &C,
+    ) -> user::Model {
+        if argon2::password_hash::PasswordHash::new(&user.password).is_ok() {
+            return user;
+        }
+
+        let Ok(rehashed) = Self::hash_password(password) else {
+            return user;
+        };
+
+        let user_id = user.id;
+        let fallback = user.clone();
+        let mut active: user::ActiveModel = user.into();
+        active.password = Set(rehashed);
+        match active.update(db).await {
+            Ok(updated) => updated,
+            Err(err) => {
+                tracing::warn!("failed to rehash legacy password for user {user_id}: {err}");
+                fallback
+            }
+        }
     }
 
     // ------------------------------------------------------------------------
@@ -404,6 +478,45 @@ mod tests {
     fn hash_string_is_not_the_plain_input() {
         init_test_config();
         assert_ne!(Auth::hash_string("password123"), "password123");
+    }
+
+    #[test]
+    fn hash_password_produces_argon2id_phc_string() {
+        let hash = Auth::hash_password("hunter2").expect("hashing should succeed");
+        assert!(hash.starts_with("$argon2id$"));
+    }
+
+    #[test]
+    fn hash_password_uses_a_fresh_salt_each_time() {
+        let a = Auth::hash_password("hunter2").expect("hashing should succeed");
+        let b = Auth::hash_password("hunter2").expect("hashing should succeed");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn verify_password_accepts_correct_argon2_hash() {
+        let hash = Auth::hash_password("hunter2").expect("hashing should succeed");
+        assert!(Auth::verify_password("hunter2", &hash));
+    }
+
+    #[test]
+    fn verify_password_rejects_wrong_password_against_argon2_hash() {
+        let hash = Auth::hash_password("hunter2").expect("hashing should succeed");
+        assert!(!Auth::verify_password("wrong-password", &hash));
+    }
+
+    #[test]
+    fn verify_password_accepts_legacy_sha256_hash() {
+        init_test_config();
+        let legacy = Auth::hash_string("hunter2");
+        assert!(Auth::verify_password("hunter2", &legacy));
+    }
+
+    #[test]
+    fn verify_password_rejects_wrong_password_against_legacy_hash() {
+        init_test_config();
+        let legacy = Auth::hash_string("hunter2");
+        assert!(!Auth::verify_password("wrong-password", &legacy));
     }
 
     async fn parts_for_uri(uri: &str) -> Parts {

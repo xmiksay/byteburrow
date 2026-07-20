@@ -12,7 +12,7 @@ use byteburrow::auth::{Auth, AuthError};
 use byteburrow::config::Config;
 use byteburrow::entity::user;
 use byteburrow::migration::Migrator;
-use sea_orm::{ActiveModelTrait, DatabaseConnection, Set};
+use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
 use sea_orm_migration::MigratorTrait;
 use std::sync::{Arc, Once, OnceLock};
 use tokio::sync::OnceCell;
@@ -110,6 +110,37 @@ fn login_with_unknown_username_fails() {
             .err()
             .expect("login should fail");
         assert!(matches!(err, AuthError::InvalidCredentials));
+    });
+}
+
+#[test]
+fn login_with_legacy_sha256_hash_rehashes_to_argon2id() {
+    runtime().block_on(async {
+        let db = test_db().await;
+        let user = create_test_user(db, "it_login_legacy_rehash", "correct-password", true).await;
+        assert!(
+            !user.password.starts_with("$argon2"),
+            "test fixture should seed a legacy SHA-256 hash"
+        );
+
+        Auth::from_user_password("it_login_legacy_rehash", "correct-password", db)
+            .await
+            .expect("login should succeed against legacy hash");
+
+        let reloaded = user::Entity::find_by_id(user.id)
+            .one(db)
+            .await
+            .expect("query should succeed")
+            .expect("user should still exist");
+        assert!(
+            reloaded.password.starts_with("$argon2id$"),
+            "password should have been rehashed to Argon2id after login"
+        );
+
+        // The rehashed password must still authenticate.
+        Auth::from_user_password("it_login_legacy_rehash", "correct-password", db)
+            .await
+            .expect("login should succeed against rehashed password");
     });
 }
 

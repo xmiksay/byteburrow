@@ -13,7 +13,7 @@ Deep reference for ByteBurrow's module layout, request flow, and key patterns. S
 - **`src/auth/mod.rs`**: Authentication system
   - `Auth` extractor for Axum handlers (supports Bearer tokens, Basic auth, and query params)
   - Token-based authentication with expiration and activity tracking
-  - Password hashing using SHA256 + salt
+  - Password hashing using Argon2id with a per-user random salt (`Auth::hash_password` / `Auth::verify_password`); legacy SHA256 + global-salt hashes are still verified and transparently rehashed to Argon2id on next successful login. SHA256 + global salt (`Auth::hash_string`) remains in use only for hashing high-entropy session tokens.
   - User session management
 
 - **`src/storage/`**: Core filesystem abstraction
