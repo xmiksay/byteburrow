@@ -118,9 +118,19 @@ Admin-only routes additionally call `require_admin(&auth)`.
 Handlers that touch a specific storage or entry must additionally enforce
 ownership to avoid IDOR — the `Auth` extractor only proves *who* the caller
 is, not that they may act on the requested resource:
-- `require_storage_access(&auth, &storage, &db)` — storage file/directory
-  endpoints. Grants access to admins, the storage's default owner/group, and
-  anyone holding a share on an entry within that storage.
+- `require_storage_access(&auth, &storage, &db)` — storage *metadata* only
+  (`GET /api/storage`, `GET /api/storage/:id`). Grants access to admins, the
+  storage's default owner/group, and anyone holding a share on any entry in
+  that storage. Does not gate content — never use it to authorize a handler
+  that reads or mutates a specific path.
+- `require_storage_path_access(&auth, &storage, path, &db)` /
+  `require_storage_path_write_access(&auth, &storage, path, &db)` — the
+  storage file/directory content endpoints (`list`/`show`/`raw`/`create`/
+  `rename`/`remove`/`update`). Admins and the storage's default owner/group
+  get full access; a share only grants access to *its own entry's subtree*
+  (the requested path must equal or descend from the shared entry's path),
+  and the write variant additionally requires the share's `can_write` flag.
+  `rename` must check both the source and destination path.
 - `require_entry_owner(&auth, &entry, &db)` — share-management endpoints
   (list/create/update/delete a share). Deliberately stricter than
   `require_storage_access`: only admins, the entry's owner (`entry.user_id`),

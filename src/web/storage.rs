@@ -7,9 +7,9 @@ use crate::storage::{
 };
 use crate::web::{
     bad_request, conflict, forbidden, internal, not_found, not_found_msg, require_admin,
-    require_entry_owner, require_group_exists, require_storage_access, require_user_exists,
-    save_or_err, storage_name_taken, storage_path_taken, unauthorized_msg, user_group_ids,
-    ApiError, AppState, ErrorResponse,
+    require_entry_owner, require_group_exists, require_storage_access, require_storage_path_access,
+    require_storage_path_write_access, require_user_exists, save_or_err, storage_name_taken,
+    storage_path_taken, unauthorized_msg, user_group_ids, ApiError, AppState, ErrorResponse,
 };
 use axum::{
     body::Body,
@@ -206,7 +206,7 @@ async fn require_hash_access(auth: &Auth, hash: &[u8], state: &AppState) -> Resu
         let storage = StorageWrapper::find_by_id(&state.db, e.storage_id)
             .await
             .map_err(|err| storage_lookup_err(err, e.storage_id))?;
-        if require_storage_access(auth, &storage.model, &state.db)
+        if require_storage_path_access(auth, &storage.model, &e.path, &state.db)
             .await
             .is_ok()
         {
@@ -690,10 +690,10 @@ async fn directory_index_impl(
         .await
         .map_err(|e| storage_lookup_err(e, storage_id))?;
 
-    // Authorization: must have access to this storage.
-    require_storage_access(auth, &storage.model, &state.db).await?;
-
     let normalized_path = path.trim_matches('/');
+
+    // Authorization: must have access to this path within the storage.
+    require_storage_path_access(auth, &storage.model, normalized_path, &state.db).await?;
     let full_path = storage.get_full_path(normalized_path);
 
     // If it's a file, serve it directly with content-type
@@ -794,7 +794,7 @@ async fn serve_file_with_content_type(
         .await
         .map_err(|e| storage_lookup_err(e, storage_id))?;
 
-    require_storage_access(auth, &storage.model, &state.db).await?;
+    require_storage_path_access(auth, &storage.model, &path, &state.db).await?;
 
     // Canonicalizing resolution rejects `..` traversal escaping the storage root.
     let full_path = storage
@@ -845,7 +845,7 @@ pub(crate) async fn update_file_content_handler(
         .await
         .map_err(|e| storage_lookup_err(e, storage_id))?;
 
-    require_storage_access(&auth, &storage.model, &state.db).await?;
+    require_storage_path_write_access(&auth, &storage.model, &path, &state.db).await?;
 
     // `save_file` resolves the path lexically and rejects `..` traversal escapes.
     storage
@@ -886,7 +886,7 @@ pub(crate) async fn create_entry_handler(
         .await
         .map_err(|e| storage_lookup_err(e, storage_id))?;
 
-    require_storage_access(&auth, &storage.model, &state.db).await?;
+    require_storage_path_write_access(&auth, &storage.model, &path, &state.db).await?;
 
     match payload.entry_type {
         EntryType::Directory => {
@@ -943,7 +943,8 @@ pub(crate) async fn rename_entry_handler(
         .await
         .map_err(|e| storage_lookup_err(e, storage_id))?;
 
-    require_storage_access(&auth, &storage.model, &state.db).await?;
+    require_storage_path_write_access(&auth, &storage.model, &old_path, &state.db).await?;
+    require_storage_path_write_access(&auth, &storage.model, &payload.new_path, &state.db).await?;
 
     storage
         .rename_entry(&old_path, &payload.new_path)
@@ -981,7 +982,7 @@ pub(crate) async fn remove_entry_handler(
         .await
         .map_err(|e| storage_lookup_err(e, storage_id))?;
 
-    require_storage_access(&auth, &storage.model, &state.db).await?;
+    require_storage_path_write_access(&auth, &storage.model, &path, &state.db).await?;
 
     storage
         .remove_entry(&path)
@@ -1021,7 +1022,7 @@ pub(crate) async fn list_directory_handler(
         .await
         .map_err(|e| storage_lookup_err(e, id))?;
 
-    require_storage_access(&auth, &storage.model, &state.db).await?;
+    require_storage_path_access(&auth, &storage.model, &path, &state.db).await?;
 
     let entries = storage
         .list_directory(&state.db, &path)
