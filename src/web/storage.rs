@@ -1666,6 +1666,10 @@ async fn share_index_impl(
     let sub_path_clean = sub_path.trim_matches('/');
     let full_path = join_share_path(base_path, sub_path_clean);
 
+    if full_path.contains("..") {
+        return Err(bad_request("Invalid path: traversal detected"));
+    }
+
     let abs_path = storage.get_full_path(&full_path);
 
     // If it's a file, serve it directly
