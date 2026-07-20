@@ -5,7 +5,7 @@ use crate::web::{
     user_name_taken, ApiError, AppState, ErrorResponse,
 };
 use axum::{
-    extract::{Path, State},
+    extract::{ConnectInfo, Path, State},
     http::{header, HeaderMap},
     response::IntoResponse,
     routing::{get, post},
@@ -13,6 +13,7 @@ use axum::{
 };
 use sea_orm::{ActiveModelTrait, EntityTrait, Set};
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use utoipa::ToSchema;
 
@@ -24,9 +25,12 @@ pub struct LoginRequest {
 }
 
 /// Login response
+///
+/// The session token itself is never returned in the body (issue #10) — it's
+/// only ever carried in the HttpOnly `session_token` cookie set alongside
+/// this response, so it stays out of reach of any XSS-injected JavaScript.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct LoginResponse {
-    pub token: String,
     pub expires_in_days: i64,
 }
 
@@ -80,6 +84,7 @@ pub struct UpdateUserRequest {
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/login", post(login_handler))
+        .route("/logout", post(logout_handler))
         .route("/me", get(me_handler))
         .route("/", get(list_users_handler).post(create_user_handler))
         .route(
@@ -154,6 +159,7 @@ async fn change_password_handler(
     )
 )]
 async fn login_handler(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(payload): Json<LoginRequest>,
@@ -164,13 +170,8 @@ async fn login_handler(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    // Extract IP address from headers (try X-Forwarded-For first, then X-Real-IP)
-    let ip_address = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .or_else(|| headers.get("x-real-ip").and_then(|v| v.to_str().ok()))
-        .map(|s| s.trim().to_string());
+    let trust_forwarded_headers = crate::config::Config::get().trust_forwarded_headers;
+    let ip_address = crate::auth::resolve_ip_address(&headers, Some(peer), trust_forwarded_headers);
 
     // Authenticate user
     let auth = Auth::from_user_password(&payload.username, &payload.password, &state.db)
@@ -184,7 +185,9 @@ async fn login_handler(
         .await
         .map_err(|e| AuthOrApiError::Api(internal(format!("Failed to create token: {e:?}"))))?;
 
-    // Build Set-Cookie header for HttpOnly session cookie
+    // Build Set-Cookie header for HttpOnly session cookie. This is the only
+    // place the raw token is ever sent to the client (issue #10) — it never
+    // appears in the JSON body.
     let max_age = config.token_expiration_days * 24 * 60 * 60;
     let secure_flag = if config.base_url.starts_with("https://") {
         "; Secure"
@@ -199,10 +202,36 @@ async fn login_handler(
     Ok((
         [(header::SET_COOKIE, cookie_value)],
         Json(LoginResponse {
-            token,
             expires_in_days: config.token_expiration_days,
         }),
     ))
+}
+
+/// Logout endpoint - revokes the current session token and clears the cookie
+/// POST /api/user/logout
+#[utoipa::path(
+    post,
+    path = "/api/user/logout",
+    tag = "user",
+    responses(
+        (status = 200, description = "Logged out successfully"),
+    )
+)]
+async fn logout_handler(
+    mut parts: axum::http::request::Parts,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Some(token) = crate::auth::extract_token(&mut parts).await {
+        // Best-effort: an already-expired/invalid token isn't an error here.
+        let _ = Auth::revoke_token(&token, &state.db).await;
+    }
+
+    let cookie_value = "session_token=; HttpOnly; SameSite=Strict; Path=/api; Max-Age=0";
+
+    (
+        [(header::SET_COOKIE, cookie_value)],
+        Json(serde_json::json!({ "message": "Logged out successfully" })),
+    )
 }
 
 /// Me endpoint - returns current user info

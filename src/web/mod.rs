@@ -602,6 +602,7 @@ pub struct AppState {
     paths(
         // User endpoints
         user::login_handler,
+        user::logout_handler,
         user::me_handler,
         user::list_users_handler,
         user::get_user_handler,
@@ -777,7 +778,7 @@ pub async fn run(config: Config, db: DatabaseConnection, job_sender: JobSender) 
         .fallback(get(frontend_handler));
 
     let app = app
-        .layer(tower_http::cors::CorsLayer::permissive())
+        .layer(build_cors_layer(&config))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
@@ -785,7 +786,42 @@ pub async fn run(config: Config, db: DatabaseConnection, job_sender: JobSender) 
         .await
         .unwrap();
     tracing::info!("Server listening on {}", listener.local_addr().unwrap());
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    .unwrap();
+}
+
+/// Build the CORS layer from `cors_allowed_origins`. Same-origin requests are
+/// never subject to CORS at all, so an empty allowlist (the default) simply
+/// means no *cross*-origin caller is granted access — it does not affect the
+/// app's own frontend or the Vite dev proxy (which forwards server-to-server,
+/// outside the browser's CORS enforcement).
+fn build_cors_layer(config: &Config) -> tower_http::cors::CorsLayer {
+    use axum::http::{HeaderValue, Method};
+    use tower_http::cors::{AllowOrigin, CorsLayer};
+
+    let origins: Vec<HeaderValue> = config
+        .cors_allowed_origins
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse().ok())
+        .collect();
+
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
+        .allow_credentials(true)
 }
 
 /// Health check endpoint (no auth required)

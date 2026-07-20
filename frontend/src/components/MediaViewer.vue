@@ -18,7 +18,7 @@ import type { Storage, DirectoryEntry, Tag } from '../types'
 import { isVideo as isVideoFile, isAudio as isAudioFile, isImage as isImageFile, getBasename, getThumbnailUrl } from '../utils/file'
 import { onMounted } from 'vue'
 
-const { user, token } = useAuth()
+const { user } = useAuth()
 
 const props = defineProps<{
   storage: Storage
@@ -33,17 +33,10 @@ const isAudio = computed(() => isAudioFile(props.entry.path))
 const isImg = computed(() => isImageFile(props.entry.path))
 
 const mediaUrl = computed(() => {
-  let url = ''
   if (props.shareId !== undefined) {
-    url = `/api/storage/share/${props.shareId}/show/${props.entry.path}`
-  } else {
-    url = `/api/storage/${props.storage.id}/show/${props.entry.path}`
+    return `/api/storage/share/${props.shareId}/show/${props.entry.path}`
   }
-  
-  if (token.value) {
-    return `${url}?token=${token.value}`
-  }
-  return url
+  return `/api/storage/${props.storage.id}/show/${props.entry.path}`
 })
 
 const isFullscreen = ref(false)

@@ -129,7 +129,7 @@ onMounted(fetchShares)
               <span class="item-path">{{ share.path }}</span>
               <div class="item-meta">
                 <span class="storage-badge">Storage #{{ share.storage_id }}</span>
-                <span v-if="share.token" class="share-type">
+                <span v-if="share.has_public_link" class="share-type">
                   <Globe :size="14" /> Public Link
                 </span>
                 <span v-if="share.user_ids?.length || share.group_ids?.length" class="share-type">
@@ -157,6 +157,14 @@ onMounted(fetchShares)
               <ArrowRight :size="18" />
             </button>
             <button v-if="share.token" class="btn-icon" @click="copyPublicLink(share.token)" title="Copy Public Link">
+              <LinkIcon :size="18" />
+            </button>
+            <button
+              v-else-if="share.has_public_link"
+              class="btn-icon"
+              disabled
+              title="Edit share to get a new copyable link"
+            >
               <LinkIcon :size="18" />
             </button>
             <button class="btn-icon" @click="openEditDialog(share)" title="Edit Share">
@@ -316,6 +324,16 @@ onMounted(fetchShares)
 .btn-icon:hover {
   background: rgba(255, 255, 255, 0.08);
   color: var(--text-primary);
+}
+
+.btn-icon:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-icon:disabled:hover {
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-secondary);
 }
 
 .btn-icon.danger:hover {

@@ -22,6 +22,19 @@ pub struct Config {
     pub plugin_dir: String,
     #[serde(default = "defaults::ignore_patterns")]
     pub ignore_patterns: Vec<String>,
+    /// Comma-separated list of origins allowed to make cross-origin requests
+    /// (CORS). Empty by default — same-origin requests are never subject to
+    /// CORS, so this only needs to be set when the frontend is served from a
+    /// different origin than the API.
+    #[serde(default)]
+    pub cors_allowed_origins: String,
+    /// Whether to trust `X-Forwarded-For` / `X-Real-IP` headers for the
+    /// client IP recorded on session tokens. Only enable this when the
+    /// server sits behind a reverse proxy that sets these headers itself —
+    /// otherwise any client can spoof them. Defaults to `false`, falling
+    /// back to the real TCP peer address.
+    #[serde(default)]
+    pub trust_forwarded_headers: bool,
 }
 
 mod defaults {

@@ -52,7 +52,7 @@ const fetchShares = async () => {
 
 const loadShareForEditing = (share: Shared) => {
   editingShareId.value = share.id
-  isPublicLink.value = !!share.token
+  isPublicLink.value = share.has_public_link
   selectedUserIds.value = share.user_ids || []
   selectedGroupIds.value = share.group_ids || []
   canWrite.value = share.can_write
@@ -269,12 +269,12 @@ onMounted(async () => {
             <div v-for="share in shares" :key="share.id" class="share-item glass-panel" :class="{ 'is-editing': editingShareId === share.id }">
               <div class="share-main">
                 <div class="share-type-icon">
-                  <Globe v-if="share.token" :size="16" />
+                  <Globe v-if="share.has_public_link" :size="16" />
                   <UserPlus v-else :size="16" />
                 </div>
                 <div class="share-details">
                   <span class="share-target">
-                    {{ share.token ? 'Public Link' : getShareTargetNames(share) }}
+                    {{ share.has_public_link ? 'Public Link' : getShareTargetNames(share) }}
                   </span>
                   <div class="share-meta">
                     <span class="meta-item">
@@ -284,6 +284,9 @@ onMounted(async () => {
                     <span class="meta-item">
                       <Lock :size="12" />
                       {{ share.can_write ? 'Read/Write' : 'Read-only' }}
+                    </span>
+                    <span v-if="share.has_public_link && !share.token" class="meta-item public-link-hint">
+                      Public link active — edit and re-enable to get a fresh copyable link
                     </span>
                   </div>
                 </div>
@@ -580,6 +583,12 @@ input:checked + .slider:before {
   display: flex;
   align-items: center;
   gap: 4px;
+}
+
+.public-link-hint {
+  color: var(--text-secondary);
+  font-style: italic;
+  flex-basis: 100%;
 }
 
 .share-actions {

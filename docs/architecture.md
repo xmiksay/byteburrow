@@ -108,10 +108,27 @@ All API endpoints are annotated with `#[utoipa::path(...)]` and grouped by tags.
 
 ### Authentication
 All protected routes use the `Auth` extractor. It automatically:
-- Extracts credentials from Bearer token, Basic auth, or `?token=` query param
+- Extracts credentials from Bearer token, Basic auth, `?token=` query param, or
+  the `session_token` cookie (checked in that priority order)
 - Validates token/credentials against database
 - Returns authenticated user model
 - Updates token activity timestamp
+
+`POST /api/user/login` sets the session token only as an `HttpOnly;
+SameSite=Strict` cookie — it is never returned in the JSON response body, so
+it stays unreachable from JavaScript (XSS-hardening, issue #10). The frontend
+relies on the browser sending this cookie automatically; `POST
+/api/user/logout` revokes the token server-side and clears the cookie.
+
+Client IP addresses recorded on tokens (`token.ip_address`) only trust
+`X-Forwarded-For`/`X-Real-IP` when `trust_forwarded_headers` is enabled in
+config — otherwise the real TCP peer address (`ConnectInfo`) is used, since
+these headers are trivially spoofable by any direct client.
+
+`GET /api/ws` and `GET /api/storage/thumbnail/:hash/:size` both require
+`Auth` — the thumbnail route additionally calls the same `require_hash_access`
+gate as `GET /api/storage/meta/:hash` (below), since thumbnails are otherwise
+content-addressable and guessable.
 
 Admin-only routes additionally call `require_admin(&auth)`.
 
@@ -136,6 +153,24 @@ is, not that they may act on the requested resource:
   `require_storage_access`: only admins, the entry's owner (`entry.user_id`),
   and members of the entry's owning group (`entry.group_id`) may manage its
   shares — being a share *recipient* does not grant management rights.
+- `require_hash_access(&auth, &hash, &db)` — content-addressed endpoints
+  (`GET /api/storage/meta/:hash`, `GET /api/storage/thumbnail/:hash/:size`).
+  These aren't owned directly, so access is granted when the caller can reach
+  at least one storage entry with that content hash via
+  `require_storage_path_access`; admins always pass.
+
+### Sharing
+Public-link share tokens (`shared.token`) are hashed at rest with
+`Auth::hash_string` (SHA-256 + config salt) rather than stored as plaintext
+(issue #10) — the same scheme used for session tokens. Consequently the
+plaintext is only ever known at the moment it's generated: `ShareResponse`
+carries it in `token` right after creation or regeneration, but every
+subsequent read (list/get) only exposes `has_public_link: bool`. Toggling
+`public_link` back on for a share that already has one reuses the existing
+hash (so previously distributed links keep working) rather than rotating it,
+which means the plaintext can't be re-displayed for an existing link — only a
+genuinely new link (via delete + recreate, or flipping `public_link` off then
+on) yields a fresh plaintext to show the user.
 
 ### Database Access
 - Use SeaORM entities from `crate::entity::{user, group, storage, entry, ...}`

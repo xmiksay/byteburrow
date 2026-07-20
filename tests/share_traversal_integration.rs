@@ -54,6 +54,8 @@ async fn test_db() -> &'static DatabaseConnection {
                 token_length: 32,
                 plugin_dir: "/tmp".to_string(),
                 ignore_patterns: vec![],
+                cors_allowed_origins: String::new(),
+                trust_forwarded_headers: false,
             }));
         });
 
@@ -169,7 +171,10 @@ async fn setup_share(db: &DatabaseConnection) -> (String, std::path::PathBuf) {
     let token = format!("share-token-{}", uniq());
     shared::ActiveModel {
         path_id: Set(entry_model.id),
-        token: Set(Some(token.clone())),
+        // `shared.token` stores a hash of the plaintext (issue #10) — insert
+        // it the same way `share_entry_handler` does, so a request using the
+        // plaintext `token` returned from this fixture resolves correctly.
+        token: Set(Some(Auth::hash_string(&token))),
         can_write: Set(false),
         user_ids: Set(vec![]),
         group_ids: Set(vec![]),

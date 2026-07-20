@@ -107,8 +107,8 @@ const fetchData = async () => {
   }
 }
 
-const handleLogout = () => {
-  logout()
+const handleLogout = async () => {
+  await logout()
   storages.value = []
   showUserMenu.value = false
   router.push('/files')
@@ -130,15 +130,11 @@ watch(isAuthenticated, (authenticated) => {
 })
 
 onMounted(async () => {
-  // Try to restore session if token exists
-  if (isAuthenticated.value || localStorage.getItem('auth_token')) {
-    const success = await fetchUserInfo()
-    if (success) {
-      await fetchData()
-      if (currentRouteName.value === 'monitoring') await fetchHealth()
-    } else {
-      loading.value = false
-    }
+  // Check for a valid session cookie
+  const success = await fetchUserInfo()
+  if (success) {
+    await fetchData()
+    if (currentRouteName.value === 'monitoring') await fetchHealth()
   } else {
     loading.value = false
   }

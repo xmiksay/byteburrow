@@ -1,3 +1,4 @@
+use crate::auth::Auth;
 use crate::web::AppState;
 use axum::{
     extract::{
@@ -10,6 +11,7 @@ use std::sync::Arc;
 
 /// WebSocket upgrade handler
 pub async fn ws_handler(
+    _auth: Auth,
     ws: WebSocketUpgrade,
     State(_state): State<Arc<AppState>>,
 ) -> impl IntoResponse {

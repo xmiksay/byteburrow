@@ -92,6 +92,7 @@ export interface Shared {
     path: string
     path_id: number
     token?: string
+    has_public_link: boolean
     can_write: boolean
     user_ids: number[]
     group_ids: number[]

@@ -98,6 +98,8 @@ THUMBNAIL_STORAGE=/path/to/thumbnails
 BASE_URL=http://localhost:3000
 TOKEN_EXPIRATION_DAYS=30
 TOKEN_LENGTH=32
+CORS_ALLOWED_ORIGINS=
+TRUST_FORWARDED_HEADERS=false
 ```
 
 | Variable | Required | Default | Description |
@@ -110,6 +112,8 @@ TOKEN_LENGTH=32
 | `BASE_URL` | No | `http://localhost:3000` | Public base URL of the application |
 | `TOKEN_EXPIRATION_DAYS` | No | `30` | How long auth tokens remain valid |
 | `TOKEN_LENGTH` | No | `32` | Length of generated auth tokens |
+| `CORS_ALLOWED_ORIGINS` | No | (empty) | Comma-separated list of origins allowed to make cross-origin requests. Same-origin requests are unaffected |
+| `TRUST_FORWARDED_HEADERS` | No | `false` | Trust `X-Forwarded-For`/`X-Real-IP` for client-IP logging; only enable behind a reverse proxy that sets them itself |
 2. Run migrations:
 ```bash
 cargo run --bin byteburrow-migration up

@@ -25,9 +25,7 @@ export const storageService = {
 
     async getFileContent(storageId: number, path: string): Promise<string> {
         const response = await fetch(`/api/storage/${storageId}/show/${path}`, {
-            headers: {
-                'Authorization': `Bearer ${localStorage.getItem('auth_token')}`
-            }
+            credentials: 'same-origin'
         })
         if (!response.ok) throw new Error('Failed to fetch file content')
         return response.text()
@@ -75,14 +73,8 @@ export const storageService = {
     },
 
     async getShareFileContent(shareId: number | string, path: string): Promise<string> {
-        const token = localStorage.getItem('auth_token')
-        const headers: Record<string, string> = {}
-        if (token) {
-            headers['Authorization'] = `Bearer ${token}`
-        }
-
         const response = await fetch(`/api/storage/share/${shareId}/show/${path}`, {
-            headers
+            credentials: 'same-origin'
         })
         if (!response.ok) throw new Error('Failed to fetch file content')
         return response.text()
@@ -118,20 +110,16 @@ export const storageService = {
     },
 
     async updateShareFileContent(shareId: number | string, path: string, content: string | Blob): Promise<{ message: string }> {
-        const token = localStorage.getItem('auth_token')
         const headers: Record<string, string> = {}
 
         if (typeof content === 'string') {
             headers['Content-Type'] = 'text/plain'
         }
 
-        if (token) {
-            headers['Authorization'] = `Bearer ${token}`
-        }
-
         const response = await fetch(`/api/storage/share/${shareId}/update/${path}`, {
             method: 'PUT',
             headers,
+            credentials: 'same-origin',
             body: content
         })
         if (!response.ok) {

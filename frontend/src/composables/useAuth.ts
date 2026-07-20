@@ -8,27 +8,15 @@ export interface User {
 }
 
 export interface LoginResponse {
-  token: string
   expires_in_days: number
 }
 
-const TOKEN_KEY = 'auth_token'
-const token = ref<string | null>(localStorage.getItem(TOKEN_KEY))
 const user = ref<User | null>(null)
 const isLoading = ref(false)
 const error = ref<string | null>(null)
 
 export function useAuth() {
-  const isAuthenticated = computed(() => !!token.value && !!user.value)
-
-  const setToken = (newToken: string | null) => {
-    token.value = newToken
-    if (newToken) {
-      localStorage.setItem(TOKEN_KEY, newToken)
-    } else {
-      localStorage.removeItem(TOKEN_KEY)
-    }
-  }
+  const isAuthenticated = computed(() => !!user.value)
 
   const login = async (username: string, password: string): Promise<boolean> => {
     try {
@@ -49,16 +37,10 @@ export function useAuth() {
         throw new Error(errorData.error || 'Login failed')
       }
 
-      const data: LoginResponse = await response.json()
-      setToken(data.token)
-
       // Fetch user info after successful login
-      await fetchUserInfo()
-
-      return true
+      return await fetchUserInfo()
     } catch (err: any) {
       error.value = err.message || 'An error occurred during login'
-      setToken(null)
       user.value = null
       return false
     } finally {
@@ -67,22 +49,14 @@ export function useAuth() {
   }
 
   const fetchUserInfo = async (): Promise<boolean> => {
-    if (!token.value) return false
-
     try {
       const response = await fetch('/api/user/me', {
-        headers: {
-          'Authorization': `Bearer ${token.value}`,
-        },
         credentials: 'same-origin',
       })
 
       if (!response.ok) {
-        if (response.status === 401) {
-          // Token is invalid or expired
-          logout()
-        }
-        throw new Error('Failed to fetch user info')
+        // 401 is the expected "not logged in" case; don't log it as an error
+        return false
       }
 
       user.value = await response.json()
@@ -93,10 +67,18 @@ export function useAuth() {
     }
   }
 
-  const logout = () => {
-    setToken(null)
-    user.value = null
-    error.value = null
+  const logout = async () => {
+    try {
+      await fetch('/api/user/logout', {
+        method: 'POST',
+        credentials: 'same-origin',
+      })
+    } catch (err) {
+      console.error('Failed to revoke session:', err)
+    } finally {
+      user.value = null
+      error.value = null
+    }
   }
 
   const clearError = () => {
@@ -104,7 +86,6 @@ export function useAuth() {
   }
 
   return {
-    token: computed(() => token.value),
     user: computed(() => user.value),
     isAuthenticated,
     isLoading: computed(() => isLoading.value),
