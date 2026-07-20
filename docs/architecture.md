@@ -115,6 +115,18 @@ All protected routes use the `Auth` extractor. It automatically:
 
 Admin-only routes additionally call `require_admin(&auth)`.
 
+Handlers that touch a specific storage or entry must additionally enforce
+ownership to avoid IDOR — the `Auth` extractor only proves *who* the caller
+is, not that they may act on the requested resource:
+- `require_storage_access(&auth, &storage, &db)` — storage file/directory
+  endpoints. Grants access to admins, the storage's default owner/group, and
+  anyone holding a share on an entry within that storage.
+- `require_entry_owner(&auth, &entry, &db)` — share-management endpoints
+  (list/create/update/delete a share). Deliberately stricter than
+  `require_storage_access`: only admins, the entry's owner (`entry.user_id`),
+  and members of the entry's owning group (`entry.group_id`) may manage its
+  shares — being a share *recipient* does not grant management rights.
+
 ### Database Access
 - Use SeaORM entities from `crate::entity::{user, group, storage, entry, ...}`
 - Database connection available via `State<Arc<AppState>>` in handlers
