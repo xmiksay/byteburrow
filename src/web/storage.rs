@@ -217,6 +217,16 @@ async fn require_hash_access(auth: &Auth, hash: &[u8], state: &AppState) -> Resu
     Err(forbidden("Access denied to this content"))
 }
 
+/// Generate a new public-link share token: a fresh random plaintext (UUIDv4,
+/// 122 bits of entropy) and its hash for storage. Only the hash is persisted
+/// to `shared.token` — the plaintext must be returned to the caller now, as
+/// it cannot be recovered from the stored hash later (issue #10).
+fn generate_share_token() -> (String, String) {
+    let plaintext = uuid::Uuid::new_v4().as_simple().to_string();
+    let hash = Auth::hash_string(&plaintext);
+    (plaintext, hash)
+}
+
 /// Build a fully-qualified path under a share's base entry.
 fn join_share_path(base_path: &str, sub_path: &str) -> String {
     let base = base_path.trim_matches('/');
@@ -325,7 +335,8 @@ pub(crate) async fn get_meta_handler(
     Ok(Json(MetaResponse::from(meta)))
 }
 
-/// Thumbnail endpoint - serves thumbnail by entry hash (public, no auth)
+/// Thumbnail endpoint - serves thumbnail by entry hash (requires access to a
+/// storage entry with this content hash, same gate as `get_meta_handler`)
 /// GET /api/storage/thumbnail/:hash/:size
 #[utoipa::path(
     get,
@@ -338,11 +349,14 @@ pub(crate) async fn get_meta_handler(
     responses(
         (status = 200, description = "Thumbnail image", content_type = "image/png"),
         (status = 400, description = "Invalid hash or size"),
+        (status = 403, description = "Access denied to this content", body = ErrorResponse),
         (status = 404, description = "Thumbnail not found"),
-    )
+    ),
+    security(("bearer" = []))
 )]
-#[instrument(skip(state))]
+#[instrument(skip(auth, state))]
 pub(crate) async fn thumbnail_handler(
+    auth: Auth,
     AxumPath((hash, size)): AxumPath<(String, String)>,
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -355,6 +369,9 @@ pub(crate) async fn thumbnail_handler(
     if !["small", "large", "mini"].contains(&size.as_str()) {
         return Err(bad_request("Invalid size"));
     }
+
+    let hash_bytes = hex::decode(&hash).map_err(|_| bad_request("Invalid hex hash format"))?;
+    require_hash_access(&auth, &hash_bytes, &state).await?;
 
     // Construct thumbnail path using the hash and size with distributed directory structure
     let thumbnail_dir = std::path::PathBuf::from(&state.config.thumbnail_storage);
@@ -1110,12 +1127,21 @@ pub struct ShareEntryRequest {
 }
 
 /// Share response
+///
+/// `shared.token` stores a hash of the public-link token (issue #10), not the
+/// plaintext, so it can no longer be read back from the database. `token` is
+/// therefore only ever populated with the plaintext immediately after it is
+/// generated (on creation, or on regeneration via update) — callers must
+/// capture it then, as it cannot be recovered later. `has_public_link`
+/// reflects whether a public link exists at all, independent of whether the
+/// plaintext is known in this response.
 #[derive(Debug, serde::Serialize, utoipa::ToSchema)]
 pub struct ShareResponse {
     pub id: i32,
     pub storage_id: i32,
     pub path: String,
     pub token: Option<String>,
+    pub has_public_link: bool,
     pub can_write: bool,
     pub user_ids: Vec<i32>,
     pub group_ids: Vec<i32>,
@@ -1129,7 +1155,8 @@ impl ShareResponse {
             id: m.id,
             storage_id: e.storage_id,
             path: e.path,
-            token: m.token,
+            has_public_link: m.token.is_some(),
+            token: None,
             can_write: m.can_write,
             user_ids: m.user_ids,
             group_ids: m.group_ids,
@@ -1333,15 +1360,16 @@ pub(crate) async fn share_entry_handler(
         .expires_in_days
         .map(|days| chrono::Utc::now().naive_utc() + chrono::Duration::days(days as i64));
 
-    let token = if payload.public_link {
-        Some(uuid::Uuid::new_v4().as_simple().to_string())
+    let (plaintext_token, token_hash) = if payload.public_link {
+        let (plaintext, hash) = generate_share_token();
+        (Some(plaintext), Some(hash))
     } else {
-        None
+        (None, None)
     };
 
     let new_shared = shared::ActiveModel {
         path_id: Set(entry_id),
-        token: Set(token),
+        token: Set(token_hash),
         can_write: Set(payload.can_write),
         user_ids: Set(payload.user_ids),
         group_ids: Set(payload.group_ids),
@@ -1357,7 +1385,10 @@ pub(crate) async fn share_entry_handler(
         .await?
         .ok_or_else(|| internal("Entry not found after sharing"))?;
 
-    Ok(Json(ShareResponse::from_model(created, entry_model)))
+    let mut response = ShareResponse::from_model(created, entry_model);
+    response.token = plaintext_token;
+
+    Ok(Json(response))
 }
 
 /// Delete a share
@@ -1440,18 +1471,21 @@ pub(crate) async fn update_share_handler(
         }
     });
 
-    let token = if payload.public_link {
+    let (plaintext_token, token_hash) = if payload.public_link {
         if share.token.is_none() {
-            Some(uuid::Uuid::new_v4().as_simple().to_string())
+            let (plaintext, hash) = generate_share_token();
+            (Some(plaintext), Some(hash))
         } else {
-            share.token.clone()
+            // Keep the existing hash: we don't have the plaintext to hand
+            // back, but the previously issued link must keep working.
+            (None, share.token.clone())
         }
     } else {
-        None
+        (None, None)
     };
 
     let mut active_share: shared::ActiveModel = share.into();
-    active_share.token = Set(token);
+    active_share.token = Set(token_hash);
     active_share.can_write = Set(payload.can_write);
     active_share.user_ids = Set(payload.user_ids);
     active_share.group_ids = Set(payload.group_ids);
@@ -1464,7 +1498,10 @@ pub(crate) async fn update_share_handler(
         .await?
         .ok_or_else(|| internal("Entry not found"))?;
 
-    Ok(Json(ShareResponse::from_model(updated, entry_model)))
+    let mut response = ShareResponse::from_model(updated, entry_model);
+    response.token = plaintext_token;
+
+    Ok(Json(response))
 }
 
 // ---------------------------------------------------------------------------
@@ -1505,12 +1542,14 @@ async fn get_share_context(
 ) -> Result<(shared::Model, entry::Model, StorageWrapper), ApiError> {
     let looked_up_by_id = share_identifier.parse::<i32>().is_ok();
 
-    // Look up the share by id or token.
+    // Look up the share by id or token. Tokens are hashed at rest (issue
+    // #10), so a token-based lookup compares against the hash of the
+    // supplied identifier, never the plaintext.
     let share = if let Ok(share_id) = share_identifier.parse::<i32>() {
         shared::Entity::find_by_id(share_id).one(&state.db).await?
     } else {
         shared::Entity::find()
-            .filter(shared::Column::Token.eq(share_identifier))
+            .filter(shared::Column::Token.eq(Auth::hash_string(share_identifier)))
             .one(&state.db)
             .await?
     }
@@ -1567,9 +1606,10 @@ pub(crate) async fn get_share_info_handler(
 ) -> Result<impl IntoResponse, ApiError> {
     let (share, entry_model, _) = get_share_context(&share_id, auth.as_ref(), &state).await?;
 
+    // Never echo back `share.token` — it's a hash now (issue #10), and the
+    // caller already knows the plaintext identifier they used to get here.
     Ok(Json(serde_json::json!({
         "id": share.id,
-        "token": share.token,
         "can_write": share.can_write,
         "path": entry_model.path,
         "name": std::path::Path::new(&entry_model.path).file_name().and_then(|s| s.to_str()).unwrap_or(&entry_model.path),

@@ -38,6 +38,8 @@ Create a `.env` file in the project root with:
 - `TOKEN_EXPIRATION_DAYS` (optional): Defaults to 30
 - `TOKEN_LENGTH` (optional): Defaults to 32
 - `PLUGIN_DIR` (optional): Defaults to `/etc/byteburrow/plugins` (`make` targets set this to `target/plugins` via `BYTEBURROW__PLUGIN_DIR`)
+- `CORS_ALLOWED_ORIGINS` (optional): Comma-separated list of origins allowed to make cross-origin requests. Defaults to empty (no cross-origin access) — same-origin requests (including the Vite dev proxy) are unaffected; only set this when the frontend is hosted on a different origin than the API
+- `TRUST_FORWARDED_HEADERS` (optional): Defaults to `false`. Only set to `true` when the server sits behind a reverse proxy that sets `X-Forwarded-For`/`X-Real-IP` itself — otherwise these are ignored and the real TCP peer address is used, since any client can spoof them
 
 ## Architecture
 

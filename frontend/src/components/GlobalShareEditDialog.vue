@@ -23,7 +23,7 @@ const canWrite = ref(props.share.can_write)
 const expiresInDays = ref(0) // Default to no change in expiration or set 0
 const selectedUserIds = ref<number[]>([...(props.share.user_ids || [])])
 const selectedGroupIds = ref<number[]>([...(props.share.group_ids || [])])
-const isPublicLink = ref(!!props.share.token)
+const isPublicLink = ref(props.share.has_public_link)
 
 const handleUpdate = async () => {
   try {

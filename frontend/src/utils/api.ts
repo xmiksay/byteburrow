@@ -1,5 +1,3 @@
-const TOKEN_KEY = 'auth_token'
-
 export interface ApiError {
   error: string
 }
@@ -8,15 +6,9 @@ export async function apiCall<T>(
   endpoint: string,
   options: RequestInit = {}
 ): Promise<T> {
-  const token = localStorage.getItem(TOKEN_KEY)
-
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...(options.headers as Record<string, string>),
-  }
-
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`
   }
 
   const response = await fetch(endpoint, {

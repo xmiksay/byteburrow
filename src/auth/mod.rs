@@ -1,8 +1,8 @@
 use crate::entity::{group, token, user};
 use axum::{
     async_trait,
-    extract::FromRequestParts,
-    http::{request::Parts, StatusCode},
+    extract::{ConnectInfo, FromRequestParts},
+    http::{request::Parts, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     RequestPartsExt,
 };
@@ -13,6 +13,7 @@ use axum_extra::{
 use chrono::{Duration, Utc};
 use sea_orm::{ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set};
 use sha2::Digest;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::web::AppState;
@@ -94,14 +95,13 @@ impl FromRequestParts<Arc<AppState>> for Auth {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
-        // Extract IP address from headers (try X-Forwarded-For first, then X-Real-IP)
-        let ip_address = parts
-            .headers
-            .get("x-forwarded-for")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.split(',').next())
-            .or_else(|| parts.headers.get("x-real-ip").and_then(|v| v.to_str().ok()))
-            .map(|s| s.trim().to_string());
+        let peer = parts
+            .extract::<ConnectInfo<SocketAddr>>()
+            .await
+            .ok()
+            .map(|ConnectInfo(addr)| addr);
+        let trust_forwarded_headers = crate::config::Config::get().trust_forwarded_headers;
+        let ip_address = resolve_ip_address(&parts.headers, peer, trust_forwarded_headers);
 
         // KISS-7: Basic auth needs the DB (verifies a password), so check it
         // first as a special case. Bearer / query-param / cookie are unified
@@ -129,7 +129,7 @@ impl FromRequestParts<Arc<AppState>> for Auth {
 ///
 /// (Basic auth is handled separately in [`Auth::from_request_parts`] because it
 /// requires database access to verify the password.)
-async fn extract_token(parts: &mut Parts) -> Option<String> {
+pub(crate) async fn extract_token(parts: &mut Parts) -> Option<String> {
     // 1. Bearer token in Authorization header.
     if let Ok(TypedHeader(Authorization(bearer))) =
         parts.extract::<TypedHeader<Authorization<Bearer>>>().await
@@ -161,6 +161,34 @@ async fn extract_token(parts: &mut Parts) -> Option<String> {
     }
 
     None
+}
+
+/// Resolve the client IP to record for logging/auditing purposes.
+///
+/// `X-Forwarded-For` / `X-Real-IP` are only trusted when
+/// `trust_forwarded_headers` (config-driven at the call site) is `true` —
+/// i.e. a reverse proxy is known to set them itself — otherwise any client
+/// could spoof the IP recorded against their own session by sending these
+/// headers directly. Falls back to the real TCP peer address from
+/// `ConnectInfo`.
+pub(crate) fn resolve_ip_address(
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+    trust_forwarded_headers: bool,
+) -> Option<String> {
+    if trust_forwarded_headers {
+        let forwarded = headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.split(',').next())
+            .or_else(|| headers.get("x-real-ip").and_then(|v| v.to_str().ok()))
+            .map(|s| s.trim().to_string());
+        if forwarded.is_some() {
+            return forwarded;
+        }
+    }
+
+    peer.map(|addr| addr.ip().to_string())
 }
 
 // ============================================================================
@@ -458,6 +486,8 @@ mod tests {
                 token_length: 32,
                 plugin_dir: "/etc/byteburrow/plugins".to_string(),
                 ignore_patterns: vec![],
+                cors_allowed_origins: String::new(),
+                trust_forwarded_headers: false,
             }));
         });
     }
@@ -597,5 +627,54 @@ mod tests {
         let mut parts = parts_for_uri("/anything").await;
 
         assert_eq!(extract_token(&mut parts).await, None);
+    }
+
+    fn headers_with_forwarded_for(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", value.parse().unwrap());
+        headers
+    }
+
+    fn peer_addr() -> SocketAddr {
+        "203.0.113.7:12345".parse().unwrap()
+    }
+
+    #[test]
+    fn resolve_ip_ignores_spoofed_forwarded_header_when_untrusted() {
+        let headers = headers_with_forwarded_for("6.6.6.6");
+
+        // Untrusted by default: any client-supplied X-Forwarded-For must be
+        // ignored in favor of the real TCP peer address.
+        assert_eq!(
+            resolve_ip_address(&headers, Some(peer_addr()), false),
+            Some("203.0.113.7".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_ip_uses_forwarded_header_when_trusted() {
+        let headers = headers_with_forwarded_for("198.51.100.1, 10.0.0.1");
+
+        assert_eq!(
+            resolve_ip_address(&headers, Some(peer_addr()), true),
+            Some("198.51.100.1".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_ip_falls_back_to_peer_when_trusted_but_header_absent() {
+        let headers = HeaderMap::new();
+
+        assert_eq!(
+            resolve_ip_address(&headers, Some(peer_addr()), true),
+            Some("203.0.113.7".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_ip_returns_none_when_no_peer_and_untrusted() {
+        let headers = headers_with_forwarded_for("6.6.6.6");
+
+        assert_eq!(resolve_ip_address(&headers, None, false), None);
     }
 }

@@ -50,6 +50,8 @@ async fn test_db() -> &'static DatabaseConnection {
                 token_length: 32,
                 plugin_dir: "/tmp".to_string(),
                 ignore_patterns: vec![],
+                cors_allowed_origins: String::new(),
+                trust_forwarded_headers: false,
             }));
         });
 
