@@ -93,6 +93,12 @@ pub struct RenameEntryRequest {
     pub new_path: String,
 }
 
+/// Update entry tags request
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct UpdateEntryTagsRequest {
+    pub tags: Vec<i32>,
+}
+
 /// Meta response
 #[derive(Debug, serde::Serialize, utoipa::ToSchema)]
 pub struct MetaResponse {
@@ -238,6 +244,46 @@ fn join_share_path(base_path: &str, sub_path: &str) -> String {
     }
 }
 
+/// Upsert the `tags` column of the `meta` row keyed by `entry.hash`,
+/// preserving any existing `keywords`/`custom` classification data.
+/// Fails with 409 if the entry hasn't been hashed yet (tags are
+/// content-addressed, same as the rest of `meta`).
+async fn set_entry_tags(
+    db: &sea_orm::DatabaseConnection,
+    entry_model: &entry::Model,
+    tags: Vec<i32>,
+) -> Result<(), ApiError> {
+    let hash = entry_model
+        .hash
+        .clone()
+        .ok_or_else(|| conflict("Entry has not been hashed yet; tags are unavailable"))?;
+
+    let existing = meta::Entity::find_by_id(hash.clone()).one(db).await?;
+
+    match existing {
+        Some(m) => {
+            let active = meta::ActiveModel {
+                hash: Set(hash),
+                tags: Set(tags),
+                keywords: Set(m.keywords),
+                custom: Set(m.custom),
+            };
+            active.update(db).await?;
+        }
+        None => {
+            let active = meta::ActiveModel {
+                hash: Set(hash),
+                tags: Set(tags),
+                keywords: Set(vec![]),
+                custom: Set(serde_json::Value::Object(serde_json::Map::new())),
+            };
+            active.insert(db).await?;
+        }
+    }
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
@@ -270,6 +316,7 @@ pub fn router() -> Router<Arc<AppState>> {
             axum::routing::delete(remove_entry_handler),
         )
         .route("/:id/hash/*path", post(trigger_hash_handler))
+        .route("/:id/tags/*path", put(update_entry_tags_handler))
         .route("/:id/share/*path", get(list_shares_handler))
         .route("/:id/share/*path", post(share_entry_handler))
         .route(
@@ -292,6 +339,10 @@ pub fn router() -> Router<Arc<AppState>> {
         .route(
             "/share/:share_id/remove/*path",
             axum::routing::delete(share_remove_handler),
+        )
+        .route(
+            "/share/:share_id/tags/*path",
+            put(share_update_entry_tags_handler),
         )
         .route("/thumbnail/:hash/:size", get(thumbnail_handler))
         .route("/meta/:hash", get(get_meta_handler))
@@ -970,6 +1021,53 @@ pub(crate) async fn rename_entry_handler(
 
     Ok(Json(
         serde_json::json!({ "message": "Entry renamed successfully" }),
+    ))
+}
+
+/// Set the tags on a file or directory
+/// PUT /api/storage/:id/tags/*path
+#[utoipa::path(
+    put,
+    path = "/api/storage/{id}/tags/{path}",
+    tag = "entry",
+    params(
+        ("id" = i32, Path, description = "Storage ID"),
+        ("path" = String, Path, description = "Entry path"),
+    ),
+    request_body = UpdateEntryTagsRequest,
+    responses(
+        (status = 200, description = "Tags updated"),
+        (status = 404, description = "Entry not found", body = ErrorResponse),
+        (status = 409, description = "Entry has not been hashed yet", body = ErrorResponse),
+    ),
+    security(("bearer" = []))
+)]
+#[instrument(skip(state, auth))]
+pub(crate) async fn update_entry_tags_handler(
+    auth: Auth,
+    AxumPath((storage_id, path)): AxumPath<(i32, String)>,
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<UpdateEntryTagsRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let storage = StorageWrapper::find_by_id(&state.db, storage_id)
+        .await
+        .map_err(|e| storage_lookup_err(e, storage_id))?;
+
+    require_storage_path_write_access(&auth, &storage.model, &path, &state.db).await?;
+
+    let sub_path = path.trim_matches('/');
+
+    let entry_model = entry::Entity::find()
+        .filter(entry::Column::StorageId.eq(storage_id))
+        .filter(entry::Column::Path.eq(sub_path))
+        .one(&state.db)
+        .await?
+        .ok_or_else(|| not_found_msg(format!("File not found: {path}")))?;
+
+    set_entry_tags(&state.db, &entry_model, payload.tags).await?;
+
+    Ok(Json(
+        serde_json::json!({ "message": "Tags updated successfully" }),
     ))
 }
 
@@ -2019,6 +2117,54 @@ pub(crate) async fn share_remove_handler(
 
     Ok(Json(
         serde_json::json!({ "message": "Entry removed successfully" }),
+    ))
+}
+
+/// Set the tags on a file or directory via share
+/// PUT /api/storage/share/:share_id/tags/*path
+#[utoipa::path(
+    put,
+    path = "/api/storage/share/{share_id}/tags/{path}",
+    tag = "share",
+    params(
+        ("share_id" = String, Path, description = "Share ID or token"),
+        ("path" = String, Path, description = "Entry path"),
+    ),
+    request_body = UpdateEntryTagsRequest,
+    responses(
+        (status = 200, description = "Tags updated"),
+        (status = 403, description = "Write access denied", body = ErrorResponse),
+        (status = 404, description = "Entry not found", body = ErrorResponse),
+        (status = 409, description = "Entry has not been hashed yet", body = ErrorResponse),
+    )
+)]
+#[instrument(skip(state, auth))]
+pub(crate) async fn share_update_entry_tags_handler(
+    auth: Option<Auth>,
+    AxumPath((share_id, path)): AxumPath<(String, String)>,
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<UpdateEntryTagsRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let (share, entry_model, _storage) =
+        get_share_context(&share_id, auth.as_ref(), &state).await?;
+
+    if !share.can_write {
+        return Err(forbidden("This share does not allow write access"));
+    }
+
+    let full_path = join_share_path(&entry_model.path, &path);
+
+    let target_entry = entry::Entity::find()
+        .filter(entry::Column::StorageId.eq(entry_model.storage_id))
+        .filter(entry::Column::Path.eq(full_path.clone()))
+        .one(&state.db)
+        .await?
+        .ok_or_else(|| not_found_msg(format!("File not found: {full_path}")))?;
+
+    set_entry_tags(&state.db, &target_entry, payload.tags).await?;
+
+    Ok(Json(
+        serde_json::json!({ "message": "Tags updated successfully" }),
     ))
 }
 

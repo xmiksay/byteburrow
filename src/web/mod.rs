@@ -635,6 +635,7 @@ pub struct AppState {
         // Entry management endpoints
         storage::create_entry_handler,
         storage::rename_entry_handler,
+        storage::update_entry_tags_handler,
         storage::remove_entry_handler,
         storage::list_directory_handler,
         // Share endpoints
@@ -652,6 +653,7 @@ pub struct AppState {
         storage::share_create_handler,
         storage::share_rename_handler,
         storage::share_remove_handler,
+        storage::share_update_entry_tags_handler,
         // Thumbnail endpoints
         storage::thumbnail_handler,
         storage::trigger_hash_handler,
@@ -684,6 +686,7 @@ pub struct AppState {
             storage::UpdateStorageRequest,
             storage::CreateEntryRequest,
             storage::RenameEntryRequest,
+            storage::UpdateEntryTagsRequest,
             storage::ShareEntryRequest,
             storage::ShareResponse,
             crate::entity::entry::EntryType,
