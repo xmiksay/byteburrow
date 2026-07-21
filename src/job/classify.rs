@@ -27,10 +27,10 @@ pub(super) async fn run_classification(
     // Run classification (plugin path, or the inline-EXIF fallback).
     let result = classify_or_exif(plugins, entry, full_path, &data, mime_type).await?;
 
-    if let Some(merged) = result {
-        // Persist face embeddings (also mutates merged.custom for downstream
-        // meta persistence).
-        face::process_face_embeddings(db, hash_bytes, &mut merged.clone()).await?;
+    if let Some(mut merged) = result {
+        // Persist face embeddings; this mutates merged.custom in place so
+        // the match results survive into meta persistence below.
+        face::process_face_embeddings(db, hash_bytes, &mut merged).await?;
 
         persist_meta(db, hash_bytes, &merged).await?;
         persist_photo(db, hash_bytes, &merged).await?;
@@ -184,4 +184,108 @@ async fn persist_photo(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::migration::Migrator;
+    use sea_orm_migration::MigratorTrait;
+    use std::sync::OnceLock;
+    use tokio::sync::OnceCell;
+
+    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    static DB: OnceCell<DatabaseConnection> = OnceCell::const_new();
+
+    fn runtime() -> &'static tokio::runtime::Runtime {
+        RUNTIME.get_or_init(|| tokio::runtime::Runtime::new().expect("build shared test runtime"))
+    }
+
+    /// Shares the process-lifetime runtime/DB setup pattern used by
+    /// `tests/*_integration.rs` (a per-test `#[tokio::test]` runtime would be
+    /// dropped mid-test and hang the connection pool's background tasks).
+    ///
+    /// Connects with a locally-built `Config` rather than the process-wide
+    /// `Config` singleton: `cargo test --lib` runs every unit test in one
+    /// process, and other modules (e.g. `auth::tests`) already initialize
+    /// that singleton with an unusable `database_url`.
+    async fn test_db() -> &'static DatabaseConnection {
+        DB.get_or_init(|| async {
+            let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+                "postgres://user:password@localhost:15432/byteburrow_test".to_string()
+            });
+            let config = crate::config::Config {
+                database_url,
+                salt: "classify-test-salt".to_string(),
+                server_addr: "0.0.0.0:3000".to_string(),
+                thumbnail_storage: "/tmp/thumbnails".to_string(),
+                base_url: "http://localhost:3000".to_string(),
+                token_expiration_days: 30,
+                token_length: 32,
+                plugin_dir: "/tmp".to_string(),
+                ignore_patterns: vec![],
+                cors_allowed_origins: String::new(),
+                trust_forwarded_headers: false,
+            };
+
+            let db = crate::db_connect(&config)
+                .await
+                .expect("connect to test database");
+            Migrator::up(&db, None).await.expect("run migrations");
+            db
+        })
+        .await
+    }
+
+    /// Regression test for issue #11: `run_classification` used to run
+    /// `face::process_face_embeddings` against `&mut merged.clone()`, so the
+    /// contact-match array it wrote into `custom["face_embeddings"]` landed
+    /// on a throwaway clone and never reached `persist_meta`. This exercises
+    /// the same two calls on the same `merged` binding that
+    /// `run_classification` now uses, and checks the result actually lands
+    /// in `meta.custom`.
+    #[test]
+    fn face_match_results_persist_to_meta_custom() {
+        runtime().block_on(async {
+            let db = test_db().await;
+            let hash_bytes = b"classify-test-face-embeddings-hash".to_vec();
+
+            let mut merged = MergedClassification {
+                custom: serde_json::json!({
+                    "faces": { "rects": [{ "x": 0, "y": 0, "width": 10, "height": 10 }] },
+                    "face_embeddings_raw": [
+                        { "face_index": 0, "embedding": [0.1, 0.2, 0.3] }
+                    ],
+                })
+                .as_object()
+                .expect("test fixture is a JSON object")
+                .clone(),
+                ..Default::default()
+            };
+
+            face::process_face_embeddings(db, &hash_bytes, &mut merged)
+                .await
+                .expect("process face embeddings");
+
+            // Sanity check: face processing must mutate the same `merged`
+            // that gets passed to `persist_meta` below, not a clone of it.
+            assert!(merged.custom.contains_key("face_embeddings"));
+
+            persist_meta(db, &hash_bytes, &merged)
+                .await
+                .expect("persist meta");
+
+            let stored = meta::Entity::find_by_id(hash_bytes)
+                .one(db)
+                .await
+                .expect("query meta")
+                .expect("meta row must exist after persist_meta");
+
+            assert!(
+                stored.custom.get("face_embeddings").is_some(),
+                "face_embeddings must reach meta.custom, got: {:?}",
+                stored.custom
+            );
+        });
+    }
 }
