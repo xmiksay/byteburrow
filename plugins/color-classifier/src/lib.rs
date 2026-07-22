@@ -54,7 +54,12 @@ impl ClassifierPlugin for ColorClassifier {
         let pixels: Vec<(u8, u8, u8)> =
             thumb.pixels().map(|(_, _, p)| (p[0], p[1], p[2])).collect();
 
-        let avg = compute_average(&pixels);
+        // A degenerate image can decode to zero pixels; without a result there is
+        // nothing to classify (and averaging would divide by zero).
+        let avg = match compute_average(&pixels) {
+            Some(avg) => avg,
+            None => return Ok(None),
+        };
         let raw_colors = top_n_colors(&pixels, 3);
 
         let raw_hex: Vec<String> = raw_colors
@@ -86,15 +91,19 @@ impl ClassifierPlugin for ColorClassifier {
 
 // ── Color helpers ───────────────────────────────────────────────
 
-fn compute_average(pixels: &[(u8, u8, u8)]) -> (u8, u8, u8) {
+fn compute_average(pixels: &[(u8, u8, u8)]) -> Option<(u8, u8, u8)> {
     let (mut sr, mut sg, mut sb) = (0u64, 0u64, 0u64);
     for &(r, g, b) in pixels {
         sr += r as u64;
         sg += g as u64;
         sb += b as u64;
     }
+    // Guard against a zero-pixel image: dividing by the pixel count would panic.
     let n = pixels.len() as u64;
-    ((sr / n) as u8, (sg / n) as u8, (sb / n) as u8)
+    if n == 0 {
+        return None;
+    }
+    Some(((sr / n) as u8, (sg / n) as u8, (sb / n) as u8))
 }
 
 /// Quantize 8-bit RGB to a 12-bit index (4 bits per channel, 4096 buckets).
@@ -152,4 +161,20 @@ fn nearest_vga(r: u8, g: u8, b: u8) -> &'static str {
 #[allow(improper_ctypes_definitions)]
 pub extern "C" fn byteburrow_create_plugin() -> *mut dyn ClassifierPlugin {
     Box::into_raw(Box::new(ColorClassifier))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compute_average_empty_returns_none() {
+        assert_eq!(compute_average(&[]), None);
+    }
+
+    #[test]
+    fn compute_average_mixed_pixels() {
+        let pixels = [(0, 0, 0), (255, 255, 255), (100, 50, 200)];
+        assert_eq!(compute_average(&pixels), Some((118, 101, 151)));
+    }
 }
