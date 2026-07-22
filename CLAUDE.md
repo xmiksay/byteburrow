@@ -40,6 +40,8 @@ Config is read from the environment (a `.env` file in the project root is loaded
 - `BYTEBURROW__IGNORE_PATTERNS` (optional): Comma-separated glob patterns to skip during indexing. Defaults to `.git,.cache,node_modules,.DS_Store,__pycache__,.Trash`
 - `BYTEBURROW__CORS_ALLOWED_ORIGINS` (optional): Comma-separated list of origins allowed to make cross-origin requests. Defaults to empty (no cross-origin access) — same-origin requests (including the Vite dev proxy) are unaffected; only set this when the frontend is hosted on a different origin than the API
 - `BYTEBURROW__TRUST_FORWARDED_HEADERS` (optional): Defaults to `false`. Only set to `true` when the server sits behind a reverse proxy that sets `X-Forwarded-For`/`X-Real-IP` itself — otherwise these are ignored and the real TCP peer address is used, since any client can spoof them
+- `BYTEBURROW__FACE_MATCH_THRESHOLD` (optional): Defaults to `0.8`. Minimum cosine similarity for a face to be matched to a known contact — the single "is this a known person" threshold shared by the job pipeline and the CLI `face_match` tool (`src/face_match.rs`)
+- `BYTEBURROW__FACE_MATCH_MARGIN` (optional): Defaults to `0.05`. Minimum gap between the best contact's similarity and the best *different* contact's; rejects ambiguous matches where two people are almost equally close. Set to `0` to disable the guard
 
 The frontend is **not** served from a runtime path: its build output (`frontend/dist`) is embedded into the server binary at compile time via `rust_embed`, so there is no `FRONTEND_DIST` variable — rebuild the binary to pick up frontend changes.
 

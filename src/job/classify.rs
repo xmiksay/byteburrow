@@ -36,7 +36,12 @@ pub(super) async fn run_classification(
     if let Some(mut merged) = result {
         // Persist face embeddings; this mutates merged.custom in place so
         // the match results survive into meta persistence below.
-        face::process_face_embeddings(db, hash_bytes, &mut merged).await?;
+        let config = crate::config::Config::get();
+        let face_params = crate::face_match::MatchParams {
+            threshold: config.face_match_threshold,
+            margin: config.face_match_margin,
+        };
+        face::process_face_embeddings(db, hash_bytes, &mut merged, face_params).await?;
 
         persist_meta(db, hash_bytes, &merged).await?;
         persist_photo(db, hash_bytes, &merged).await?;
@@ -232,6 +237,8 @@ mod tests {
                 ignore_patterns: vec![],
                 cors_allowed_origins: String::new(),
                 trust_forwarded_headers: false,
+                face_match_threshold: 0.8,
+                face_match_margin: 0.05,
             };
 
             let db = crate::db_connect(&config)
@@ -269,7 +276,11 @@ mod tests {
                 ..Default::default()
             };
 
-            face::process_face_embeddings(db, &hash_bytes, &mut merged)
+            let face_params = crate::face_match::MatchParams {
+                threshold: 0.8,
+                margin: 0.05,
+            };
+            face::process_face_embeddings(db, &hash_bytes, &mut merged, face_params)
                 .await
                 .expect("process face embeddings");
 

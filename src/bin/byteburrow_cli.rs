@@ -4,6 +4,7 @@ use byteburrow::{
     config::Config,
     db_connect,
     entity::{contact, face_reference, group, group_user, user},
+    face_match::{bytes_to_floats, match_embedding, Exemplar, MatchParams},
 };
 use clap::{Args, Parser, Subcommand};
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, NotSet, QueryFilter, Set};
@@ -30,13 +31,19 @@ enum Commands {
     Fixtures,
     /// List all face references in the database
     FaceList,
-    /// Test face matching: compare a contact's confirmed faces against all others
+    /// Test face matching: find unconfirmed faces whose best confirmed match is
+    /// this contact, using the shared host-side matcher (`face_match`).
     FaceMatch {
-        /// Contact ID whose confirmed faces to use as source
+        /// Contact ID to test candidate faces against
         contact_id: i32,
-        /// Similarity threshold (0.0-1.0, default 0.5)
-        #[arg(short, long, default_value_t = 0.5)]
-        threshold: f32,
+        /// Similarity threshold (0.0-1.0). Defaults to the configured
+        /// `face_match_threshold`.
+        #[arg(short, long)]
+        threshold: Option<f32>,
+        /// Ambiguity margin: minimum gap to the best *other* contact. Defaults
+        /// to the configured `face_match_margin`.
+        #[arg(short, long)]
+        margin: Option<f32>,
     },
 }
 
@@ -120,8 +127,13 @@ async fn main() {
         Commands::FaceMatch {
             contact_id,
             threshold,
+            margin,
         } => {
-            if let Err(e) = face_match(&config, *contact_id, *threshold).await {
+            let params = MatchParams {
+                threshold: threshold.unwrap_or(config.face_match_threshold),
+                margin: margin.unwrap_or(config.face_match_margin),
+            };
+            if let Err(e) = face_match(&config, *contact_id, params).await {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
@@ -345,7 +357,7 @@ async fn face_list(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
 async fn face_match(
     config: &Config,
     contact_id: i32,
-    threshold: f32,
+    params: MatchParams,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let db = db_connect(config).await?;
 
@@ -355,14 +367,26 @@ async fn face_match(
         .await?
         .ok_or_else(|| format!("Contact with id={contact_id} not found"))?;
 
-    // Get confirmed face references for this contact
-    let source_refs = face_reference::Entity::find()
-        .filter(face_reference::Column::ContactId.eq(contact_id))
-        .filter(face_reference::Column::Confirmed.eq(true))
-        .all(&db)
-        .await?;
+    // All confirmed references (any contact) are the exemplar set the shared
+    // matcher ranks each candidate against — this is what makes the CLI agree
+    // with the job pipeline. Decode embeddings once for reuse.
+    let all_refs = face_reference::Entity::find().all(&db).await?;
+    let confirmed_decoded: Vec<(i32, String, String, Vec<f32>)> = all_refs
+        .iter()
+        .filter(|r| r.confirmed)
+        .filter_map(|r| {
+            r.contact_id.map(|cid| {
+                (
+                    cid,
+                    r.model_id.clone(),
+                    r.model_version.clone(),
+                    bytes_to_floats(&r.embedding),
+                )
+            })
+        })
+        .collect();
 
-    if source_refs.is_empty() {
+    if !confirmed_decoded.iter().any(|(cid, ..)| *cid == contact_id) {
         return Err(format!(
             "No confirmed face references for contact '{}' (id={})",
             contact_record.name, contact_id
@@ -370,84 +394,63 @@ async fn face_match(
         .into());
     }
 
-    // Keep each source embedding paired with its model identity so candidates
-    // are only ever compared against references from the same vector space.
-    let source_embeddings: Vec<(String, String, Vec<f32>)> = source_refs
+    let exemplars: Vec<Exemplar> = confirmed_decoded
         .iter()
-        .map(|r| {
-            (
-                r.model_id.clone(),
-                r.model_version.clone(),
-                bytes_to_floats(&r.embedding),
-            )
+        .map(|(cid, model_id, model_version, embedding)| Exemplar {
+            contact_id: *cid,
+            model_id,
+            model_version,
+            embedding,
         })
         .collect();
 
     println!(
-        "Contact: '{}' (id={}) — {} confirmed reference(s)",
+        "Contact: '{}' (id={}) — {} confirmed exemplar(s) across all contacts",
         contact_record.name,
         contact_id,
-        source_refs.len()
+        exemplars.len()
     );
-    println!("Threshold: {:.2}\n", threshold);
-
-    // Load all other face references
-    let all_refs = face_reference::Entity::find().all(&db).await?;
-    let source_ids: std::collections::HashSet<i32> = source_refs.iter().map(|r| r.id).collect();
+    println!(
+        "Threshold: {:.2}   Margin: {:.2}\n",
+        params.threshold, params.margin
+    );
 
     let contacts = contact::Entity::find().all(&db).await?;
     let contact_map: std::collections::HashMap<i32, String> =
         contacts.into_iter().map(|c| (c.id, c.name)).collect();
 
-    let mut matches: Vec<(f32, &face_reference::Model)> = Vec::new();
+    // Candidates: unconfirmed faces whose best confirmed match is this contact.
+    let mut matches: Vec<(f32, Option<f32>, &face_reference::Model)> = Vec::new();
 
     for r in &all_refs {
-        // Skip source faces
-        if source_ids.contains(&r.id) {
+        if r.confirmed {
             continue;
         }
-        // Skip faces already assigned to the same contact
-        if r.contact_id == Some(contact_id) {
-            continue;
-        }
-        // Skip faces already confirmed for another contact
-        if r.confirmed && r.contact_id.is_some() {
-            continue;
-        }
-
         let emb = bytes_to_floats(&r.embedding);
-
-        // Best similarity across source embeddings from the SAME model only.
-        // Cross-model comparisons are meaningless and are refused, not scored 0.
-        let mut best_sim = 0.0f32;
-        for (src_model_id, src_model_version, src) in &source_embeddings {
-            if *src_model_id != r.model_id || *src_model_version != r.model_version {
-                continue;
+        let outcome = match_embedding(&emb, &r.model_id, &r.model_version, &exemplars, params);
+        if let Some(m) = outcome.best {
+            if m.contact_id == contact_id {
+                matches.push((m.similarity, m.runner_up, r));
             }
-            match cosine_similarity(src, &emb) {
-                Ok(sim) => best_sim = best_sim.max(sim),
-                Err(e) => eprintln!("skipping face id={}: {e}", r.id),
-            }
-        }
-
-        if best_sim >= threshold {
-            matches.push((best_sim, r));
         }
     }
 
     matches.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
     if matches.is_empty() {
-        println!("No matches found above threshold {:.2}", threshold);
+        println!(
+            "No unconfirmed faces matched contact '{}' at threshold {:.2} / margin {:.2}",
+            contact_record.name, params.threshold, params.margin
+        );
     } else {
         println!(
-            "{:<10} {:<5} {:<66} {:<6} {:<10} {:<20}",
-            "Similarity", "ID", "Hash", "Face#", "Confirmed", "Contact"
+            "{:<10} {:<10} {:<5} {:<66} {:<6} {:<20}",
+            "Similarity", "RunnerUp", "ID", "Hash", "Face#", "Contact"
         );
         println!("{}", "-".repeat(120));
 
         let mut saved = 0;
-        for (sim, r) in &matches {
+        for (sim, runner_up, r) in &matches {
             let hash_hex = hex::encode(&r.hash);
             let contact_name = r
                 .contact_id
@@ -456,12 +459,14 @@ async fn face_match(
                 .unwrap_or("-");
 
             println!(
-                "{:<10.4} {:<5} {:<66} {:<6} {:<10} {:<20}",
+                "{:<10.4} {:<10} {:<5} {:<66} {:<6} {:<20}",
                 sim,
+                runner_up
+                    .map(|s| format!("{s:.4}"))
+                    .unwrap_or_else(|| "-".to_string()),
                 r.id,
                 hash_hex,
                 r.face_index,
-                if r.confirmed { "YES" } else { "no" },
                 contact_name,
             );
 
@@ -480,28 +485,4 @@ async fn face_match(
     }
 
     Ok(())
-}
-
-fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32, Box<dyn std::error::Error>> {
-    if a.len() != b.len() {
-        return Err(format!("embedding dimension mismatch: {} vs {}", a.len(), b.len()).into());
-    }
-    if a.is_empty() {
-        return Err("empty embedding".into());
-    }
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm_a > 0.0 && norm_b > 0.0 {
-        Ok(dot / (norm_a * norm_b))
-    } else {
-        Ok(0.0)
-    }
-}
-
-fn bytes_to_floats(bytes: &[u8]) -> Vec<f32> {
-    bytes
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-        .collect()
 }
