@@ -24,7 +24,6 @@ export interface Group {
 
 export interface Tag {
     id: number
-    user_id: number
     name: string
     description?: string
 }
@@ -46,6 +45,7 @@ export interface Storage {
     path: string
     default_user: number
     default_group: number
+    ignore_patterns: string
 }
 
 export interface CreateStorageRequest {
@@ -83,10 +83,15 @@ export interface DirectoryEntry {
     path: string
     hash?: number[]
     entry_type: 'File' | 'Directory' | 'Symlink'
+    notify: boolean
     size?: number
-    tags: number[]
     modified_at?: string
     created_at: string
+    /**
+     * Client-side only: the server directory listing does not include tags.
+     * Populated locally (e.g. after a tag update) for optimistic display.
+     */
+    tags?: number[]
 }
 
 export interface DirectoryListingResponse {
@@ -99,7 +104,6 @@ export interface Shared {
     id: number
     storage_id: number
     path: string
-    path_id: number
     owner_id: number
     token?: string
     has_public_link: boolean
@@ -130,7 +134,7 @@ export interface MetaResponse {
 export interface ShareRequest {
     can_write: boolean
     expires_in_days?: number
-    user_ids?: number[]
-    group_ids?: number[]
+    user_ids: number[]
+    group_ids: number[]
     public_link: boolean
 }

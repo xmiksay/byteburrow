@@ -222,7 +222,7 @@ const sortedEntries = computed(() => {
     result = result.filter(e => getBasename(e.path).toLowerCase().includes(nameQuery))
   }
   if (filterTags.value.length > 0) {
-    result = result.filter(e => filterTags.value.every(t => e.tags.includes(t)))
+    result = result.filter(e => filterTags.value.every(t => e.tags?.includes(t)))
   }
   return sortEntries(result)
 })
@@ -401,7 +401,7 @@ const deleteEntry = async (entry: DirectoryEntry) => {
             </div>
             <File v-else :size="18" class="entry-icon file" />
             <span class="entry-name">{{ getBasename(entry.path) }}</span>
-            <div class="entry-tags" v-if="entry.tags?.length > 0">
+            <div class="entry-tags" v-if="entry.tags?.length">
               <span v-for="tagId in entry.tags" :key="tagId" class="tag-pill">
                 {{ getTagName(tagId) }}
               </span>

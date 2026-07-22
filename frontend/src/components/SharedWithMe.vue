@@ -64,7 +64,8 @@ const mockStorage = computed<Storage>(() => ({
   name: '',
   path: '',
   default_user: 0,
-  default_group: 0
+  default_group: 0,
+  ignore_patterns: ''
 }))
 
 const pathSegments = computed(() => {
@@ -172,7 +173,7 @@ const sortedEntries = computed(() => {
     result = result.filter(e => getBasename(e.path).toLowerCase().includes(nameQuery))
   }
   if (filterTags.value.length > 0) {
-    result = result.filter(e => filterTags.value.every(t => e.tags.includes(t)))
+    result = result.filter(e => filterTags.value.every(t => e.tags?.includes(t)))
   }
   return sortEntries(result)
 })
