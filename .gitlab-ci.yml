@@ -32,17 +32,33 @@ clippy:
   script:
     - make clippy
 
-frontend-typecheck:
-  stage: lint
+.frontend: &frontend
   image: node:22-bookworm
   cache:
     key: npm-$CI_COMMIT_REF_SLUG
     paths:
       - frontend/node_modules
-  script:
+  before_script:
     - cd frontend
     - npm install
+
+frontend-typecheck:
+  stage: lint
+  <<: *frontend
+  script:
     - npm run typecheck
+
+frontend-lint:
+  stage: lint
+  <<: *frontend
+  script:
+    - npm run lint
+
+frontend-test:
+  stage: test
+  <<: *frontend
+  script:
+    - npm run test
 
 test:
   stage: test

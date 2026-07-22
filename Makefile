@@ -3,8 +3,8 @@ export BYTEBURROW__PLUGIN_DIR ?= target/plugins
 
 .DEFAULT_GOAL := help
 .PHONY: help build run dev build-plugins frontend-install frontend-dev frontend-build frontend-dist-stub \
-        check fmt fmt-check clippy lint frontend-typecheck \
-        test test-unit test-integration verify coverage install-hooks \
+        check fmt fmt-check clippy lint frontend-typecheck frontend-lint \
+        test test-unit test-integration frontend-test verify coverage install-hooks \
         migrate-up migrate-down clean
 
 help: ## Show this help
@@ -67,7 +67,10 @@ clippy: frontend-dist-stub ## Lint the whole workspace, deny warnings
 frontend-typecheck: frontend-install ## Type-check the frontend (vue-tsc --noEmit)
 	cd frontend && . "$$NVM_DIR/nvm.sh" && nvm use && npm run typecheck
 
-lint: fmt-check clippy frontend-typecheck ## fmt-check + clippy + frontend typecheck
+frontend-lint: frontend-install ## Lint the frontend (ESLint, flat config)
+	cd frontend && . "$$NVM_DIR/nvm.sh" && nvm use && npm run lint
+
+lint: fmt-check clippy frontend-typecheck frontend-lint ## fmt-check + clippy + frontend typecheck + frontend lint
 
 ## --- Tests ---
 
@@ -81,7 +84,10 @@ test-integration: frontend-dist-stub ## Integration tests (tests/*.rs — needs 
 		echo "No integration tests yet (tests/ is empty)"; \
 	fi
 
-test: test-unit test-integration ## All tests
+frontend-test: frontend-install ## Frontend unit tests (Vitest)
+	cd frontend && . "$$NVM_DIR/nvm.sh" && nvm use && npm run test
+
+test: test-unit test-integration frontend-test ## All tests
 
 verify: lint test ## Pre-"done" gate: lint + all tests
 
