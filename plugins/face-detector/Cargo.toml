@@ -1,9 +1,9 @@
 [package]
 name = "byteburrow-plugin-face"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
 description = "Face detection plugin for ByteBurrow"
-authors = ["Martin Miksanik"]
 
 [lib]
 crate-type = ["cdylib"]
@@ -11,5 +11,5 @@ crate-type = ["cdylib"]
 [dependencies]
 byteburrow-plugin-api = { path = "../../byteburrow-plugin-api" }
 rustface = "0.1"
-image = "0.25"
-serde_json = "1.0"
+image = { workspace = true }
+serde_json = { workspace = true }
