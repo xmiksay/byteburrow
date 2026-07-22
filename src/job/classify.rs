@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use anyhow::Context;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
 use tracing::info;
 
@@ -19,8 +20,13 @@ pub(super) async fn run_classification(
     hash_bytes: &[u8],
     full_path: &Path,
 ) -> anyhow::Result<()> {
-    // Read file data and determine MIME type.
-    let data = std::fs::read(full_path).unwrap_or_default();
+    // Read file data and determine MIME type. Propagate read errors instead
+    // of defaulting to empty data, which would silently classify unreadable
+    // files (permissions, race, I/O error) as empty. Async read keeps the job
+    // worker off a blocking sync call.
+    let data = tokio::fs::read(full_path)
+        .await
+        .with_context(|| format!("reading file for classification: {}", full_path.display()))?;
     let mime_type = determine_content_type(full_path, &data);
     info!(path = &entry.path, mime = mime_type, "Classifying file");
 
@@ -285,6 +291,51 @@ mod tests {
                 stored.custom.get("face_embeddings").is_some(),
                 "face_embeddings must reach meta.custom, got: {:?}",
                 stored.custom
+            );
+        });
+    }
+
+    /// Regression test for issue #6: an unreadable file must surface a read
+    /// error instead of being silently classified as empty data.
+    #[test]
+    fn unreadable_file_propagates_error() {
+        runtime().block_on(async {
+            let db = test_db().await;
+            let plugins = PluginRegistry::load_from_directory(
+                Path::new("/nonexistent-plugin-dir"),
+                &HashMap::new(),
+            );
+            let epoch = chrono::DateTime::from_timestamp(0, 0)
+                .expect("epoch timestamp")
+                .naive_utc();
+            let entry = entry::Model {
+                id: 1,
+                storage_id: 1,
+                user_id: 1,
+                group_id: 1,
+                parent_id: None,
+                path: "does-not-exist.jpg".to_string(),
+                hash: None,
+                entry_type: entry::EntryType::File,
+                notify: false,
+                skip_plugins: false,
+                size: 0,
+                modified_at: epoch,
+                created_at: epoch,
+            };
+
+            let result = run_classification(
+                db,
+                &plugins,
+                &entry,
+                b"unreadable-file-hash",
+                Path::new("/nonexistent/unreadable-file.bin"),
+            )
+            .await;
+
+            assert!(
+                result.is_err(),
+                "unreadable file must produce an error, not empty classification"
             );
         });
     }
