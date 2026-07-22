@@ -1,17 +1,17 @@
 use crate::auth::{Auth, AuthError};
 use crate::entity::user;
 use crate::web::{
-    bad_request, conflict, forbidden, internal, not_found, require_admin, save_or_err,
-    user_name_taken, ApiError, AppState, ErrorResponse,
+    bad_request, conflict, forbidden, internal, message, not_found, require_admin, save_or_err,
+    user_name_taken, ApiError, AppState, ErrorResponse, MessageResponse, Page, Pagination,
 };
 use axum::{
-    extract::{ConnectInfo, Path, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::{header, HeaderMap},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
-use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+use sea_orm::{ActiveModelTrait, EntityTrait, PaginatorTrait, Set};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -140,9 +140,7 @@ async fn change_password_handler(
         .map_err(|_| AuthOrApiError::Api(internal("Failed to hash password")))?);
     active_user.update(&state.db).await?;
 
-    Ok(Json(
-        serde_json::json!({ "message": "Password changed successfully" }),
-    ))
+    Ok(message("Password changed successfully"))
 }
 
 /// Login endpoint - accepts JSON payload with username/password
@@ -230,8 +228,17 @@ async fn logout_handler(
 
     (
         [(header::SET_COOKIE, cookie_value)],
-        Json(serde_json::json!({ "message": "Logged out successfully" })),
+        message("Logged out successfully"),
     )
+}
+
+/// Current-user summary returned by `GET /api/user/me`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MeResponse {
+    pub id: i32,
+    pub username: String,
+    pub name: String,
+    pub admin: bool,
 }
 
 /// Me endpoint - returns current user info
@@ -241,17 +248,17 @@ async fn logout_handler(
     path = "/api/user/me",
     tag = "user",
     responses(
-        (status = 200, description = "Current user info"),
+        (status = 200, description = "Current user info", body = MeResponse),
     ),
     security(("bearer" = []))
 )]
-async fn me_handler(auth: Auth) -> impl IntoResponse {
-    Json(serde_json::json!({
-        "id": auth.user.id,
-        "username": auth.user.username,
-        "name": auth.user.name,
-        "admin": auth.user.admin,
-    }))
+async fn me_handler(auth: Auth) -> Json<MeResponse> {
+    Json(MeResponse {
+        id: auth.user.id,
+        username: auth.user.username,
+        name: auth.user.name,
+        admin: auth.user.admin,
+    })
 }
 
 // ============================================================================
@@ -264,21 +271,26 @@ async fn me_handler(auth: Auth) -> impl IntoResponse {
     get,
     path = "/api/user",
     tag = "user",
+    params(Pagination),
     responses(
-        (status = 200, description = "List of all users", body = Vec<UserResponse>),
+        (status = 200, description = "Paginated list of users", body = Page<UserResponse>),
         (status = 403, description = "Admin access required", body = ErrorResponse),
     ),
     security(("bearer" = []))
 )]
 async fn list_users_handler(
     auth: Auth,
+    Query(pagination): Query<Pagination>,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<UserResponse>>, ApiError> {
+) -> Result<Json<Page<UserResponse>>, ApiError> {
     require_admin(&auth)?;
 
-    let users = user::Entity::find().all(&state.db).await?;
+    let paginator = user::Entity::find().paginate(&state.db, pagination.per_page());
+    let total = paginator.num_items().await?;
+    let users = paginator.fetch_page(pagination.page_index()).await?;
+    let items = users.into_iter().map(UserResponse::from).collect();
 
-    Ok(Json(users.into_iter().map(UserResponse::from).collect()))
+    Ok(Json(Page::new(items, total, &pagination)))
 }
 
 /// Get user by ID
@@ -441,7 +453,7 @@ async fn delete_user_handler(
     auth: Auth,
     Path(user_id): Path<i32>,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<MessageResponse>, ApiError> {
     require_admin(&auth)?;
 
     // Prevent deleting yourself
@@ -456,9 +468,10 @@ async fn delete_user_handler(
 
     user::Entity::delete_by_id(user_id).exec(&state.db).await?;
 
-    Ok(Json(serde_json::json!({
-        "message": format!("User '{}' deleted successfully", user.username),
-    })))
+    Ok(message(format!(
+        "User '{}' deleted successfully",
+        user.username
+    )))
 }
 
 // ---------------------------------------------------------------------------

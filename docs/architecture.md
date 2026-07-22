@@ -94,6 +94,7 @@ All API endpoints are annotated with `#[utoipa::path(...)]` and grouped by tags.
 | `entry` | Entry management (create, rename, remove, list directory) | `src/web/storage.rs` |
 | `share` | Sharing operations (create, list, update, delete, share-based access) | `src/web/storage.rs` |
 | `thumbnail` | Thumbnail serving and hash trigger | `src/web/storage.rs` |
+| `meta` | File meta lookup + service `health`/`version` | `src/web/storage.rs`, `src/web/mod.rs` |
 | `photo` | Photo listing and thumbnail regeneration | `src/web/photo.rs` |
 
 **When adding a new endpoint:**
@@ -178,11 +179,42 @@ on) yields a fresh plaintext to show the user.
 - Database connection available via `State<Arc<AppState>>` in handlers
 - Access as `state.db`
 
-### Error Responses
-Use `ErrorResponse` struct from `src/web/mod.rs` for consistent error handling:
+### Response Envelopes
+The JSON surface follows a small set of shared shapes (see
+[ADR 0004](adr/0004-api-response-conventions.md)); all live in `src/web/mod.rs`:
+
+- **Errors** — `ErrorResponse { error }`, produced by the `ApiError` enum's
+  `IntoResponse`. Handlers propagate with `?` / the `bad_request(..)`,
+  `forbidden(..)`, … constructors rather than building tuples by hand.
+- **Acknowledgements** — `MessageResponse { message }`, built with the
+  `message(..)` helper, for endpoints whose only useful response is a
+  confirmation (deletes, queued jobs, tag updates). Do **not** reintroduce
+  ad-hoc `Json(json!({"message": ...}))`.
+- **Everything else is a named `ToSchema` struct** (e.g. `MeResponse`,
+  `HealthResponse`, `VersionResponse`, `DirectoryListingResponse`,
+  `ShareInfoResponse`) — no untyped `json!` object literals in handlers.
+
+### Pagination
+List endpoints accept `?page` (1-based) and `?per_page` via the shared
+`Pagination` extractor (default `per_page` 50, capped at
+`Pagination::MAX_PER_PAGE` = 200) and return the `Page<T>` envelope
+(`items`, `page`, `per_page`, `total`, `total_pages`):
 ```rust
-(StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "Message".to_string() }))
+let paginator = user::Entity::find().paginate(&state.db, pagination.per_page());
+let total = paginator.num_items().await?;
+let users = paginator.fetch_page(pagination.page_index()).await?;
+Ok(Json(Page::new(items, total, &pagination)))
 ```
+Adopted by the flat admin lists (`GET /api/user`, `/api/group`, `/api/tag`,
+`/api/storage`). Photo lists and share/directory listings are not yet
+paginated (deferred — see ADR 0004). The Vue services keep a plain `T[]` view
+by walking pages through `api.getAll()`.
+
+> **Naming:** content/entry routes use RPC-style verb segments
+> (`/show/`, `/raw/`, `/create/`, `/rename/`, `/remove/`, `/hash/`) rather than
+> REST nouns. This is intentional and load-bearing (shared with the Kodi
+> directory index, WebDAV/CalDAV/CardDAV, and share links); a REST rename is
+> deferred to the H1 generated-client cutover. See ADR 0004.
 
 ### File Operations
 Use `Storage` wrapper instead of direct filesystem access to maintain database consistency:

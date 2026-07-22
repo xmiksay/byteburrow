@@ -3,7 +3,7 @@ import type { Group, CreateGroupRequest, UpdateGroupRequest } from '../types'
 
 export const groupService = {
     async getGroups(): Promise<Group[]> {
-        return api.get<Group[]>('/api/group')
+        return api.getAll<Group>('/api/group')
     },
 
     async createGroup(data: CreateGroupRequest): Promise<Group> {

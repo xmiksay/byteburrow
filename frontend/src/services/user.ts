@@ -3,7 +3,7 @@ import type { User } from '../types'
 
 export const userService = {
     async getUsers(): Promise<User[]> {
-        return api.get<User[]>('/api/user')
+        return api.getAll<User>('/api/user')
     },
 
     async changePassword(userId: number, password: string): Promise<{ message: string }> {

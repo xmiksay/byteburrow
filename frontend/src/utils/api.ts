@@ -2,6 +2,15 @@ export interface ApiError {
   error: string
 }
 
+/** A single page of a paginated list endpoint (`Page<T>` on the server). */
+export interface Page<T> {
+  items: T[]
+  page: number
+  per_page: number
+  total: number
+  total_pages: number
+}
+
 export async function apiCall<T>(
   endpoint: string,
   options: RequestInit = {}
@@ -53,4 +62,26 @@ export const api = {
 
   delete: <T>(endpoint: string) =>
     apiCall<T>(endpoint, { method: 'DELETE' }),
+
+  /** GET a single page of a paginated list endpoint. */
+  getPage: <T>(endpoint: string, page = 1, perPage = 200) => {
+    const sep = endpoint.includes('?') ? '&' : '?'
+    return apiCall<Page<T>>(`${endpoint}${sep}page=${page}&per_page=${perPage}`, {
+      method: 'GET',
+    })
+  },
+
+  /**
+   * GET every page of a paginated list endpoint and return the flattened
+   * items. Lets callers keep a plain `T[]` view while the API is paginated.
+   */
+  getAll: async <T>(endpoint: string, perPage = 200): Promise<T[]> => {
+    const first = await api.getPage<T>(endpoint, 1, perPage)
+    const items = [...first.items]
+    for (let page = 2; page <= first.total_pages; page++) {
+      const next = await api.getPage<T>(endpoint, page, perPage)
+      items.push(...next.items)
+    }
+    return items
+  },
 }

@@ -1,15 +1,15 @@
 use crate::auth::Auth;
 use crate::entity::tag;
 use crate::web::{
-    conflict, not_found, require_admin, save_or_err, tag_name_taken, ApiError, AppState,
-    ErrorResponse,
+    conflict, message, not_found, require_admin, save_or_err, tag_name_taken, ApiError, AppState,
+    ErrorResponse, MessageResponse, Page, Pagination,
 };
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     routing::get,
     Json, Router,
 };
-use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+use sea_orm::{ActiveModelTrait, EntityTrait, PaginatorTrait, Set};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -63,17 +63,22 @@ pub fn router() -> Router<Arc<AppState>> {
     get,
     path = "/api/tag",
     tag = "tag",
+    params(Pagination),
     responses(
-        (status = 200, description = "List of all tags", body = Vec<TagResponse>),
+        (status = 200, description = "Paginated list of tags", body = Page<TagResponse>),
     )
 )]
 async fn list_tags_handler(
     _auth: Option<Auth>,
+    Query(pagination): Query<Pagination>,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<TagResponse>>, ApiError> {
-    let tags = tag::Entity::find().all(&state.db).await?;
+) -> Result<Json<Page<TagResponse>>, ApiError> {
+    let paginator = tag::Entity::find().paginate(&state.db, pagination.per_page());
+    let total = paginator.num_items().await?;
+    let tags = paginator.fetch_page(pagination.page_index()).await?;
+    let items = tags.into_iter().map(TagResponse::from).collect();
 
-    Ok(Json(tags.into_iter().map(TagResponse::from).collect()))
+    Ok(Json(Page::new(items, total, &pagination)))
 }
 
 /// Get tag by ID (only if it belongs to the user)
@@ -210,7 +215,7 @@ async fn delete_tag_handler(
     auth: Auth,
     Path(tag_id): Path<i32>,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<MessageResponse>, ApiError> {
     require_admin(&auth)?;
 
     let tag = tag::Entity::find_by_id(tag_id)
@@ -220,7 +225,5 @@ async fn delete_tag_handler(
 
     tag::Entity::delete_by_id(tag_id).exec(&state.db).await?;
 
-    Ok(Json(serde_json::json!({
-        "message": format!("Tag '{}' deleted successfully", tag.name),
-    })))
+    Ok(message(format!("Tag '{}' deleted successfully", tag.name)))
 }
