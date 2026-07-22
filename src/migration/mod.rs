@@ -16,6 +16,7 @@ mod m20220101_000014_entry_drop_kind;
 mod m20220101_000015_storage_ignore_patterns;
 mod m20220101_000016_contact;
 mod m20220101_000017_face_reference;
+mod m20220101_000018_face_reference_model_meta;
 
 pub struct Migrator;
 
@@ -39,6 +40,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20220101_000015_storage_ignore_patterns::Migration),
             Box::new(m20220101_000016_contact::Migration),
             Box::new(m20220101_000017_face_reference::Migration),
+            Box::new(m20220101_000018_face_reference_model_meta::Migration),
         ]
     }
 }

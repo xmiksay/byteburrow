@@ -25,7 +25,7 @@ Deep reference for ByteBurrow's module layout, request flow, and key patterns. S
 - **`src/entity/`**: SeaORM database models
   - Core entities: `user`, `group`, `storage`, `entry`, `tag`, `token`, `photo`, `shared`, `meta`
   - `group_user`: many-to-many relationship between groups and users
-  - `contact`, `face_reference`: support the face-recognition plugin pipeline (see Plugin System below)
+  - `contact`, `face_reference`: support the face-recognition plugin pipeline (see Plugin System below). Each `face_reference` stores the embedding **plus its model identity** (`model_id`, `model_version`, `dim`); recognition refuses to compare embeddings across different model identities so a model swap can't silently corrupt matches (see `src/job/face.rs`).
 
 - **`src/job/`**: Background job runner
   - Asynchronous job processing with configurable concurrency (based on CPU cores), running on a dedicated low-priority Tokio runtime

@@ -15,6 +15,13 @@ pub struct Model {
     pub bbox_h: i32,
     #[serde(skip)]
     pub embedding: Vec<u8>,
+    /// Identity of the embedding model that produced `embedding`. Embeddings
+    /// from different (`model_id`, `model_version`) pairs live in incomparable
+    /// vector spaces and must never be compared — see `crate::job::face`.
+    pub model_id: String,
+    pub model_version: String,
+    /// Number of f32 components in `embedding` (i.e. `embedding.len() / 4`).
+    pub dim: i32,
     pub confirmed: bool,
 }
 

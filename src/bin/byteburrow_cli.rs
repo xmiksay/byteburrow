@@ -309,10 +309,10 @@ async fn face_list(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         contacts.into_iter().map(|c| (c.id, c.name)).collect();
 
     println!(
-        "\n{:<5} {:<66} {:<6} {:<10} {:<20} {:<9} Bbox",
-        "ID", "Hash", "Face#", "Confirmed", "Contact", "Embed"
+        "\n{:<5} {:<66} {:<6} {:<10} {:<20} {:<30} {:<9} Bbox",
+        "ID", "Hash", "Face#", "Confirmed", "Contact", "Model", "Embed"
     );
-    println!("{}", "-".repeat(130));
+    println!("{}", "-".repeat(160));
 
     for r in &refs {
         let hash_hex = hex::encode(&r.hash);
@@ -321,16 +321,16 @@ async fn face_list(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
             .and_then(|id| contact_map.get(&id))
             .map(|n| n.as_str())
             .unwrap_or("-");
-        let embed_dim = r.embedding.len() / 4;
 
         println!(
-            "{:<5} {:<66} {:<6} {:<10} {:<20} {:<9} {}x{}+{}+{}",
+            "{:<5} {:<66} {:<6} {:<10} {:<20} {:<30} {:<9} {}x{}+{}+{}",
             r.id,
             hash_hex,
             r.face_index,
             if r.confirmed { "YES" } else { "no" },
             contact_name,
-            format!("{}d", embed_dim),
+            format!("{}@{}", r.model_id, r.model_version),
+            format!("{}d", r.dim),
             r.bbox_w,
             r.bbox_h,
             r.bbox_x,
@@ -370,9 +370,17 @@ async fn face_match(
         .into());
     }
 
-    let source_embeddings: Vec<Vec<f32>> = source_refs
+    // Keep each source embedding paired with its model identity so candidates
+    // are only ever compared against references from the same vector space.
+    let source_embeddings: Vec<(String, String, Vec<f32>)> = source_refs
         .iter()
-        .map(|r| bytes_to_floats(&r.embedding))
+        .map(|r| {
+            (
+                r.model_id.clone(),
+                r.model_version.clone(),
+                bytes_to_floats(&r.embedding),
+            )
+        })
         .collect();
 
     println!(
@@ -409,11 +417,18 @@ async fn face_match(
 
         let emb = bytes_to_floats(&r.embedding);
 
-        // Best similarity across all source embeddings for this contact
-        let best_sim = source_embeddings
-            .iter()
-            .map(|src| cosine_similarity(src, &emb))
-            .fold(0.0f32, f32::max);
+        // Best similarity across source embeddings from the SAME model only.
+        // Cross-model comparisons are meaningless and are refused, not scored 0.
+        let mut best_sim = 0.0f32;
+        for (src_model_id, src_model_version, src) in &source_embeddings {
+            if *src_model_id != r.model_id || *src_model_version != r.model_version {
+                continue;
+            }
+            match cosine_similarity(src, &emb) {
+                Ok(sim) => best_sim = best_sim.max(sim),
+                Err(e) => eprintln!("skipping face id={}: {e}", r.id),
+            }
+        }
 
         if best_sim >= threshold {
             matches.push((best_sim, r));
@@ -467,17 +482,20 @@ async fn face_match(
     Ok(())
 }
 
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() || a.is_empty() {
-        return 0.0;
+fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32, Box<dyn std::error::Error>> {
+    if a.len() != b.len() {
+        return Err(format!("embedding dimension mismatch: {} vs {}", a.len(), b.len()).into());
+    }
+    if a.is_empty() {
+        return Err("empty embedding".into());
     }
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm_a > 0.0 && norm_b > 0.0 {
-        dot / (norm_a * norm_b)
+        Ok(dot / (norm_a * norm_b))
     } else {
-        0.0
+        Ok(0.0)
     }
 }
 

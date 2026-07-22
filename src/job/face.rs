@@ -1,8 +1,16 @@
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::entity::face_reference;
 use crate::plugin::MergedClassification;
+
+/// Model identity assumed for embeddings that predate model metadata (rows
+/// backfilled by migration `..._face_reference_model_meta`, or raw plugin
+/// output from a plugin version that did not emit these fields). Must match the
+/// migration's `LEGACY_MODEL_*` constants so backfilled rows and legacy plugin
+/// output share one comparable vector space.
+const LEGACY_MODEL_ID: &str = "faceonnx-recognition-resnet27";
+const LEGACY_MODEL_VERSION: &str = "1";
 
 /// Persist face embeddings extracted by the faces plugin and match them
 /// against confirmed contacts. Sole caller: `classify::run_classification`.
@@ -56,6 +64,21 @@ pub(super) async fn process_face_embeddings(
             continue;
         }
 
+        // Model identity of this embedding. Older plugin output omits these
+        // fields; fall back to the legacy identity so it stays comparable with
+        // migration-backfilled rows.
+        let model_id = entry
+            .get("model_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or(LEGACY_MODEL_ID)
+            .to_string();
+        let model_version = entry
+            .get("model_version")
+            .and_then(|v| v.as_str())
+            .unwrap_or(LEGACY_MODEL_VERSION)
+            .to_string();
+        let dim = embedding_floats.len() as i32;
+
         let embedding_bytes = floats_to_bytes(&embedding_floats);
 
         // Get bbox from faces data
@@ -83,6 +106,9 @@ pub(super) async fn process_face_embeddings(
                 let active = face_reference::ActiveModel {
                     id: Set(existing_ref.id),
                     embedding: Set(embedding_bytes),
+                    model_id: Set(model_id.clone()),
+                    model_version: Set(model_version.clone()),
+                    dim: Set(dim),
                     bbox_x: Set(bbox_x),
                     bbox_y: Set(bbox_y),
                     bbox_w: Set(bbox_w),
@@ -100,6 +126,9 @@ pub(super) async fn process_face_embeddings(
                     bbox_w: Set(bbox_w),
                     bbox_h: Set(bbox_h),
                     embedding: Set(embedding_bytes),
+                    model_id: Set(model_id.clone()),
+                    model_version: Set(model_version.clone()),
+                    dim: Set(dim),
                     confirmed: Set(false),
                     ..Default::default()
                 };
@@ -107,19 +136,49 @@ pub(super) async fn process_face_embeddings(
             }
         }
 
-        // Match against confirmed references
+        // Match against confirmed references, but only those produced by the
+        // same model. Comparing across models silently corrupts the vector
+        // space, so incomparable references are skipped (and counted) rather
+        // than scored 0.
         let mut best_contact_id: Option<i32> = None;
         let mut best_similarity: f32 = 0.0;
+        let mut skipped_cross_model = 0usize;
 
         for reference in &confirmed_refs {
-            if let Some(contact_id) = reference.contact_id {
-                let ref_floats = bytes_to_floats(&reference.embedding);
-                let sim = cosine_similarity(&embedding_floats, &ref_floats);
-                if sim > best_similarity {
-                    best_similarity = sim;
-                    best_contact_id = Some(contact_id);
-                }
+            let Some(contact_id) = reference.contact_id else {
+                continue;
+            };
+            if reference.model_id != model_id || reference.model_version != model_version {
+                skipped_cross_model += 1;
+                continue;
             }
+            let ref_floats = bytes_to_floats(&reference.embedding);
+            let sim = match cosine_similarity(&embedding_floats, &ref_floats) {
+                Ok(sim) => sim,
+                Err(e) => {
+                    warn!(
+                        reference_id = reference.id,
+                        error = %e,
+                        "skipping incomparable face embedding"
+                    );
+                    continue;
+                }
+            };
+            if sim > best_similarity {
+                best_similarity = sim;
+                best_contact_id = Some(contact_id);
+            }
+        }
+
+        if skipped_cross_model > 0 {
+            warn!(
+                face_index,
+                model_id = %model_id,
+                model_version = %model_version,
+                skipped = skipped_cross_model,
+                "skipped confirmed references from a different embedding model; \
+                 re-embed them to make matching work across the model change"
+            );
         }
 
         if best_similarity > 0.8 {
@@ -146,17 +205,24 @@ pub(super) async fn process_face_embeddings(
     Ok(())
 }
 
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() || a.is_empty() {
-        return 0.0;
+/// Cosine similarity of two same-length embeddings. Returns an explicit error
+/// on a dimension mismatch (incomparable vectors) instead of silently scoring 0,
+/// which would hide a model/version mismatch. Callers must only pass embeddings
+/// they have already confirmed share a model identity.
+fn cosine_similarity(a: &[f32], b: &[f32]) -> anyhow::Result<f32> {
+    if a.len() != b.len() {
+        anyhow::bail!("embedding dimension mismatch: {} vs {}", a.len(), b.len());
+    }
+    if a.is_empty() {
+        anyhow::bail!("empty embedding");
     }
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm_a > 0.0 && norm_b > 0.0 {
-        dot / (norm_a * norm_b)
+        Ok(dot / (norm_a * norm_b))
     } else {
-        0.0
+        Ok(0.0)
     }
 }
 
@@ -171,4 +237,47 @@ fn bytes_to_floats(bytes: &[u8]) -> Vec<f32> {
         .chunks_exact(4)
         .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cosine_of_identical_vectors_is_one() {
+        let v = [0.5f32, 0.5, 0.5, 0.5];
+        let sim = cosine_similarity(&v, &v).unwrap();
+        assert!((sim - 1.0).abs() < 1e-6, "got {sim}");
+    }
+
+    #[test]
+    fn cosine_of_orthogonal_vectors_is_zero() {
+        let a = [1.0f32, 0.0];
+        let b = [0.0f32, 1.0];
+        let sim = cosine_similarity(&a, &b).unwrap();
+        assert!(sim.abs() < 1e-6, "got {sim}");
+    }
+
+    #[test]
+    fn cosine_dimension_mismatch_is_error_not_zero() {
+        // The core of the fix: incomparable vectors must error, never score 0.
+        let a = [1.0f32, 2.0, 3.0];
+        let b = [1.0f32, 2.0];
+        let err = cosine_similarity(&a, &b).unwrap_err();
+        assert!(err.to_string().contains("dimension mismatch"), "{err}");
+    }
+
+    #[test]
+    fn cosine_empty_is_error() {
+        let empty: [f32; 0] = [];
+        assert!(cosine_similarity(&empty, &empty).is_err());
+    }
+
+    #[test]
+    fn floats_bytes_roundtrip() {
+        let floats = vec![0.0f32, -1.5, 3.5, 42.0];
+        let bytes = floats_to_bytes(&floats);
+        assert_eq!(bytes.len(), floats.len() * 4);
+        assert_eq!(bytes_to_floats(&bytes), floats);
+    }
 }
