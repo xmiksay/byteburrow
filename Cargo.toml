@@ -1,12 +1,13 @@
 [workspace]
-resolver = "1"
+resolver = "2"
 members = [".", "byteburrow-plugin-api", "plugins/*"]
 exclude = ["plugins/face-embedder/service"]
 
 [package]
 name = "byteburrow"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
 
 [dependencies]
 axum = { workspace = true, features = ["ws"] }
@@ -33,8 +34,8 @@ hex = "0.4.3"
 minijinja = "2.15.1"
 utoipa = { version = "5.4.0", features = ["axum_extras", "chrono"] }
 utoipa-swagger-ui = { version = "8.1.0", features = ["axum"] }
-kamadak-exif = "0.6.1"
-image = "0.25"
+kamadak-exif = { workspace = true }
+image = { workspace = true }
 notify = "8.2.0"
 rust-embed = "8"
 mime_guess = "2"
@@ -43,7 +44,8 @@ byteburrow-plugin-api = { path = "byteburrow-plugin-api" }
 libc = "0.2"
 
 [workspace.package]
-version = "0.0.1"
+version = "0.1.0"
+edition = "2021"
 authors = ["Martin Miksanik"]
 description = "ByteBurrow - Personal cloud system"
 documentation = "https://gitlab.com/xmiksay/byteburrow#"
@@ -66,3 +68,5 @@ sha2 = "0.10"
 tower = "0.4"
 axum-extra = "0.9.6"
 chrono = "0.4.44"
+image = "0.25"
+kamadak-exif = "0.6.1"
