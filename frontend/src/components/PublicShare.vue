@@ -49,7 +49,8 @@ const mockStorage = computed<Storage>(() => ({
   path: '',
   description: '',
   default_user: 0,
-  default_group: 0
+  default_group: 0,
+  ignore_patterns: ''
 }))
 
 const breadcrumbs = computed(() => {
