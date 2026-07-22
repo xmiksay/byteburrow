@@ -358,6 +358,100 @@ fn list_and_create_share_reject_non_owner_and_allow_owner() {
 }
 
 #[test]
+fn my_shares_are_keyed_on_creator_not_entry_ownership() {
+    // Issue #32 / G1: `GET /share` ("my shares") lists shares by their explicit
+    // `owner_id` (creator). A share created by the entry owner shows up in the
+    // owner's list; a group member who *can manage* the entry but did not create
+    // the share must not see it in their own "my shares".
+    runtime().block_on(async {
+        let db = test_db().await.clone();
+        let owner = make_user(&db, "owner", false).await;
+        let member = make_user(&db, "member", false).await;
+        let grp = make_group(&db).await;
+        let stor = make_storage(&db, owner.id, grp.id).await;
+        let ent = make_entry(&db, stor.id, owner.id, grp.id).await;
+        let entry_path = ent.path.clone();
+
+        // `member` is in the entry's owning group, so require_entry_owner lets
+        // them manage its shares — but they still aren't the creator.
+        group_user::ActiveModel {
+            user_id: Set(member.id),
+            group_id: Set(grp.id),
+            admin: Set(false),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert group membership");
+
+        let owner_id = owner.id;
+        let owner_token = bearer_token(&db, owner).await;
+        let member_token = bearer_token(&db, member).await;
+
+        let app = storage_web::router().with_state(make_app_state(db.clone()));
+
+        // Owner creates the share; the response records them as the owner.
+        let req = Request::builder()
+            .uri(format!("/{}/share/{entry_path}", stor.id))
+            .method("POST")
+            .header("Authorization", format!("Bearer {owner_token}"))
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "can_write": false,
+                    "expires_in_days": null,
+                    "public_link": false,
+                    "user_ids": [],
+                    "group_ids": [],
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let created: serde_json::Value =
+            serde_json::from_str(&body_string(res).await).expect("parse share response");
+        assert_eq!(created["owner_id"], owner_id);
+        let share_id = created["id"].as_i64().expect("share id");
+
+        // Owner's "my shares" includes it.
+        let req = Request::builder()
+            .uri("/share")
+            .header("Authorization", format!("Bearer {owner_token}"))
+            .body(Body::empty())
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let owner_shares: Vec<serde_json::Value> =
+            serde_json::from_str(&body_string(res).await).expect("parse owner shares");
+        assert!(
+            owner_shares
+                .iter()
+                .any(|s| s["id"].as_i64() == Some(share_id)),
+            "owner's my-shares must contain the share they created"
+        );
+
+        // The group member can manage the entry but did not create the share,
+        // so it must not appear in *their* my-shares.
+        let req = Request::builder()
+            .uri("/share")
+            .header("Authorization", format!("Bearer {member_token}"))
+            .body(Body::empty())
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let member_shares: Vec<serde_json::Value> =
+            serde_json::from_str(&body_string(res).await).expect("parse member shares");
+        assert!(
+            !member_shares
+                .iter()
+                .any(|s| s["id"].as_i64() == Some(share_id)),
+            "a non-creator must not see the share in their my-shares"
+        );
+    });
+}
+
+#[test]
 fn update_and_delete_share_reject_non_owner_and_allow_owner() {
     runtime().block_on(async {
         let db = test_db().await.clone();
@@ -370,6 +464,7 @@ fn update_and_delete_share_reject_non_owner_and_allow_owner() {
         let now = chrono::Utc::now().naive_utc();
         let share = shared::ActiveModel {
             path_id: Set(ent.id),
+            owner_id: Set(owner.id),
             token: Set(None),
             can_write: Set(false),
             user_ids: Set(vec![]),

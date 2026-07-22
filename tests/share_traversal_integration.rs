@@ -171,6 +171,7 @@ async fn setup_share(db: &DatabaseConnection) -> (String, std::path::PathBuf) {
     let token = format!("share-token-{}", uniq());
     shared::ActiveModel {
         path_id: Set(entry_model.id),
+        owner_id: Set(owner.id),
         // `shared.token` stores a hash of the plaintext (issue #10) — insert
         // it the same way `share_entry_handler` does, so a request using the
         // plaintext `token` returned from this fixture resolves correctly.

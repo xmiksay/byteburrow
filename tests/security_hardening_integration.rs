@@ -239,6 +239,7 @@ fn listing_shares_never_echoes_the_token() {
 
         shared::ActiveModel {
             path_id: Set(ent.id),
+            owner_id: Set(owner.id),
             token: Set(Some(Auth::hash_string("some-plaintext-token"))),
             can_write: Set(false),
             user_ids: Set(vec![]),

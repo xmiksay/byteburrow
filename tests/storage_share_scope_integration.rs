@@ -180,6 +180,7 @@ async fn setup_storage_with_scoped_share(
 
     shared::ActiveModel {
         path_id: Set(shared_entry.id),
+        owner_id: Set(owner.id),
         token: Set(None),
         can_write: Set(can_write),
         user_ids: Set(vec![recipient.id]),

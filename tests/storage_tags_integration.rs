@@ -362,6 +362,7 @@ fn writable_share_can_update_tags_but_read_only_share_cannot() {
 
         let ro_share = shared::ActiveModel {
             path_id: Set(dir.id),
+            owner_id: Set(owner.id),
             token: Set(None),
             can_write: Set(false),
             user_ids: Set(vec![recipient_id]),
@@ -394,6 +395,7 @@ fn writable_share_can_update_tags_but_read_only_share_cannot() {
 
         let rw_share = shared::ActiveModel {
             path_id: Set(dir.id),
+            owner_id: Set(owner.id),
             token: Set(None),
             can_write: Set(true),
             user_ids: Set(vec![recipient_id]),
