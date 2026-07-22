@@ -29,10 +29,10 @@ impl Storage {
         let model = self.ensure_entry(db, sub_path).await?;
 
         // Skip if DB record already has a hash and is not older than FS
-        if model.hash.is_some() {
+        if let Some(existing_hash) = model.hash.clone() {
             if (fs_modified - model.modified_at).num_seconds() < 1 {
                 info!(path = sub_path, "Hash up-to-date, skipping");
-                return Ok((false, model.hash.clone().unwrap(), model));
+                return Ok((false, existing_hash, model));
             } else {
                 info!(
                     "Hash is calcuated, file is newer: {:?} {:?} {}",
