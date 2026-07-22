@@ -741,14 +741,6 @@ pub async fn run(config: Config, db: DatabaseConnection, job_sender: JobSender) 
     // Add filters
     jinja.add_filter("format_size", |bytes: i64| format_size(bytes));
 
-    jinja.add_filter("format_datetime", |dt: String| {
-        // This is a bit hacky because minijinja's Value doesn't easily pass chrono types
-        // unless we use custom Object. For now, we'll assume it's passed as ISO string or
-        // handle the type in the filter if possible.
-        // Actually, minijinja can handle Serialized chrono types as strings or ints.
-        dt
-    });
-
     jinja.add_filter("basename", |path: String| {
         path.trim_end_matches('/')
             .split('/')
