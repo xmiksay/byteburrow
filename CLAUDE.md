@@ -16,11 +16,14 @@ make dev              # Build plugins, run the server in debug mode (no frontend
 make build            # Build everything for release
 make build-plugins    # Build all plugins and symlink to target/plugins/
 make frontend-dev     # Frontend dev server with hot reload
-make lint             # cargo fmt --check + clippy -D warnings + frontend typecheck
+make lint             # cargo fmt --check + clippy -D warnings + openapi drift check + frontend typecheck
 make test             # test-unit + test-integration
 make verify           # lint + test — run before considering a change done
+make openapi-generate # Refresh frontend/openapi.json + regenerate the TS API client types
 make migrate-up       # Apply pending database migrations (also runs automatically on server startup)
 ```
+
+The frontend API client (types) is **generated from the OpenAPI spec**, not hand-written — see the "Generated TypeScript client" section in [docs/architecture.md](docs/architecture.md). After changing an API type, run `make openapi-generate` and commit both `frontend/openapi.json` and `frontend/src/api/schema.d.ts`; `make lint` fails if the committed spec drifts from the Rust code.
 
 Cross-compile for Turris Omnia (ARMv7, musl): `cross build --target armv7-unknown-linux-musleabihf --release`.
 

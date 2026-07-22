@@ -54,12 +54,12 @@ const revokeShare = async (shareId: number) => {
   }
 }
 
-const formatDate = (dateStr?: string) => {
+const formatDate = (dateStr?: string | null) => {
   if (!dateStr) return 'Never'
   return new Date(dateStr).toLocaleString()
 }
 
-const isExpired = (dateStr?: string) => {
+const isExpired = (dateStr?: string | null) => {
   if (!dateStr) return false
   return new Date(dateStr) < new Date()
 }

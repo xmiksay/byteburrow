@@ -809,6 +809,19 @@ pub struct AppState {
 )]
 struct ApiDoc;
 
+/// Serialize the OpenAPI spec as pretty-printed JSON.
+///
+/// Exposed so tooling (the `byteburrow-cli openapi` command) can dump the exact
+/// same document served at `/api/docs/openapi.json` without starting the server
+/// or touching the database. The frontend TypeScript client is generated from
+/// this output, so it stays the single source of truth for request/response
+/// types and endpoints.
+pub fn openapi_json() -> String {
+    ApiDoc::openapi()
+        .to_pretty_json()
+        .expect("OpenAPI document is always serializable")
+}
+
 struct SecurityAddon;
 
 impl Modify for SecurityAddon {
