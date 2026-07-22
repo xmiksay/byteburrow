@@ -8,6 +8,14 @@ use tract_onnx::prelude::*;
 const MODEL_INPUT_SIZE: u32 = 128;
 const DEFAULT_MODEL_PATH: &str = "/etc/byteburrow/models/recognition_resnet27.onnx";
 
+/// Identity of the vector space these embeddings live in. Persisted with every
+/// embedding so the recognition side can refuse to compare vectors produced by a
+/// different model or a different pre/post-processing pipeline. Bump the version
+/// whenever the model file OR the pre-processing here changes in a way that
+/// shifts the embedding space.
+const MODEL_ID: &str = "faceonnx-recognition-resnet27";
+const MODEL_VERSION: &str = "1";
+
 type ModelType = SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>;
 
 struct FaceEmbedder {
@@ -114,6 +122,9 @@ impl ClassifierPlugin for FaceEmbedder {
                     embeddings.push(serde_json::json!({
                         "face_index": i,
                         "embedding": embedding,
+                        "model_id": MODEL_ID,
+                        "model_version": MODEL_VERSION,
+                        "dim": embedding.len(),
                     }));
                 }
                 Err(e) => {
