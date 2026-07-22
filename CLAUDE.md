@@ -28,18 +28,20 @@ Frontend uses **nvm** — `make frontend-*` targets handle `nvm use` automatical
 
 ### Required Environment Variables
 
-Create a `.env` file in the project root with:
-- `DATABASE_URL` (required): PostgreSQL connection string
-- `SALT` (required): Secret string for password hashing
-- `SERVER_ADDR` (optional): Defaults to `0.0.0.0:3000`
-- `FRONTEND_DIST` (optional): Defaults to `frontend/dist`
-- `THUMBNAIL_STORAGE` (optional): Defaults to `/tmp/thumbnails`
-- `BASE_URL` (optional): Defaults to `http://localhost:3000`
-- `TOKEN_EXPIRATION_DAYS` (optional): Defaults to 30
-- `TOKEN_LENGTH` (optional): Defaults to 32
-- `PLUGIN_DIR` (optional): Defaults to `/etc/byteburrow/plugins` (`make` targets set this to `target/plugins` via `BYTEBURROW__PLUGIN_DIR`)
-- `CORS_ALLOWED_ORIGINS` (optional): Comma-separated list of origins allowed to make cross-origin requests. Defaults to empty (no cross-origin access) — same-origin requests (including the Vite dev proxy) are unaffected; only set this when the frontend is hosted on a different origin than the API
-- `TRUST_FORWARDED_HEADERS` (optional): Defaults to `false`. Only set to `true` when the server sits behind a reverse proxy that sets `X-Forwarded-For`/`X-Real-IP` itself — otherwise these are ignored and the real TCP peer address is used, since any client can spoof them
+Config is read from the environment (a `.env` file in the project root is loaded automatically) with the `BYTEBURROW__` prefix — every variable below must be set as `BYTEBURROW__<NAME>` (e.g. `BYTEBURROW__DATABASE_URL=...`). See `.env.example`.
+- `BYTEBURROW__DATABASE_URL` (required): PostgreSQL connection string
+- `BYTEBURROW__SALT` (required): Secret string for password hashing
+- `BYTEBURROW__SERVER_ADDR` (optional): Defaults to `0.0.0.0:3000`
+- `BYTEBURROW__THUMBNAIL_STORAGE` (optional): Defaults to `/tmp/thumbnails`
+- `BYTEBURROW__BASE_URL` (optional): Defaults to `http://localhost:3000`
+- `BYTEBURROW__TOKEN_EXPIRATION_DAYS` (optional): Defaults to 30
+- `BYTEBURROW__TOKEN_LENGTH` (optional): Defaults to 32
+- `BYTEBURROW__PLUGIN_DIR` (optional): Defaults to `/etc/byteburrow/plugins` (`make` targets set this to `target/plugins`)
+- `BYTEBURROW__IGNORE_PATTERNS` (optional): Comma-separated glob patterns to skip during indexing. Defaults to `.git,.cache,node_modules,.DS_Store,__pycache__,.Trash`
+- `BYTEBURROW__CORS_ALLOWED_ORIGINS` (optional): Comma-separated list of origins allowed to make cross-origin requests. Defaults to empty (no cross-origin access) — same-origin requests (including the Vite dev proxy) are unaffected; only set this when the frontend is hosted on a different origin than the API
+- `BYTEBURROW__TRUST_FORWARDED_HEADERS` (optional): Defaults to `false`. Only set to `true` when the server sits behind a reverse proxy that sets `X-Forwarded-For`/`X-Real-IP` itself — otherwise these are ignored and the real TCP peer address is used, since any client can spoof them
+
+The frontend is **not** served from a runtime path: its build output (`frontend/dist`) is embedded into the server binary at compile time via `rust_embed`, so there is no `FRONTEND_DIST` variable — rebuild the binary to pick up frontend changes.
 
 ## Architecture
 
@@ -56,8 +58,8 @@ Full module map, request flow, OpenAPI tag grouping, and key patterns (auth, DB 
 ## Additional Notes
 
 - The application uses `build.rs` to embed the current git commit hash into the binary (accessible via `env!("GIT_COMMIT")`)
-- Frontend assets are served by Axum's `ServeDir` middleware from the path specified in `FRONTEND_DIST`
-- CORS is permissive (`CorsLayer::permissive()`) for development
+- Frontend assets are embedded into the server binary at compile time via `rust_embed` (`#[folder = "frontend/dist"]` in `src/web/mod.rs`) and served by a fallback handler with SPA `index.html` routing — there is no runtime asset directory
+- CORS is opt-in and driven by `BYTEBURROW__CORS_ALLOWED_ORIGINS` (`build_cors_layer` in `src/web/mod.rs`); it is empty by default, so cross-origin access is disabled unless explicitly configured
 - Structured logging via `tracing` with environment-based filtering (default: `byteburrow=debug,tower_http=debug,sea_orm=info,sqlx=warn`)
 
 ## Architecture Decision Records

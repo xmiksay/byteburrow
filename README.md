@@ -88,32 +88,34 @@ Common commands are wrapped in the root `Makefile` (`make help` for the full lis
 - Node.js & npm (Use `nvm use` in the `frontend` directory to use the version specified in `.nvmrc`)
 
 ### Backend Configuration
-1. Create a `.env` file in the root directory:
+1. Create a `.env` file in the root directory (copy from [`.env.example`](.env.example)). Config is read with the `BYTEBURROW__` prefix, so every variable is named `BYTEBURROW__<NAME>`:
 ```env
-DATABASE_URL=postgres://user:password@localhost/byteburrow
-SERVER_ADDR=127.0.0.1:3000
-FRONTEND_DIST=./frontend/dist
-SALT=your-random-secret-string
-THUMBNAIL_STORAGE=/path/to/thumbnails
-BASE_URL=http://localhost:3000
-TOKEN_EXPIRATION_DAYS=30
-TOKEN_LENGTH=32
-CORS_ALLOWED_ORIGINS=
-TRUST_FORWARDED_HEADERS=false
+BYTEBURROW__DATABASE_URL=postgres://user:password@localhost/byteburrow
+BYTEBURROW__SERVER_ADDR=127.0.0.1:3000
+BYTEBURROW__SALT=your-random-secret-string
+BYTEBURROW__THUMBNAIL_STORAGE=/path/to/thumbnails
+BYTEBURROW__BASE_URL=http://localhost:3000
+BYTEBURROW__TOKEN_EXPIRATION_DAYS=30
+BYTEBURROW__TOKEN_LENGTH=32
+BYTEBURROW__CORS_ALLOWED_ORIGINS=
+BYTEBURROW__TRUST_FORWARDED_HEADERS=false
 ```
+
+> The frontend is embedded into the server binary at compile time via `rust_embed`, so there is no `FRONTEND_DIST` / asset-directory variable — rebuild the binary to pick up frontend changes.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `DATABASE_URL` | Yes | — | PostgreSQL connection string |
-| `SERVER_ADDR` | No | `0.0.0.0:3000` | Address and port the server binds to |
-| `FRONTEND_DIST` | No | `frontend/dist` | Path to the built frontend assets |
-| `SALT` | Yes | — | Secret string used for password hashing |
-| `THUMBNAIL_STORAGE` | No | `/tmp/thumbnails` | Directory where generated image thumbnails are stored |
-| `BASE_URL` | No | `http://localhost:3000` | Public base URL of the application |
-| `TOKEN_EXPIRATION_DAYS` | No | `30` | How long auth tokens remain valid |
-| `TOKEN_LENGTH` | No | `32` | Length of generated auth tokens |
-| `CORS_ALLOWED_ORIGINS` | No | (empty) | Comma-separated list of origins allowed to make cross-origin requests. Same-origin requests are unaffected |
-| `TRUST_FORWARDED_HEADERS` | No | `false` | Trust `X-Forwarded-For`/`X-Real-IP` for client-IP logging; only enable behind a reverse proxy that sets them itself |
+| `BYTEBURROW__DATABASE_URL` | Yes | — | PostgreSQL connection string |
+| `BYTEBURROW__SERVER_ADDR` | No | `0.0.0.0:3000` | Address and port the server binds to |
+| `BYTEBURROW__SALT` | Yes | — | Secret string used for password hashing |
+| `BYTEBURROW__THUMBNAIL_STORAGE` | No | `/tmp/thumbnails` | Directory where generated image thumbnails are stored |
+| `BYTEBURROW__BASE_URL` | No | `http://localhost:3000` | Public base URL of the application |
+| `BYTEBURROW__TOKEN_EXPIRATION_DAYS` | No | `30` | How long auth tokens remain valid |
+| `BYTEBURROW__TOKEN_LENGTH` | No | `32` | Length of generated auth tokens |
+| `BYTEBURROW__PLUGIN_DIR` | No | `/etc/byteburrow/plugins` | Directory the plugin loader scans for classifier cdylibs |
+| `BYTEBURROW__IGNORE_PATTERNS` | No | `.git,.cache,node_modules,.DS_Store,__pycache__,.Trash` | Comma-separated glob patterns skipped during indexing |
+| `BYTEBURROW__CORS_ALLOWED_ORIGINS` | No | (empty) | Comma-separated list of origins allowed to make cross-origin requests. Same-origin requests are unaffected |
+| `BYTEBURROW__TRUST_FORWARDED_HEADERS` | No | `false` | Trust `X-Forwarded-For`/`X-Real-IP` for client-IP logging; only enable behind a reverse proxy that sets them itself |
 2. Run migrations:
 ```bash
 cargo run --bin byteburrow-migration up
