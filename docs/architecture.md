@@ -30,7 +30,8 @@ Deep reference for ByteBurrow's module layout, request flow, and key patterns. S
 - **`src/job/`**: Background job runner
   - Asynchronous job processing with configurable concurrency (based on CPU cores), running on a dedicated low-priority Tokio runtime
   - Single job type `Job::ProcessFile { storage_id, path, mode }`, where `ProcessMode` is `Auto` (check-then-classify, respects `skip_plugins`), `ForceClassify` (re-run plugins regardless of change), or `HashOnly` (recalculate hash only, never runs plugins)
-  - Runs concurrently with the web server via `tokio::select!`
+  - Runs on a **dedicated OS thread** that owns its own multi-threaded Tokio runtime, with every worker thread set to `nice 10` so the OS scheduler always prefers the web server (main runtime) over background work
+  - Only the inotify watcher and the web server are the two arms of the main runtime's `tokio::select!`; the job runner is **not** an arm of that select — it blocks on its own thread, draining jobs from the channel on its low-priority runtime until the sender side is dropped
 
 - **`src/migration/`**: Database schema migrations
   - SeaORM migration system
@@ -72,7 +73,7 @@ Deep reference for ByteBurrow's module layout, request flow, and key patterns. S
 ## Application Flow
 
 1. **Startup**: `src/bin/byteburrow.rs` initializes tracing, loads config, connects to database, runs pending migrations, loads plugins
-2. **Concurrent execution**: job runner and web server run in parallel via `tokio::select!`
+2. **Concurrent execution**: the job runner is spawned on its own OS thread with a dedicated low-priority (`nice 10`) multi-threaded Tokio runtime (`src/job/mod.rs`); the main Tokio runtime then runs the inotify watcher and web server concurrently via `tokio::select!`
 3. **Request handling**: Axum router → Auth extractor → Handler → Database/Filesystem → Response
 4. **State management**: `AppState` contains DB connection, config, Jinja templates, and job sender
 5. **Background jobs**: handlers can enqueue jobs via `JobSender` for async processing

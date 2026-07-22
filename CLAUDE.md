@@ -45,7 +45,7 @@ The frontend is **not** served from a runtime path: its build output (`frontend/
 
 ## Architecture
 
-Axum HTTP layer (`src/web/`) → `Auth` extractor → handlers → `Storage` wrapper / SeaORM entities. A background job runner (`src/job/`) processes file classification through a multi-pass plugin pipeline (`src/plugin/` + `plugins/*` cdylib crates, loaded via `byteburrow-plugin-api`'s FFI contract), running concurrently with the web server via `tokio::select!`.
+Axum HTTP layer (`src/web/`) → `Auth` extractor → handlers → `Storage` wrapper / SeaORM entities. A background job runner (`src/job/`) runs on its own OS thread with a dedicated low-priority (`nice 10`) multi-threaded Tokio runtime; it processes file classification through a multi-pass plugin pipeline (`src/plugin/` + `plugins/*` cdylib crates, loaded via `byteburrow-plugin-api`'s FFI contract). On the main runtime, only the inotify watcher and the web server are arms of the `tokio::select!`.
 
 Full module map, request flow, OpenAPI tag grouping, and key patterns (auth, DB access, error responses, plugin system, background jobs): **[docs/architecture.md](docs/architecture.md)**.
 
