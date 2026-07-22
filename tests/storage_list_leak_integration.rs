@@ -172,9 +172,9 @@ fn list_storages_only_returns_storages_the_caller_can_access() {
         assert_eq!(res.status(), StatusCode::OK);
 
         let body = body_json(res).await;
-        let ids: Vec<i64> = body
+        let ids: Vec<i64> = body["items"]
             .as_array()
-            .expect("list body must be an array")
+            .expect("paginated list body must have an items array")
             .iter()
             .map(|s| s["id"].as_i64().expect("id field"))
             .collect();
@@ -223,9 +223,9 @@ fn list_storages_includes_owned_and_group_shared_storages() {
             assert_eq!(res.status(), StatusCode::OK);
 
             let body = body_json(res).await;
-            let ids: Vec<i64> = body
+            let ids: Vec<i64> = body["items"]
                 .as_array()
-                .expect("list body must be an array")
+                .expect("paginated list body must have an items array")
                 .iter()
                 .map(|s| s["id"].as_i64().expect("id field"))
                 .collect();
@@ -258,9 +258,9 @@ fn list_storages_admin_sees_everything() {
         assert_eq!(res.status(), StatusCode::OK);
 
         let body = body_json(res).await;
-        let ids: Vec<i64> = body
+        let ids: Vec<i64> = body["items"]
             .as_array()
-            .expect("list body must be an array")
+            .expect("paginated list body must have an items array")
             .iter()
             .map(|s| s["id"].as_i64().expect("id field"))
             .collect();
@@ -302,5 +302,57 @@ fn get_storage_by_id_matches_list_gate_not_admin_only() {
             .unwrap();
         let res = app.clone().oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    });
+}
+
+#[test]
+fn list_storages_is_paginated_and_caps_per_page() {
+    runtime().block_on(async {
+        let db = test_db().await.clone();
+        let owner = make_user(&db, "pager", false).await;
+        let grp = make_group(&db).await;
+        // At least three storages this owner can see.
+        for _ in 0..3 {
+            make_storage(&db, owner.id, grp.id).await;
+        }
+
+        let token = bearer_token(&db, owner).await;
+        let app = storage_web::router().with_state(make_app_state(db.clone()));
+
+        // per_page=1 must return exactly one item and expose page metadata.
+        let req = Request::builder()
+            .uri("/?page=1&per_page=1")
+            .header("Authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_json(res).await;
+        assert_eq!(body["page"].as_u64(), Some(1));
+        assert_eq!(body["per_page"].as_u64(), Some(1));
+        assert_eq!(
+            body["items"].as_array().expect("items array").len(),
+            1,
+            "per_page=1 must return a single item"
+        );
+        assert!(
+            body["total"].as_u64().unwrap() >= 3,
+            "owner must see at least the 3 storages created here"
+        );
+        assert!(body["total_pages"].as_u64().unwrap() >= 3);
+
+        // An oversized per_page is clamped to the server's hard cap (200).
+        let req = Request::builder()
+            .uri("/?per_page=99999")
+            .header("Authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        let body = body_json(res).await;
+        assert_eq!(
+            body["per_page"].as_u64(),
+            Some(200),
+            "per_page must be clamped to MAX_PER_PAGE"
+        );
     });
 }

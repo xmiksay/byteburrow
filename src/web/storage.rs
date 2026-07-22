@@ -6,10 +6,11 @@ use crate::storage::{
     Storage as StorageWrapper,
 };
 use crate::web::{
-    bad_request, conflict, forbidden, internal, not_found, not_found_msg, require_admin,
+    bad_request, conflict, forbidden, internal, message, not_found, not_found_msg, require_admin,
     require_entry_owner, require_group_exists, require_storage_access, require_storage_path_access,
     require_storage_path_write_access, require_user_exists, save_or_err, storage_name_taken,
     storage_path_taken, unauthorized_msg, user_group_ids, ApiError, AppState, ErrorResponse,
+    MessageResponse, Page, Pagination,
 };
 use axum::{
     body::Body,
@@ -652,7 +653,7 @@ async fn delete_storage_handler(
     auth: Auth,
     AxumPath(storage_id): AxumPath<i32>,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<MessageResponse>, ApiError> {
     require_admin(&auth)?;
 
     let storage = storage::Entity::find_by_id(storage_id)
@@ -676,9 +677,10 @@ async fn delete_storage_handler(
         .exec(&state.db)
         .await?;
 
-    Ok(Json(serde_json::json!({
-        "message": format!("Storage '{}' deleted successfully", storage.name),
-    })))
+    Ok(message(format!(
+        "Storage '{}' deleted successfully",
+        storage.name
+    )))
 }
 
 /// List storages the caller can access (owner, group member, share recipient,
@@ -688,18 +690,22 @@ async fn delete_storage_handler(
     get,
     path = "/api/storage",
     tag = "storage",
+    params(Pagination),
     responses(
-        (status = 200, description = "List of accessible storages", body = Vec<StorageResponse>),
+        (status = 200, description = "Paginated list of accessible storages", body = Page<StorageResponse>),
     ),
     security(("bearer" = []))
 )]
 #[instrument(skip(state, auth))]
 async fn list_storages_handler(
     auth: Auth,
+    Query(pagination): Query<Pagination>,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<StorageResponse>>, ApiError> {
+) -> Result<Json<Page<StorageResponse>>, ApiError> {
     let storages = storage::Entity::find().all(&state.db).await?;
 
+    // Access is enforced per-row in Rust (mirrors `require_storage_access`),
+    // so pagination is applied to the filtered set rather than at the SQL layer.
     let mut accessible = Vec::with_capacity(storages.len());
     for storage in storages {
         if require_storage_access(&auth, &storage, &state.db)
@@ -710,7 +716,15 @@ async fn list_storages_handler(
         }
     }
 
-    Ok(Json(accessible))
+    let total = accessible.len() as u64;
+    let start = (pagination.page_index() * pagination.per_page()) as usize;
+    let items = accessible
+        .into_iter()
+        .skip(start)
+        .take(pagination.per_page() as usize)
+        .collect();
+
+    Ok(Json(Page::new(items, total, &pagination)))
 }
 
 // ---------------------------------------------------------------------------
@@ -921,9 +935,7 @@ pub(crate) async fn update_file_content_handler(
         .await
         .map_err(|e| map_path_err(e, &path))?;
 
-    Ok(Json(serde_json::json!({
-        "message": "File updated successfully",
-    })))
+    Ok(message("File updated successfully"))
 }
 
 /// Create a new file or directory entry
@@ -978,9 +990,7 @@ pub(crate) async fn create_entry_handler(
         _ => return Err(bad_request("Unsupported entry type")),
     }
 
-    Ok(Json(
-        serde_json::json!({ "message": "Entry created successfully" }),
-    ))
+    Ok(message("Entry created successfully"))
 }
 
 /// Rename a file or directory
@@ -1019,9 +1029,7 @@ pub(crate) async fn rename_entry_handler(
         .await
         .map_err(|e| internal(format!("Error renaming entry: {e}")))?;
 
-    Ok(Json(
-        serde_json::json!({ "message": "Entry renamed successfully" }),
-    ))
+    Ok(message("Entry renamed successfully"))
 }
 
 /// Set the tags on a file or directory
@@ -1066,9 +1074,7 @@ pub(crate) async fn update_entry_tags_handler(
 
     set_entry_tags(&state.db, &entry_model, payload.tags).await?;
 
-    Ok(Json(
-        serde_json::json!({ "message": "Tags updated successfully" }),
-    ))
+    Ok(message("Tags updated successfully"))
 }
 
 /// Remove a file or directory
@@ -1104,9 +1110,16 @@ pub(crate) async fn remove_entry_handler(
         .await
         .map_err(|e| internal(format!("Error removing entry: {e}")))?;
 
-    Ok(Json(
-        serde_json::json!({ "message": "Entry removed successfully" }),
-    ))
+    Ok(message("Entry removed successfully"))
+}
+
+/// Directory listing response: the entries under a storage path.
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct DirectoryListingResponse {
+    pub storage_id: i32,
+    /// Normalized (slash-trimmed) directory path within the storage.
+    pub path: String,
+    pub entries: Vec<DirectoryEntry>,
 }
 
 /// List directory contents (JSON)
@@ -1120,7 +1133,7 @@ pub(crate) async fn remove_entry_handler(
         ("path" = String, Path, description = "Directory path"),
     ),
     responses(
-        (status = 200, description = "Directory listing"),
+        (status = 200, description = "Directory listing", body = DirectoryListingResponse),
         (status = 404, description = "Storage not found", body = ErrorResponse),
     ),
     security(("bearer" = []))
@@ -1130,7 +1143,7 @@ pub(crate) async fn list_directory_handler(
     auth: Auth,
     AxumPath((id, path)): AxumPath<(i32, String)>,
     State(state): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<Json<DirectoryListingResponse>, ApiError> {
     tracing::info!("Listing directory for storage {} at path {}", id, path);
 
     let storage = StorageWrapper::find_by_id(&state.db, id)
@@ -1146,13 +1159,11 @@ pub(crate) async fn list_directory_handler(
 
     dispatch_hash_jobs(&state, &entries);
 
-    let normalized_path = path.trim_matches('/');
-
-    Ok(Json(serde_json::json!({
-        "storage_id": id,
-        "path": normalized_path,
-        "entries": entries,
-    })))
+    Ok(Json(DirectoryListingResponse {
+        storage_id: id,
+        path: path.trim_matches('/').to_string(),
+        entries,
+    }))
 }
 
 /// Generate HTML directory index
@@ -1506,7 +1517,7 @@ pub(crate) async fn delete_share_handler(
     auth: Auth,
     AxumPath(share_id): AxumPath<i32>,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<MessageResponse>, ApiError> {
     let share = shared::Entity::find_by_id(share_id)
         .one(&state.db)
         .await?
@@ -1523,9 +1534,7 @@ pub(crate) async fn delete_share_handler(
         .exec(&state.db)
         .await?;
 
-    Ok(Json(
-        serde_json::json!({ "message": "Share deleted successfully" }),
-    ))
+    Ok(message("Share deleted successfully"))
 }
 
 /// Update a share
@@ -1685,6 +1694,20 @@ async fn get_share_context(
     Ok((share, entry_model, storage))
 }
 
+/// Public metadata about a single share (no secret token is ever included).
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct ShareInfoResponse {
+    pub id: i32,
+    pub can_write: bool,
+    pub path: String,
+    /// Basename of the shared entry.
+    pub name: String,
+    /// `File` or `Directory`.
+    pub entry_type: String,
+    pub expires_at: Option<chrono::NaiveDateTime>,
+    pub storage_id: i32,
+}
+
 /// Get share info
 /// GET /api/storage/share/:share_id
 #[utoipa::path(
@@ -1693,7 +1716,7 @@ async fn get_share_context(
     tag = "share",
     params(("share_id" = String, Path, description = "Share ID or token")),
     responses(
-        (status = 200, description = "Share info"),
+        (status = 200, description = "Share info", body = ShareInfoResponse),
         (status = 404, description = "Share not found", body = ErrorResponse),
     )
 )]
@@ -1701,20 +1724,26 @@ pub(crate) async fn get_share_info_handler(
     auth: Option<Auth>,
     AxumPath(share_id): AxumPath<String>,
     State(state): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<Json<ShareInfoResponse>, ApiError> {
     let (share, entry_model, _) = get_share_context(&share_id, auth.as_ref(), &state).await?;
 
     // Never echo back `share.token` — it's a hash now (issue #10), and the
     // caller already knows the plaintext identifier they used to get here.
-    Ok(Json(serde_json::json!({
-        "id": share.id,
-        "can_write": share.can_write,
-        "path": entry_model.path,
-        "name": std::path::Path::new(&entry_model.path).file_name().and_then(|s| s.to_str()).unwrap_or(&entry_model.path),
-        "entry_type": format!("{:?}", entry_model.entry_type),
-        "expires_at": share.expires_at,
-        "storage_id": entry_model.storage_id
-    })))
+    let name = std::path::Path::new(&entry_model.path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&entry_model.path)
+        .to_string();
+
+    Ok(Json(ShareInfoResponse {
+        id: share.id,
+        can_write: share.can_write,
+        path: entry_model.path.clone(),
+        name,
+        entry_type: format!("{:?}", entry_model.entry_type),
+        expires_at: share.expires_at,
+        storage_id: entry_model.storage_id,
+    }))
 }
 
 /// List share root directory
@@ -1768,7 +1797,8 @@ async fn share_list_impl(
     sub_path: String,
     state: Arc<AppState>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let (share, entry_model, storage) = get_share_context(&share_id, auth.as_ref(), &state).await?;
+    let (_share, entry_model, storage) =
+        get_share_context(&share_id, auth.as_ref(), &state).await?;
 
     let base_path = entry_model.path.trim_matches('/');
     let sub_path_clean = sub_path.trim_matches('/');
@@ -1783,12 +1813,11 @@ async fn share_list_impl(
 
     let relative_entries = make_entries_relative(entries, base_path);
 
-    Ok(Json(serde_json::json!({
-        "share_id": share.id,
-        "storage_id": entry_model.storage_id,
-        "path": sub_path_clean,
-        "entries": relative_entries,
-    })))
+    Ok(Json(DirectoryListingResponse {
+        storage_id: entry_model.storage_id,
+        path: sub_path_clean.to_string(),
+        entries: relative_entries,
+    }))
 }
 
 /// Share index root handler - Kodi-compatible directory listing for shares
@@ -1975,9 +2004,7 @@ pub(crate) async fn share_update_handler(
         .await
         .map_err(|e| internal(format!("Error saving file: {e}")))?;
 
-    Ok(Json(serde_json::json!({
-        "message": "File updated successfully",
-    })))
+    Ok(message("File updated successfully"))
 }
 
 /// Create file or folder via share
@@ -2027,9 +2054,7 @@ pub(crate) async fn share_create_handler(
         _ => return Err(bad_request("Unsupported entry type")),
     }
 
-    Ok(Json(serde_json::json!({
-        "message": "Entry created successfully",
-    })))
+    Ok(message("Entry created successfully"))
 }
 
 /// Rename file or folder via share
@@ -2070,9 +2095,7 @@ pub(crate) async fn share_rename_handler(
         .await
         .map_err(|e| internal(format!("Error renaming entry: {e}")))?;
 
-    Ok(Json(
-        serde_json::json!({ "message": "Entry renamed successfully" }),
-    ))
+    Ok(message("Entry renamed successfully"))
 }
 
 /// Delete file or folder via share
@@ -2115,9 +2138,7 @@ pub(crate) async fn share_remove_handler(
         .await
         .map_err(|e| internal(format!("Error removing entry: {e}")))?;
 
-    Ok(Json(
-        serde_json::json!({ "message": "Entry removed successfully" }),
-    ))
+    Ok(message("Entry removed successfully"))
 }
 
 /// Set the tags on a file or directory via share
@@ -2163,9 +2184,7 @@ pub(crate) async fn share_update_entry_tags_handler(
 
     set_entry_tags(&state.db, &target_entry, payload.tags).await?;
 
-    Ok(Json(
-        serde_json::json!({ "message": "Tags updated successfully" }),
-    ))
+    Ok(message("Tags updated successfully"))
 }
 
 #[derive(Deserialize)]
@@ -2213,7 +2232,5 @@ pub(crate) async fn trigger_hash_handler(
         })
         .map_err(|_| internal("Failed to queue job"))?;
 
-    Ok(Json(
-        serde_json::json!({ "message": "Hash calculation queued" }),
-    ))
+    Ok(message("Hash calculation queued"))
 }

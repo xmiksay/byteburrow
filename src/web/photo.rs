@@ -2,11 +2,13 @@ use crate::auth::Auth;
 use crate::entity::{entry, photo};
 use crate::job::Job;
 use crate::web::{
-    bad_request, internal, not_found_msg, require_admin, ApiError, AppState, ErrorResponse,
+    bad_request, internal, message, not_found_msg, require_admin, ApiError, AppState,
+    ErrorResponse, MessageResponse,
 };
 use axum::{
     extract::{Path, State},
     http::StatusCode,
+    response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
@@ -239,7 +241,7 @@ pub(crate) async fn list_by_year_month_day(
     tag = "photo",
     params(("hash" = String, Path, description = "Photo hash")),
     responses(
-        (status = 202, description = "Regeneration queued"),
+        (status = 202, description = "Regeneration queued", body = MessageResponse),
         (status = 404, description = "Photo not found", body = ErrorResponse),
     ),
     security(("bearer" = []))
@@ -248,7 +250,7 @@ pub(crate) async fn regenerate_thumbnail(
     auth: Auth,
     Path(hash): Path<String>,
     State(state): State<Arc<AppState>>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<impl IntoResponse, ApiError> {
     require_admin(&auth)?;
 
     let hash_bytes = hex::decode(&hash).map_err(|_| bad_request("Invalid hash"))?;
@@ -268,5 +270,8 @@ pub(crate) async fn regenerate_thumbnail(
         })
         .map_err(|_| internal("Failed to dispatch regeneration job"))?;
 
-    Ok(StatusCode::ACCEPTED)
+    Ok((
+        StatusCode::ACCEPTED,
+        message("Thumbnail regeneration queued"),
+    ))
 }

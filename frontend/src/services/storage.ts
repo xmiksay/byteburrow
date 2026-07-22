@@ -3,7 +3,7 @@ import type { Storage, CreateStorageRequest, UpdateStorageRequest, DirectoryList
 
 export const storageService = {
     async getStorages(): Promise<Storage[]> {
-        return api.get<Storage[]>('/api/storage')
+        return api.getAll<Storage>('/api/storage')
     },
 
     async createStorage(data: CreateStorageRequest): Promise<Storage> {
@@ -20,7 +20,7 @@ export const storageService = {
 
     async listDirectory(storageId: number, path: string = ''): Promise<DirectoryListingResponse> {
         const encodedPath = path ? `/${path}` : ''
-        return api.get<DirectoryListingResponse>(`/api/storage/${storageId}/list${encodedPath}?format=json`)
+        return api.get<DirectoryListingResponse>(`/api/storage/${storageId}/list${encodedPath}`)
     },
 
     async getFileContent(storageId: number, path: string): Promise<string> {
@@ -69,7 +69,7 @@ export const storageService = {
 
     async listShareDirectory(shareId: number | string, path: string = ''): Promise<DirectoryListingResponse> {
         const encodedPath = path ? `/${path}` : ''
-        return api.get<DirectoryListingResponse>(`/api/storage/share/${shareId}/list${encodedPath}?format=json`)
+        return api.get<DirectoryListingResponse>(`/api/storage/share/${shareId}/list${encodedPath}`)
     },
 
     async getShareFileContent(shareId: number | string, path: string): Promise<string> {

@@ -19,7 +19,7 @@ use axum::{
 use minijinja::Environment;
 use rust_embed::Embed;
 use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 use utoipa::{
@@ -66,6 +66,91 @@ async fn frontend_handler(uri: Uri) -> impl IntoResponse {
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ErrorResponse {
     pub error: String,
+}
+
+/// A generic `{ "message": "..." }` acknowledgement body.
+///
+/// The single envelope for endpoints whose only useful response is a
+/// human-readable confirmation (deletes, queued jobs, tag updates, …).
+/// Replaces the scattered ad-hoc `Json(json!({ "message": ... }))` so every
+/// such endpoint shares one typed, OpenAPI-documented shape.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct MessageResponse {
+    pub message: String,
+}
+
+/// Build a `Json(MessageResponse { .. })` from anything string-like.
+pub fn message<S: Into<String>>(msg: S) -> Json<MessageResponse> {
+    Json(MessageResponse {
+        message: msg.into(),
+    })
+}
+
+/// Query parameters shared by every paginated list endpoint:
+/// `?page=1&per_page=50`. `page` is 1-based. The accessors clamp both values,
+/// so a missing, zero, or oversized parameter can never produce an unbounded
+/// or malformed query.
+#[derive(Debug, Clone, Copy, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct Pagination {
+    /// 1-based page number (default 1).
+    pub page: Option<u64>,
+    /// Items per page (default 50, capped at 200).
+    pub per_page: Option<u64>,
+}
+
+impl Pagination {
+    /// Default page size when the client does not specify `per_page`.
+    pub const DEFAULT_PER_PAGE: u64 = 50;
+    /// Hard upper bound on page size — the guard against unbounded payloads.
+    pub const MAX_PER_PAGE: u64 = 200;
+
+    /// The requested 1-based page, never below 1.
+    pub fn page(&self) -> u64 {
+        self.page.unwrap_or(1).max(1)
+    }
+
+    /// The requested page size, clamped to `1..=MAX_PER_PAGE`.
+    pub fn per_page(&self) -> u64 {
+        self.per_page
+            .unwrap_or(Self::DEFAULT_PER_PAGE)
+            .clamp(1, Self::MAX_PER_PAGE)
+    }
+
+    /// 0-based page index for SeaORM's `fetch_page` / manual `OFFSET`.
+    pub fn page_index(&self) -> u64 {
+        self.page() - 1
+    }
+}
+
+/// A single page of results plus the metadata a client needs to walk the rest.
+/// The uniform envelope returned by every paginated list endpoint.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct Page<T> {
+    /// Items in this page.
+    pub items: Vec<T>,
+    /// 1-based page number this response represents.
+    pub page: u64,
+    /// Page size used to build this response.
+    pub per_page: u64,
+    /// Total number of items across all pages.
+    pub total: u64,
+    /// Total number of pages at this `per_page` (at least 1).
+    pub total_pages: u64,
+}
+
+impl<T> Page<T> {
+    /// Assemble a page from a fetched slice and the total item count.
+    pub fn new(items: Vec<T>, total: u64, pagination: &Pagination) -> Self {
+        let per_page = pagination.per_page();
+        Self {
+            items,
+            page: pagination.page(),
+            per_page,
+            total,
+            total_pages: total.div_ceil(per_page).max(1),
+        }
+    }
 }
 
 /// Unified error type for the web layer.
@@ -600,6 +685,9 @@ pub struct AppState {
         description = "REST API for ByteBurrow personal cloud storage",
     ),
     paths(
+        // Meta endpoints
+        health_handler,
+        version_handler,
         // User endpoints
         user::login_handler,
         user::logout_handler,
@@ -669,6 +757,14 @@ pub struct AppState {
     components(
         schemas(
             ErrorResponse,
+            MessageResponse,
+            HealthResponse,
+            VersionResponse,
+            Page<user::UserResponse>,
+            Page<group::GroupResponse>,
+            Page<tag::TagResponse>,
+            Page<storage::StorageResponse>,
+            user::MeResponse,
             user::LoginRequest,
             user::LoginResponse,
             user::UserResponse,
@@ -693,6 +789,8 @@ pub struct AppState {
             crate::storage::DirectoryEntry,
             photo::PhotoResponse,
             storage::MetaResponse,
+            storage::DirectoryListingResponse,
+            storage::ShareInfoResponse,
         )
     ),
     modifiers(&SecurityAddon),
@@ -827,8 +925,34 @@ fn build_cors_layer(config: &Config) -> tower_http::cors::CorsLayer {
         .allow_credentials(true)
 }
 
+/// Health check response.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct HealthResponse {
+    /// Overall service status (always `ok` if the process is serving).
+    pub status: String,
+    /// Service identifier.
+    pub service: String,
+    /// Database connectivity: `ok` or `error`.
+    pub database: String,
+}
+
+/// Build/version response.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct VersionResponse {
+    /// Embedded git commit hash of the running binary.
+    pub commit: String,
+    /// Cargo package version.
+    pub version: String,
+}
+
 /// Health check endpoint (no auth required)
-pub async fn health_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+#[utoipa::path(
+    get,
+    path = "/api/health",
+    tag = "meta",
+    responses((status = 200, description = "Service health", body = HealthResponse)),
+)]
+pub async fn health_handler(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     let db_backend = state.db.get_database_backend();
     let db_status = match state
         .db
@@ -842,17 +966,67 @@ pub async fn health_handler(State(state): State<Arc<AppState>>) -> impl IntoResp
         }
     };
 
-    Json(serde_json::json!({
-        "status": "ok",
-        "service": "byteburrow",
-        "database": db_status,
-    }))
+    Json(HealthResponse {
+        status: "ok".to_string(),
+        service: "byteburrow".to_string(),
+        database: db_status.to_string(),
+    })
 }
 
 /// Version endpoint
-pub async fn version_handler() -> impl IntoResponse {
-    Json(serde_json::json!({
-        "commit": env!("GIT_COMMIT"),
-        "version": env!("CARGO_PKG_VERSION"),
-    }))
+#[utoipa::path(
+    get,
+    path = "/api/version",
+    tag = "meta",
+    responses((status = 200, description = "Build/version info", body = VersionResponse)),
+)]
+pub async fn version_handler() -> Json<VersionResponse> {
+    Json(VersionResponse {
+        commit: env!("GIT_COMMIT").to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pag(page: Option<u64>, per_page: Option<u64>) -> Pagination {
+        Pagination { page, per_page }
+    }
+
+    #[test]
+    fn pagination_defaults_when_unset() {
+        let p = pag(None, None);
+        assert_eq!(p.page(), 1);
+        assert_eq!(p.per_page(), Pagination::DEFAULT_PER_PAGE);
+        assert_eq!(p.page_index(), 0);
+    }
+
+    #[test]
+    fn pagination_clamps_page_and_per_page() {
+        // page 0 is bumped to 1; per_page beyond the cap is clamped down.
+        let p = pag(Some(0), Some(10_000));
+        assert_eq!(p.page(), 1);
+        assert_eq!(p.per_page(), Pagination::MAX_PER_PAGE);
+
+        // per_page 0 is clamped up to 1 — never an unbounded/zero query.
+        assert_eq!(pag(None, Some(0)).per_page(), 1);
+    }
+
+    #[test]
+    fn page_envelope_reports_total_pages() {
+        // 25 items at 10 per page => 3 pages.
+        let page = Page::new(vec![0u8; 10], 25, &pag(Some(1), Some(10)));
+        assert_eq!(page.total, 25);
+        assert_eq!(page.per_page, 10);
+        assert_eq!(page.total_pages, 3);
+        assert_eq!(page.page, 1);
+
+        // An empty result set still reports at least one page.
+        let empty: Page<u8> = Page::new(vec![], 0, &pag(None, None));
+        assert_eq!(empty.total, 0);
+        assert_eq!(empty.total_pages, 1);
+        assert!(empty.items.is_empty());
+    }
 }

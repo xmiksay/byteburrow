@@ -1,15 +1,15 @@
 use crate::auth::Auth;
 use crate::entity::group;
 use crate::web::{
-    conflict, group_name_taken, not_found, require_admin, save_or_err, ApiError, AppState,
-    ErrorResponse,
+    conflict, group_name_taken, message, not_found, require_admin, save_or_err, ApiError, AppState,
+    ErrorResponse, MessageResponse, Page, Pagination,
 };
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     routing::get,
     Json, Router,
 };
-use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+use sea_orm::{ActiveModelTrait, EntityTrait, PaginatorTrait, Set};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -63,21 +63,26 @@ pub fn router() -> Router<Arc<AppState>> {
     get,
     path = "/api/group",
     tag = "group",
+    params(Pagination),
     responses(
-        (status = 200, description = "List of all groups", body = Vec<GroupResponse>),
+        (status = 200, description = "Paginated list of groups", body = Page<GroupResponse>),
         (status = 403, description = "Admin access required", body = ErrorResponse),
     ),
     security(("bearer" = []))
 )]
 async fn list_groups_handler(
     auth: Auth,
+    Query(pagination): Query<Pagination>,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<GroupResponse>>, ApiError> {
+) -> Result<Json<Page<GroupResponse>>, ApiError> {
     require_admin(&auth)?;
 
-    let groups = group::Entity::find().all(&state.db).await?;
+    let paginator = group::Entity::find().paginate(&state.db, pagination.per_page());
+    let total = paginator.num_items().await?;
+    let groups = paginator.fetch_page(pagination.page_index()).await?;
+    let items = groups.into_iter().map(GroupResponse::from).collect();
 
-    Ok(Json(groups.into_iter().map(GroupResponse::from).collect()))
+    Ok(Json(Page::new(items, total, &pagination)))
 }
 
 /// Get group by ID
@@ -219,7 +224,7 @@ async fn delete_group_handler(
     auth: Auth,
     Path(group_id): Path<i32>,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<MessageResponse>, ApiError> {
     require_admin(&auth)?;
 
     let group = group::Entity::find_by_id(group_id)
@@ -231,7 +236,8 @@ async fn delete_group_handler(
         .exec(&state.db)
         .await?;
 
-    Ok(Json(serde_json::json!({
-        "message": format!("Group '{}' deleted successfully", group.name),
-    })))
+    Ok(message(format!(
+        "Group '{}' deleted successfully",
+        group.name
+    )))
 }

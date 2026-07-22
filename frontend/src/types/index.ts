@@ -1,3 +1,12 @@
+/** A single page of results returned by a paginated list endpoint. */
+export interface Page<T> {
+    items: T[]
+    page: number
+    per_page: number
+    total: number
+    total_pages: number
+}
+
 export interface User {
     id: number
     name: string
