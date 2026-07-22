@@ -35,6 +35,16 @@ pub struct Config {
     /// back to the real TCP peer address.
     #[serde(default)]
     pub trust_forwarded_headers: bool,
+    /// Minimum cosine similarity for a face to be matched to a known contact.
+    /// The single "is this a known person" threshold shared by the job pipeline
+    /// and the CLI `face_match` tool (see `crate::face_match`).
+    #[serde(default = "defaults::face_match_threshold")]
+    pub face_match_threshold: f32,
+    /// Minimum gap between the best contact's similarity and the best
+    /// *different* contact's similarity. Rejects ambiguous matches where two
+    /// people are almost equally close. Set to `0.0` to disable the guard.
+    #[serde(default = "defaults::face_match_margin")]
+    pub face_match_margin: f32,
 }
 
 mod defaults {
@@ -55,6 +65,12 @@ mod defaults {
     }
     pub fn plugin_dir() -> String {
         "/etc/byteburrow/plugins".to_string()
+    }
+    pub fn face_match_threshold() -> f32 {
+        0.8
+    }
+    pub fn face_match_margin() -> f32 {
+        0.05
     }
     pub fn ignore_patterns() -> Vec<String> {
         vec![

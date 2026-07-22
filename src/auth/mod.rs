@@ -488,6 +488,8 @@ mod tests {
                 ignore_patterns: vec![],
                 cors_allowed_origins: String::new(),
                 trust_forwarded_headers: false,
+                face_match_threshold: 0.8,
+                face_match_margin: 0.05,
             }));
         });
     }
