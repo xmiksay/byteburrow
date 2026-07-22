@@ -12,3 +12,4 @@ crate-type = ["cdylib"]
 byteburrow-plugin-api = { path = "../../byteburrow-plugin-api" }
 kamadak-exif = "0.6.1"
 serde_json = "1.0"
+chrono = { workspace = true }

@@ -1,6 +1,7 @@
 use std::io::{BufReader, Cursor};
 
 use byteburrow_plugin_api::*;
+use chrono::{FixedOffset, NaiveDate, TimeZone};
 
 struct ExifClassifier;
 
@@ -60,7 +61,15 @@ impl ClassifierPlugin for ExifClassifier {
         {
             if let exif::Value::Ascii(ref vec) = dt_field.value {
                 if let Some(bytes) = vec.first() {
-                    if let Ok(dt) = exif::DateTime::from_ascii(bytes) {
+                    if let Ok(mut dt) = exif::DateTime::from_ascii(bytes) {
+                        // EXIF DateTimeOriginal carries no zone; OffsetTimeOriginal
+                        // (0x9011), when present, supplies the offset. Fall back to
+                        // UTC when it is absent.
+                        if let Some(off_bytes) =
+                            get_ascii_bytes(&exif_data, exif::Tag::OffsetTimeOriginal)
+                        {
+                            let _ = dt.parse_offset(off_bytes);
+                        }
                         result.date_unix = datetime_to_unix(&dt);
                     }
                 }
@@ -180,21 +189,34 @@ fn get_uint_field(exif_data: &exif::Exif, tag: exif::Tag) -> Option<u64> {
     }
 }
 
+/// Raw ASCII bytes of a tag (without the surrounding-quote stripping that
+/// `get_ascii_field` does), needed by `DateTime::parse_offset`.
+fn get_ascii_bytes(exif_data: &exif::Exif, tag: exif::Tag) -> Option<&[u8]> {
+    let field = exif_data.get_field(tag, exif::In::PRIMARY)?;
+    match field.value {
+        exif::Value::Ascii(ref vec) => vec.first().map(|v| v.as_slice()),
+        _ => None,
+    }
+}
+
+/// Convert a parsed EXIF datetime to a Unix timestamp (seconds).
+///
+/// EXIF `DateTimeOriginal` has no timezone; when `OffsetTimeOriginal` supplied
+/// one it is applied, otherwise the civil time is interpreted as UTC. Rejects
+/// impossible dates (e.g. month 13, day 31 in February) via `chrono`.
 fn datetime_to_unix(dt: &exif::DateTime) -> Option<i64> {
-    // Simple conversion: days since epoch approach
-    let y = dt.year as i64;
-    let m = dt.month as i64;
-    let d = dt.day as i64;
+    let naive = NaiveDate::from_ymd_opt(dt.year as i32, dt.month as u32, dt.day as u32)?
+        .and_hms_opt(dt.hour as u32, dt.minute as u32, dt.second as u32)?;
 
-    // Adjust for months (Jan=1, Feb=2, ... Dec=12)
-    let (y, m) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
-
-    // Days from epoch (March 1, year 0) then adjust to Unix epoch
-    let days = 365 * y + y / 4 - y / 100 + y / 400 + (m * 306 + 5) / 10 + d - 1 - 719468; // offset from March 1, year 0 to Jan 1, 1970
-
-    let secs = days * 86400 + dt.hour as i64 * 3600 + dt.minute as i64 * 60 + dt.second as i64;
-
-    Some(secs)
+    match dt.offset {
+        Some(minutes) => {
+            let tz = FixedOffset::east_opt(minutes as i32 * 60)?;
+            tz.from_local_datetime(&naive)
+                .single()
+                .map(|t| t.timestamp())
+        }
+        None => Some(naive.and_utc().timestamp()),
+    }
 }
 
 // FFI constructor
@@ -202,4 +224,70 @@ fn datetime_to_unix(dt: &exif::DateTime) -> Option<i64> {
 #[allow(improper_ctypes_definitions)]
 pub extern "C" fn byteburrow_create_plugin() -> *mut dyn ClassifierPlugin {
     Box::into_raw(Box::new(ExifClassifier))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dt(bytes: &[u8], offset: Option<&[u8]>) -> exif::DateTime {
+        let mut dt = exif::DateTime::from_ascii(bytes).unwrap();
+        if let Some(o) = offset {
+            dt.parse_offset(o).unwrap();
+        }
+        dt
+    }
+
+    #[test]
+    fn naive_datetime_is_interpreted_as_utc() {
+        // 2021-01-01 00:00:00 UTC == 1609459200.
+        let dt = dt(b"2021:01:01 00:00:00", None);
+        assert_eq!(datetime_to_unix(&dt), Some(1_609_459_200));
+    }
+
+    #[test]
+    fn known_epoch_reference() {
+        // The Unix epoch itself.
+        let dt = dt(b"1970:01:01 00:00:00", None);
+        assert_eq!(datetime_to_unix(&dt), Some(0));
+    }
+
+    #[test]
+    fn positive_offset_shifts_earlier_in_utc() {
+        // 12:00:00 at +02:00 is 10:00:00 UTC.
+        let with_off = dt(b"2021:06:15 12:00:00", Some(b"+02:00"));
+        let as_utc = dt(b"2021:06:15 10:00:00", None);
+        assert_eq!(datetime_to_unix(&with_off), datetime_to_unix(&as_utc));
+    }
+
+    #[test]
+    fn negative_offset_shifts_later_in_utc() {
+        // 12:00:00 at -05:00 is 17:00:00 UTC.
+        let with_off = dt(b"2021:06:15 12:00:00", Some(b"-05:00"));
+        let as_utc = dt(b"2021:06:15 17:00:00", None);
+        assert_eq!(datetime_to_unix(&with_off), datetime_to_unix(&as_utc));
+    }
+
+    #[test]
+    fn pre_epoch_date_is_negative() {
+        // 1969-12-31 23:59:59 UTC is one second before the epoch.
+        let dt = dt(b"1969:12:31 23:59:59", None);
+        assert_eq!(datetime_to_unix(&dt), Some(-1));
+    }
+
+    #[test]
+    fn leap_day_is_valid() {
+        // 2020-02-29 is a real date (2020 is a leap year).
+        let dt = dt(b"2020:02:29 00:00:00", None);
+        assert_eq!(datetime_to_unix(&dt), Some(1_582_934_400));
+    }
+
+    #[test]
+    fn invalid_date_is_rejected() {
+        // from_ascii is lenient about field ranges; ensure chrono rejects
+        // an impossible calendar date instead of producing a bogus epoch.
+        let mut dt = exif::DateTime::from_ascii(b"2021:02:30 00:00:00").unwrap();
+        dt.offset = None;
+        assert_eq!(datetime_to_unix(&dt), None);
+    }
 }
