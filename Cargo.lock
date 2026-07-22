@@ -569,6 +569,7 @@ name = "byteburrow-plugin-exif"
 version = "0.1.0"
 dependencies = [
  "byteburrow-plugin-api",
+ "chrono",
  "kamadak-exif",
  "serde_json",
 ]
