@@ -1249,6 +1249,7 @@ pub struct ShareResponse {
     pub id: i32,
     pub storage_id: i32,
     pub path: String,
+    pub owner_id: i32,
     pub token: Option<String>,
     pub has_public_link: bool,
     pub can_write: bool,
@@ -1264,6 +1265,7 @@ impl ShareResponse {
             id: m.id,
             storage_id: e.storage_id,
             path: e.path,
+            owner_id: m.owner_id,
             has_public_link: m.token.is_some(),
             token: None,
             can_write: m.can_write,
@@ -1346,17 +1348,11 @@ pub(crate) async fn list_all_user_shares_handler(
 ) -> Result<Json<Vec<ShareResponse>>, ApiError> {
     let user_id = auth.user.id;
 
-    // DRY-4: shared group-id loader
-    let user_groups = user_group_ids(&state.db, user_id).await?;
-
-    // Shares whose entry is owned by this user or belongs to one of their groups.
+    // Shares this user created, keyed off the authoritative `owner_id` column
+    // (issue #32 / G1) rather than derived from the backing entry's ownership.
     let shares_with_entries = shared::Entity::find()
         .find_also_related(entry::Entity)
-        .filter(
-            Condition::any()
-                .add(entry::Column::UserId.eq(user_id))
-                .add(entry::Column::GroupId.is_in(user_groups)),
-        )
+        .filter(shared::Column::OwnerId.eq(user_id))
         .all(&state.db)
         .await?;
 
@@ -1478,6 +1474,7 @@ pub(crate) async fn share_entry_handler(
 
     let new_shared = shared::ActiveModel {
         path_id: Set(entry_id),
+        owner_id: Set(auth.user.id),
         token: Set(token_hash),
         can_write: Set(payload.can_write),
         user_ids: Set(payload.user_ids),

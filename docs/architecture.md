@@ -174,6 +174,14 @@ which means the plaintext can't be re-displayed for an existing link — only a
 genuinely new link (via delete + recreate, or flipping `public_link` off then
 on) yields a fresh plaintext to show the user.
 
+Each share records its creator in an explicit `shared.owner_id` column (issue
+#32), set to the authenticated user at creation. This is the authoritative
+"who created this share" record: the "my shares" listing (`GET
+/api/storage/share`) filters on `owner_id` rather than deriving ownership from
+the backing entry, and `ShareResponse` surfaces it as `owner_id`. Share-*management*
+authorization still goes through `require_entry_owner` (above), so the entry's
+owner/group and admins retain control regardless of who created a given share.
+
 ### Database Access
 - Use SeaORM entities from `crate::entity::{user, group, storage, entry, ...}`
 - Database connection available via `State<Arc<AppState>>` in handlers

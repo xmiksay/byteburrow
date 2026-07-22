@@ -7,6 +7,9 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = true)]
     pub id: i32,
     pub path_id: i32,
+    /// User who created this share (issue #32 / G1). Authoritative record of
+    /// "my shares" ownership, independent of the backing entry's ownership.
+    pub owner_id: i32,
     pub token: Option<String>,
     pub can_write: bool,
     pub user_ids: Vec<i32>,
@@ -23,11 +26,23 @@ pub enum Relation {
         to = "super::entry::Column::Id"
     )]
     Path,
+    #[sea_orm(
+        belongs_to = "super::user::Entity",
+        from = "Column::OwnerId",
+        to = "super::user::Column::Id"
+    )]
+    Owner,
 }
 
 impl Related<super::entry::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Path.def()
+    }
+}
+
+impl Related<super::user::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Owner.def()
     }
 }
 

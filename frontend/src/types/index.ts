@@ -100,6 +100,7 @@ export interface Shared {
     storage_id: number
     path: string
     path_id: number
+    owner_id: number
     token?: string
     has_public_link: boolean
     can_write: boolean
