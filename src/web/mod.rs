@@ -1,3 +1,4 @@
+pub mod dav;
 pub mod group;
 pub mod photo;
 pub mod storage;
@@ -880,6 +881,9 @@ pub async fn run(config: Config, db: DatabaseConnection, job_sender: JobSender) 
 
     let app = Router::new()
         .nest("/api", api_router)
+        // DAV gateway mounts at /dav (not under /api) — WebDAV/CalDAV/CardDAV
+        // clients expect a clean path root.
+        .merge(dav::router())
         .merge(SwaggerUi::new("/api/docs/").url("/api/docs/openapi.json", ApiDoc::openapi()))
         .fallback(get(frontend_handler));
 
