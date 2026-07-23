@@ -56,6 +56,149 @@ impl Drop for LoadedPlugin {
     }
 }
 
+/// One entry in the multi-pass pipeline: a classifier plus its live "disabled"
+/// state. Implemented by `LoadedPlugin` in production and by a test double in
+/// the unit tests, so the ordering / dependency / `needs_file_data` mechanics
+/// can be exercised without loading real `.so` files.
+trait PipelineEntry {
+    fn classifier(&self) -> &dyn ClassifierPlugin;
+    fn is_disabled(&self) -> bool;
+    fn disable(&self);
+}
+
+impl PipelineEntry for LoadedPlugin {
+    fn classifier(&self) -> &dyn ClassifierPlugin {
+        &**self.plugin
+    }
+    fn is_disabled(&self) -> bool {
+        self.disabled.load(Ordering::Relaxed)
+    }
+    fn disable(&self) {
+        self.disabled.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Deterministic sort key: plugins requiring fewer custom keys first, then by
+/// name. Keeps a stable, roughly topological execution order (see the sort in
+/// `load_from_directory`).
+fn plugin_sort_key(p: &dyn ClassifierPlugin) -> (usize, &str) {
+    (p.custom_requires().len(), p.name())
+}
+
+/// Whether any non-disabled plugin that could run for `mime_type` needs the
+/// full file bytes. Conservative: it ignores `custom_requires` (a plugin whose
+/// dependencies are unmet won't actually run), so it may over-read but never
+/// under-reads. Empty registry → `false`.
+fn any_needs_file_data<E: PipelineEntry>(entries: &[E], mime_type: &str) -> bool {
+    entries.iter().any(|e| {
+        if e.is_disabled() {
+            return false;
+        }
+        let plugin = e.classifier();
+        let interests = plugin.mime_interests();
+        let applies =
+            interests.is_empty() || interests.iter().any(|prefix| mime_type.starts_with(prefix));
+        applies && plugin.needs_file_data()
+    })
+}
+
+/// Run every eligible plugin over `ctx` using iterative multi-pass execution.
+///
+/// Entries are visited in their (already deterministic) slice order each pass;
+/// a plugin whose `custom_requires` are not yet satisfied is deferred to a
+/// later pass, and the loop stops once a pass makes no progress.
+fn run_pipeline<E: PipelineEntry>(entries: &[E], ctx: &FileContext) -> MergedClassification {
+    let mut merged = MergedClassification::default();
+    let mut ran = vec![false; entries.len()];
+    let mut current_custom: HashMap<String, serde_json::Value> = ctx.custom.clone();
+
+    for pass in 0..MAX_PASSES {
+        let mut made_progress = false;
+
+        for (i, entry) in entries.iter().enumerate() {
+            if ran[i] {
+                continue;
+            }
+            // A plugin disabled by an earlier panic is never called again.
+            if entry.is_disabled() {
+                ran[i] = true;
+                continue;
+            }
+            let plugin = entry.classifier();
+
+            // Check MIME interest
+            let interests = plugin.mime_interests();
+            if !interests.is_empty()
+                && !interests
+                    .iter()
+                    .any(|prefix| ctx.mime_type.starts_with(prefix))
+            {
+                ran[i] = true; // won't ever match, skip in future passes
+                continue;
+            }
+
+            // Check custom metadata requirements
+            let required_custom = plugin.custom_requires();
+            if !required_custom
+                .iter()
+                .all(|key| current_custom.contains_key(*key))
+            {
+                continue; // might become eligible in a later pass
+            }
+
+            // Build updated context for this plugin
+            let plugin_ctx = FileContext {
+                path: ctx.path,
+                full_path: ctx.full_path,
+                data: ctx.data,
+                mime_type: ctx.mime_type,
+                size: ctx.size,
+                custom: &current_custom,
+            };
+
+            match run_classify(plugin, &plugin_ctx) {
+                PluginOutcome::Classified(Some(result)) => {
+                    info!(
+                        plugin = plugin.name(),
+                        pass,
+                        keywords = ?result.keywords,
+                        "Plugin classification"
+                    );
+                    // Update accumulated state for next plugins
+                    for (k, v) in &result.custom {
+                        current_custom.insert(k.clone(), v.clone());
+                    }
+                    merged.absorb(result);
+                    made_progress = true;
+                }
+                PluginOutcome::Classified(None) => {}
+                PluginOutcome::Failed(e) => {
+                    error!(
+                        plugin = plugin.name(),
+                        error = %e,
+                        "Plugin classify error"
+                    );
+                }
+                PluginOutcome::Panicked => {
+                    error!(
+                        plugin = plugin.name(),
+                        "Plugin panicked during classify; disabling it for the rest of this process"
+                    );
+                    entry.disable();
+                }
+            }
+
+            ran[i] = true;
+        }
+
+        if !made_progress {
+            break;
+        }
+    }
+
+    merged
+}
+
 /// Owns all loaded plugins and dispatches classification calls.
 pub struct PluginRegistry {
     plugins: Vec<LoadedPlugin>,
@@ -95,6 +238,15 @@ impl PluginRegistry {
                 }
             }
         }
+
+        // Filesystem read order (`read_dir`) is not stable, which let multi-pass
+        // classification results depend on directory listing order. Establish a
+        // deterministic, roughly topological order: plugins requiring fewer
+        // custom keys (closer to the pipeline roots) run first, ties broken by
+        // name. `run_pipeline`'s multi-pass loop then resolves the remaining
+        // dependencies, so this only needs to be stable, not perfectly sorted.
+        plugins
+            .sort_by(|a, b| plugin_sort_key(a.classifier()).cmp(&plugin_sort_key(b.classifier())));
 
         info!(count = plugins.len(), "Plugins loaded");
         Self { plugins }
@@ -158,94 +310,15 @@ impl PluginRegistry {
     /// Plugins declare dependencies via `custom_requires()`.
     /// The host runs plugins in iterative passes until no new plugins become eligible.
     pub fn classify_file(&self, ctx: &FileContext) -> MergedClassification {
-        let mut merged = MergedClassification::default();
-        let mut ran = vec![false; self.plugins.len()];
-        let mut current_custom: HashMap<String, serde_json::Value> = ctx.custom.clone();
+        run_pipeline(&self.plugins, ctx)
+    }
 
-        for pass in 0..MAX_PASSES {
-            let mut made_progress = false;
-
-            for (i, loaded) in self.plugins.iter().enumerate() {
-                if ran[i] {
-                    continue;
-                }
-                // A plugin disabled by an earlier panic is never called again.
-                if loaded.disabled.load(Ordering::Relaxed) {
-                    ran[i] = true;
-                    continue;
-                }
-
-                // Check MIME interest
-                let interests = loaded.plugin.mime_interests();
-                if !interests.is_empty()
-                    && !interests
-                        .iter()
-                        .any(|prefix| ctx.mime_type.starts_with(prefix))
-                {
-                    ran[i] = true; // won't ever match, skip in future passes
-                    continue;
-                }
-
-                // Check custom metadata requirements
-                let required_custom = loaded.plugin.custom_requires();
-                if !required_custom
-                    .iter()
-                    .all(|key| current_custom.contains_key(*key))
-                {
-                    continue; // might become eligible in a later pass
-                }
-
-                // Build updated context for this plugin
-                let plugin_ctx = FileContext {
-                    path: ctx.path,
-                    full_path: ctx.full_path,
-                    data: ctx.data,
-                    mime_type: ctx.mime_type,
-                    size: ctx.size,
-                    custom: &current_custom,
-                };
-
-                match run_classify(&**loaded.plugin, &plugin_ctx) {
-                    PluginOutcome::Classified(Some(result)) => {
-                        info!(
-                            plugin = loaded.plugin.name(),
-                            pass,
-                            keywords = ?result.keywords,
-                            "Plugin classification"
-                        );
-                        // Update accumulated state for next plugins
-                        for (k, v) in &result.custom {
-                            current_custom.insert(k.clone(), v.clone());
-                        }
-                        merged.absorb(result);
-                        made_progress = true;
-                    }
-                    PluginOutcome::Classified(None) => {}
-                    PluginOutcome::Failed(e) => {
-                        error!(
-                            plugin = loaded.plugin.name(),
-                            error = %e,
-                            "Plugin classify error"
-                        );
-                    }
-                    PluginOutcome::Panicked => {
-                        error!(
-                            plugin = loaded.plugin.name(),
-                            "Plugin panicked during classify; disabling it for the rest of this process"
-                        );
-                        loaded.disabled.store(true, Ordering::Relaxed);
-                    }
-                }
-
-                ran[i] = true;
-            }
-
-            if !made_progress {
-                break;
-            }
-        }
-
-        merged
+    /// Whether the host must load the full file bytes before classifying a file
+    /// of `mime_type` — i.e. some plugin that could run for it declares
+    /// `needs_file_data()`. Lets the caller honor the API contract and skip the
+    /// read entirely for plugins that do their own path-based I/O.
+    pub fn needs_file_data(&self, mime_type: &str) -> bool {
+        any_needs_file_data(&self.plugins, mime_type)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -286,5 +359,209 @@ impl PluginRegistry {
                 deps,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use byteburrow_plugin_api::{ClassificationResult, PluginConfig};
+
+    /// Configurable fake classifier: on `classify` it emits one keyword (its
+    /// name) and writes each key in `provides` into `custom`.
+    struct FakePlugin {
+        name: &'static str,
+        mime: Vec<&'static str>,
+        requires: Vec<&'static str>,
+        provides: Vec<&'static str>,
+        needs_data: bool,
+    }
+
+    impl FakePlugin {
+        fn new(name: &'static str) -> Self {
+            Self {
+                name,
+                mime: vec![],
+                requires: vec![],
+                provides: vec![],
+                needs_data: true,
+            }
+        }
+        fn mime(mut self, m: &'static str) -> Self {
+            self.mime.push(m);
+            self
+        }
+        fn requires(mut self, k: &'static str) -> Self {
+            self.requires.push(k);
+            self
+        }
+        fn provides(mut self, k: &'static str) -> Self {
+            self.provides.push(k);
+            self
+        }
+        fn needs_data(mut self, v: bool) -> Self {
+            self.needs_data = v;
+            self
+        }
+    }
+
+    impl ClassifierPlugin for FakePlugin {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn version(&self) -> &str {
+            "0.0.0"
+        }
+        fn mime_interests(&self) -> &[&str] {
+            &self.mime
+        }
+        fn custom_requires(&self) -> &[&str] {
+            &self.requires
+        }
+        fn needs_file_data(&self) -> bool {
+            self.needs_data
+        }
+        fn init(&mut self, _config: &PluginConfig) -> Result<(), String> {
+            Ok(())
+        }
+        fn classify(&self, _ctx: &FileContext) -> Result<Option<ClassificationResult>, String> {
+            let custom = self
+                .provides
+                .iter()
+                .map(|k| (k.to_string(), serde_json::json!(self.name)))
+                .collect();
+            Ok(Some(ClassificationResult {
+                keywords: vec![self.name.to_string()],
+                custom,
+                ..Default::default()
+            }))
+        }
+    }
+
+    struct TestEntry {
+        plugin: Box<dyn ClassifierPlugin>,
+        disabled: AtomicBool,
+    }
+
+    impl PipelineEntry for TestEntry {
+        fn classifier(&self) -> &dyn ClassifierPlugin {
+            &*self.plugin
+        }
+        fn is_disabled(&self) -> bool {
+            self.disabled.load(Ordering::Relaxed)
+        }
+        fn disable(&self) {
+            self.disabled.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn entry(p: FakePlugin) -> TestEntry {
+        TestEntry {
+            plugin: Box::new(p),
+            disabled: AtomicBool::new(false),
+        }
+    }
+
+    /// Sort entries with the same key `load_from_directory` uses.
+    fn sorted(mut entries: Vec<TestEntry>) -> Vec<TestEntry> {
+        entries
+            .sort_by(|a, b| plugin_sort_key(a.classifier()).cmp(&plugin_sort_key(b.classifier())));
+        entries
+    }
+
+    fn ctx_for<'a>(
+        mime: &'a str,
+        custom: &'a HashMap<String, serde_json::Value>,
+    ) -> FileContext<'a> {
+        FileContext {
+            path: "test.jpg",
+            full_path: Path::new("/tmp/test.jpg"),
+            data: &[],
+            mime_type: mime,
+            size: 0,
+            custom,
+        }
+    }
+
+    #[test]
+    fn sort_key_orders_by_dependency_count_then_name() {
+        let a = FakePlugin::new("b");
+        let b = FakePlugin::new("a");
+        let dep = FakePlugin::new("a-dep").requires("x");
+        let mut v: Vec<&dyn ClassifierPlugin> = vec![&dep, &a, &b];
+        v.sort_by(|x, y| plugin_sort_key(*x).cmp(&plugin_sort_key(*y)));
+        let names: Vec<_> = v.iter().map(|p| p.name()).collect();
+        assert_eq!(names, vec!["a", "b", "a-dep"]);
+    }
+
+    #[test]
+    fn pipeline_resolves_dependencies_regardless_of_slice_order() {
+        // Consumer is listed *before* its producer; the multi-pass loop must
+        // still run it, in a later pass, once "faces" exists.
+        let entries = vec![
+            entry(
+                FakePlugin::new("consumer")
+                    .requires("faces")
+                    .provides("match"),
+            ),
+            entry(FakePlugin::new("producer").provides("faces")),
+        ];
+        let custom = HashMap::new();
+        let merged = run_pipeline(&entries, &ctx_for("image/jpeg", &custom));
+        assert!(merged.custom.contains_key("faces"), "producer must run");
+        assert!(
+            merged.custom.contains_key("match"),
+            "consumer must run after its dependency is satisfied"
+        );
+    }
+
+    #[test]
+    fn sorted_pipeline_is_order_independent() {
+        // Two producers writing keywords, plus a dependent consumer. Whatever
+        // the directory listing order, sorting yields the same run order and
+        // therefore the same accumulated keywords.
+        let build = || {
+            vec![
+                entry(FakePlugin::new("alpha").provides("a")),
+                entry(FakePlugin::new("bravo").provides("b")),
+                entry(FakePlugin::new("consumer").requires("a").requires("b")),
+            ]
+        };
+        let forward = run_pipeline(&sorted(build()), &ctx_for("image/jpeg", &HashMap::new()));
+        let mut reversed_input = build();
+        reversed_input.reverse();
+        let reversed = run_pipeline(
+            &sorted(reversed_input),
+            &ctx_for("image/jpeg", &HashMap::new()),
+        );
+        assert_eq!(forward.keywords, reversed.keywords);
+        assert_eq!(forward.keywords, vec!["alpha", "bravo", "consumer"]);
+    }
+
+    #[test]
+    fn needs_file_data_true_only_for_applicable_data_plugins() {
+        let entries = vec![entry(FakePlugin::new("img").mime("image/"))];
+        assert!(any_needs_file_data(&entries, "image/jpeg"));
+        // MIME does not match -> plugin won't run -> no read required.
+        assert!(!any_needs_file_data(&entries, "text/plain"));
+    }
+
+    #[test]
+    fn needs_file_data_false_when_only_path_plugins_apply() {
+        let entries = vec![entry(FakePlugin::new("probe").needs_data(false))];
+        assert!(!any_needs_file_data(&entries, "video/mp4"));
+    }
+
+    #[test]
+    fn needs_file_data_false_for_empty_registry() {
+        let entries: Vec<TestEntry> = vec![];
+        assert!(!any_needs_file_data(&entries, "image/jpeg"));
+    }
+
+    #[test]
+    fn needs_file_data_ignores_disabled_plugins() {
+        let entries = vec![entry(FakePlugin::new("img").mime("image/"))];
+        entries[0].disable();
+        assert!(!any_needs_file_data(&entries, "image/jpeg"));
     }
 }

@@ -280,16 +280,20 @@ Plugins are dynamic libraries (`.so`) that classify files. Each plugin implement
 
 **Plugin trait key methods:**
 - `mime_interests()` — MIME prefixes the plugin handles (e.g. `&["image/"]`)
-- `kind_requires()` — `KindFlags` that must be set before this plugin runs
 - `custom_requires()` — custom metadata keys that must exist (for chaining)
+- `needs_file_data()` — whether the host must load the full file bytes; return `false` for plugins that do their own path-based I/O (default `true`)
 - `classify(&FileContext) -> Result<Option<ClassificationResult>>` — main logic
 
-**Multi-pass execution:** Plugins declare dependencies. The host runs them in iterative passes until no new plugins become eligible:
+**Deterministic order:** `read_dir` listing order is not stable, so at load the host sorts plugins by `(custom_requires().len(), name())` — plugins with fewer dependencies first, ties broken by name. Combined with the multi-pass loop this makes classification results independent of the filesystem's listing order.
+
+**`needs_file_data` honoring:** the host sniffs MIME from a bounded header read, then loads the full file only when some applicable plugin declares `needs_file_data()`. Plugins that do their own path I/O (and the inline-EXIF fallback) skip the whole-file read (`src/job/classify.rs`).
+
+**Multi-pass execution:** Plugins declare dependencies via `custom_requires()`. The host runs them in iterative passes until no new plugins become eligible:
 ```
-Pass 1: EXIF plugin (no requirements) → sets Kind::Photo
-Pass 2: Face detection (requires Kind::Photo) → adds custom["faces"]
+Pass 1: EXIF plugin (no requirements) → adds custom["date"], geo, keywords
+Pass 2: Face detection (image/*) → adds custom["faces"]
 Pass 3: Face embedding/recognition (requires custom "faces") → adds custom["people"]
-Pass N: Keyword extraction, color classification (require Kind::Photo) → add custom["keywords"], custom["colors"]
+Pass N: Keyword extraction, color classification (image/*) → add custom["keywords"], custom["colors"]
 ```
 
 **Creating a new plugin:**
