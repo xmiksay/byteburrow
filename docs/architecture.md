@@ -198,6 +198,13 @@ is, not that they may act on the requested resource:
   `require_storage_path_access`; admins always pass.
 
 ### Sharing
+**Access scope:** a share grants access to the shared entry's **subtree only**
+— the shared entry and everything below its path, never the rest of the
+storage. This is the model enforced by the three authorization helpers above
+(content via `require_storage_path_access`, direct browsing via
+`get_share_context`, and metadata-only visibility via `require_storage_access`)
+and is recorded in [ADR 0005](adr/0005-share-access-scope.md).
+
 Public-link share tokens (`shared.token`) are hashed at rest with
 `Auth::hash_string` (SHA-256 + config salt) rather than stored as plaintext
 (issue #10) — the same scheme used for session tokens. Consequently the
