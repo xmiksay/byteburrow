@@ -1,19 +1,59 @@
 use std::collections::HashMap;
+use std::mem::ManuallyDrop;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use byteburrow_plugin_api::{
-    ClassificationResult, ClassifierPlugin, FileContext, PluginConfig, PluginConstructor,
-    API_VERSION_MAJOR, PLUGIN_CONSTRUCTOR_SYMBOL,
+    ClassifierPlugin, FileContext, PluginConfig, PluginConstructor, PluginDestructor,
+    PLUGIN_CONSTRUCTOR_SYMBOL, PLUGIN_DESTRUCTOR_SYMBOL,
 };
 use libloading::{Library, Symbol};
 use tracing::{error, info, warn};
 
+mod guard;
+mod merge;
+use guard::{check_api_version, run_classify, PluginOutcome};
+pub use merge::MergedClassification;
+
 const MAX_PASSES: usize = 10;
 
 /// A loaded plugin plus its backing library handle.
+///
+/// The FFI boundary is not C-stable (a `dyn ClassifierPlugin` fat pointer, see
+/// ADR 0006); this host hardens against the coupling by owning the constructed
+/// pointer through its whole lifecycle and freeing it via the plugin's own
+/// destructor on drop.
 struct LoadedPlugin {
-    plugin: Box<dyn ClassifierPlugin>,
+    /// Held in `ManuallyDrop` because the plugin — not the host allocator —
+    /// must free the box (see the `Drop` impl below).
+    plugin: ManuallyDrop<Box<dyn ClassifierPlugin>>,
+    /// The plugin's destructor symbol, or `None` for pre-0.3 plugins.
+    destructor: Option<PluginDestructor>,
+    /// Set when the plugin panics in `classify`; a panic poisons any mutex it
+    /// holds, so it is skipped for the rest of the process instead of
+    /// re-panicking on every subsequent file.
+    disabled: AtomicBool,
+    /// Kept last so it unloads *after* the plugin box is dropped.
     _library: Library,
+}
+
+impl Drop for LoadedPlugin {
+    fn drop(&mut self) {
+        // Reclaim the box without dropping it here, then hand the raw pointer
+        // back to the plugin so it frees with its own allocator (or fall back
+        // to a host-side drop for pre-0.3 plugins).
+        // SAFETY: `plugin` is taken exactly once, here in `Drop`.
+        let raw = Box::into_raw(unsafe { ManuallyDrop::take(&mut self.plugin) });
+        match self.destructor {
+            // SAFETY: `raw` came from this library's constructor, freed once.
+            Some(destroy) => unsafe { destroy(raw) },
+            // SAFETY: same-rustc/allocator assumption of the contract; freed once.
+            None => unsafe { drop(Box::from_raw(raw)) },
+        }
+        // `_library` unloads after this (fields drop after `Drop::drop`), so the
+        // plugin's code stays mapped while its destructor runs.
+    }
 }
 
 /// Owns all loaded plugins and dispatches classification calls.
@@ -64,34 +104,53 @@ impl PluginRegistry {
         // SAFETY: We trust .so files placed in the configured plugin directory.
         let library = unsafe { Library::new(path)? };
 
-        let constructor: Symbol<PluginConstructor> =
-            unsafe { library.get(PLUGIN_CONSTRUCTOR_SYMBOL)? };
-
-        let raw = unsafe { constructor() };
+        let raw = {
+            let constructor: Symbol<PluginConstructor> =
+                unsafe { library.get(PLUGIN_CONSTRUCTOR_SYMBOL)? };
+            // A panic must not unwind across the `extern "C"` boundary (UB);
+            // trap it and fail the load instead.
+            catch_unwind(AssertUnwindSafe(|| unsafe { constructor() }))
+                .map_err(|_| anyhow::anyhow!("plugin constructor panicked"))?
+        };
         if raw.is_null() {
             anyhow::bail!("Plugin constructor returned null");
         }
-        let mut plugin = unsafe { Box::from_raw(raw) };
 
-        // Version gate
-        let (major, _minor) = plugin.api_version();
-        if major != API_VERSION_MAJOR {
-            anyhow::bail!(
-                "API version mismatch: plugin {} has major {}, host expects {}",
-                plugin.name(),
-                major,
-                API_VERSION_MAJOR
+        // Prefer the plugin's own destructor (0.3+); warn and fall back otherwise.
+        let destructor: Option<PluginDestructor> = unsafe {
+            library
+                .get::<PluginDestructor>(PLUGIN_DESTRUCTOR_SYMBOL)
+                .ok()
+                .map(|s| *s)
+        };
+        if destructor.is_none() {
+            warn!(
+                path = %path.display(),
+                "Plugin exports no destructor symbol; host will free it (rebuild with declare_plugin!)"
             );
         }
 
-        plugin
-            .init(config)
+        // From here the pointer is owned by `loaded`; any early return frees it
+        // through the plugin's destructor via `LoadedPlugin`'s `Drop`.
+        // SAFETY: `raw` is non-null and came from this library's constructor.
+        let mut loaded = LoadedPlugin {
+            plugin: ManuallyDrop::new(unsafe { Box::from_raw(raw) }),
+            destructor,
+            disabled: AtomicBool::new(false),
+            _library: library,
+        };
+
+        let (major, minor) = catch_unwind(AssertUnwindSafe(|| loaded.plugin.api_version()))
+            .map_err(|_| anyhow::anyhow!("plugin api_version() panicked"))?;
+        if let Err(e) = check_api_version(major, minor) {
+            anyhow::bail!("{}: {}", loaded.plugin.name(), e);
+        }
+
+        catch_unwind(AssertUnwindSafe(|| loaded.plugin.init(config)))
+            .map_err(|_| anyhow::anyhow!("plugin init panicked"))?
             .map_err(|e| anyhow::anyhow!("init failed: {}", e))?;
 
-        Ok(LoadedPlugin {
-            plugin,
-            _library: library,
-        })
+        Ok(loaded)
     }
 
     /// Run all applicable plugins on a file using multi-pass execution.
@@ -108,6 +167,11 @@ impl PluginRegistry {
 
             for (i, loaded) in self.plugins.iter().enumerate() {
                 if ran[i] {
+                    continue;
+                }
+                // A plugin disabled by an earlier panic is never called again.
+                if loaded.disabled.load(Ordering::Relaxed) {
+                    ran[i] = true;
                     continue;
                 }
 
@@ -141,8 +205,8 @@ impl PluginRegistry {
                     custom: &current_custom,
                 };
 
-                match loaded.plugin.classify(&plugin_ctx) {
-                    Ok(Some(result)) => {
+                match run_classify(&**loaded.plugin, &plugin_ctx) {
+                    PluginOutcome::Classified(Some(result)) => {
                         info!(
                             plugin = loaded.plugin.name(),
                             pass,
@@ -156,13 +220,20 @@ impl PluginRegistry {
                         merged.absorb(result);
                         made_progress = true;
                     }
-                    Ok(None) => {}
-                    Err(e) => {
+                    PluginOutcome::Classified(None) => {}
+                    PluginOutcome::Failed(e) => {
                         error!(
                             plugin = loaded.plugin.name(),
                             error = %e,
                             "Plugin classify error"
                         );
+                    }
+                    PluginOutcome::Panicked => {
+                        error!(
+                            plugin = loaded.plugin.name(),
+                            "Plugin panicked during classify; disabling it for the rest of this process"
+                        );
+                        loaded.disabled.store(true, Ordering::Relaxed);
                     }
                 }
 
@@ -215,119 +286,5 @@ impl PluginRegistry {
                 deps,
             );
         }
-    }
-}
-
-/// Aggregated results from all plugins for a single file.
-#[derive(Debug, Default, Clone)]
-pub struct MergedClassification {
-    pub keywords: Vec<String>,
-    pub custom: serde_json::Map<String, serde_json::Value>,
-    pub latitude: Option<f64>,
-    pub longitude: Option<f64>,
-    pub date_unix: Option<i64>,
-}
-
-impl MergedClassification {
-    fn absorb(&mut self, r: ClassificationResult) {
-        self.keywords.extend(r.keywords);
-        for (k, v) in r.custom {
-            self.custom.insert(k, v);
-        }
-        if r.latitude.is_some() {
-            self.latitude = r.latitude;
-        }
-        if r.longitude.is_some() {
-            self.longitude = r.longitude;
-        }
-        if r.date_unix.is_some() {
-            self.date_unix = r.date_unix;
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn result_with(
-        keywords: &[&str],
-        custom: &[(&str, serde_json::Value)],
-    ) -> ClassificationResult {
-        ClassificationResult {
-            keywords: keywords.iter().map(|s| s.to_string()).collect(),
-            custom: custom
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.clone()))
-                .collect(),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn absorb_accumulates_keywords_across_calls() {
-        let mut merged = MergedClassification::default();
-        merged.absorb(result_with(&["cat", "sunset"], &[]));
-        merged.absorb(result_with(&["beach"], &[]));
-
-        assert_eq!(merged.keywords, vec!["cat", "sunset", "beach"]);
-    }
-
-    #[test]
-    fn absorb_merges_custom_metadata_by_key() {
-        let mut merged = MergedClassification::default();
-        merged.absorb(result_with(
-            &[],
-            &[("exif", serde_json::json!({"iso": 100}))],
-        ));
-        merged.absorb(result_with(&[], &[("faces", serde_json::json!(2))]));
-
-        assert_eq!(merged.custom.len(), 2);
-        assert_eq!(merged.custom["exif"], serde_json::json!({"iso": 100}));
-        assert_eq!(merged.custom["faces"], serde_json::json!(2));
-    }
-
-    #[test]
-    fn absorb_later_custom_value_overwrites_earlier_for_same_key() {
-        let mut merged = MergedClassification::default();
-        merged.absorb(result_with(
-            &[],
-            &[("exif", serde_json::json!({"iso": 100}))],
-        ));
-        merged.absorb(result_with(
-            &[],
-            &[("exif", serde_json::json!({"iso": 200}))],
-        ));
-
-        assert_eq!(merged.custom["exif"], serde_json::json!({"iso": 200}));
-    }
-
-    #[test]
-    fn absorb_sets_geo_and_date_fields() {
-        let mut merged = MergedClassification::default();
-        merged.absorb(ClassificationResult {
-            latitude: Some(50.1),
-            longitude: Some(14.4),
-            date_unix: Some(1_700_000_000),
-            ..Default::default()
-        });
-
-        assert_eq!(merged.latitude, Some(50.1));
-        assert_eq!(merged.longitude, Some(14.4));
-        assert_eq!(merged.date_unix, Some(1_700_000_000));
-    }
-
-    #[test]
-    fn absorb_keeps_previous_geo_when_later_plugin_has_none() {
-        let mut merged = MergedClassification::default();
-        merged.absorb(ClassificationResult {
-            latitude: Some(50.1),
-            longitude: Some(14.4),
-            ..Default::default()
-        });
-        merged.absorb(ClassificationResult::default());
-
-        assert_eq!(merged.latitude, Some(50.1));
-        assert_eq!(merged.longitude, Some(14.4));
     }
 }

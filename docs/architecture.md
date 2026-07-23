@@ -52,14 +52,15 @@ Deep reference for ByteBurrow's module layout, request flow, and key patterns. S
   - Migration files follow pattern: `m{timestamp}_{description}.rs`
 
 - **`src/plugin/`**: Dynamic plugin system
-  - `PluginRegistry`: loads `.so` files from plugin directory at startup
+  - `PluginRegistry` (`mod.rs`): loads `.so` files at startup, version-gates them, and dispatches `classify` under `catch_unwind` (see the Plugin System section / ADR 0006)
+  - `MergedClassification` (`merge.rs`): accumulates all plugins' results for one file
   - Multi-pass classification with dependency resolution between plugins
   - Integrates with the job system — plugins run during `Job::ProcessFile` processing
 
 - **`byteburrow-plugin-api/`**: Lightweight plugin API crate (workspace member)
   - `ClassifierPlugin` trait — implemented by all plugins
   - `FileContext`, `ClassificationResult`, `KindFlags` — shared types
-  - FFI contract via `#[no_mangle] extern "C"` constructor
+  - FFI contract via the `declare_plugin!` macro (`extern "C"` constructor + destructor); not C-stable (see ADR 0006)
   - No heavy dependencies (only `serde` + `serde_json`)
 
 - **`plugins/`**: Plugin implementations (each is a `cdylib` crate)
@@ -295,10 +296,13 @@ Pass N: Keyword extraction, color classification (require Kind::Photo) → add c
 1. Create a new crate in `plugins/` with `crate-type = ["cdylib"]`
 2. Depend on `byteburrow-plugin-api`
 3. Implement `ClassifierPlugin` trait
-4. Export constructor: `#[no_mangle] pub extern "C" fn byteburrow_create_plugin() -> *mut dyn ClassifierPlugin`
+4. Export the FFI surface with the macro: `byteburrow_plugin_api::declare_plugin!(MyPlugin::new());` — it generates the matching `byteburrow_create_plugin` constructor and `byteburrow_destroy_plugin` destructor. Don't hand-write these.
 5. Build with `make build-plugins`
 
-**ABI requirement:** Host and plugins must be compiled with the same Rust compiler version and same `byteburrow-plugin-api` crate version.
+**FFI contract (see [ADR 0006](adr/0006-plugin-ffi-contract.md)):** The boundary passes a `dyn ClassifierPlugin` fat pointer — **not** a C-stable ABI. Host and plugins must be compiled with the same Rust compiler version and same `byteburrow-plugin-api` crate version. The host hardens against this coupling:
+- **Version gate** (`check_api_version`): major must match; the plugin's minor must be `<=` the host's (current API `0.3`).
+- **Panic isolation:** every constructor/`init`/`classify` call runs under `catch_unwind`; a plugin that panics in `classify` is disabled for the rest of the process instead of aborting the server (a panic across `extern "C"` is UB).
+- **Destructor:** the plugin frees its own allocation via `byteburrow_destroy_plugin` (pre-0.3 plugins without the symbol fall back to a host-side drop with a warning).
 
 ### Background Jobs
 Enqueue jobs via the job sender available in AppState:

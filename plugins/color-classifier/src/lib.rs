@@ -157,11 +157,7 @@ fn nearest_vga(r: u8, g: u8, b: u8) -> &'static str {
 
 // ── FFI constructor ─────────────────────────────────────────────
 
-#[no_mangle]
-#[allow(improper_ctypes_definitions)]
-pub extern "C" fn byteburrow_create_plugin() -> *mut dyn ClassifierPlugin {
-    Box::into_raw(Box::new(ColorClassifier))
-}
+declare_plugin!(ColorClassifier);
 
 #[cfg(test)]
 mod tests {
