@@ -8,7 +8,7 @@ Deep reference for ByteBurrow's module layout, request flow, and key patterns. S
   - Route modules: `user.rs`, `group.rs`, `storage.rs`, `tag.rs`, `photo.rs`
   - Protocol implementations: `webdav/`, `caldav/`, `carddav/`, `upnp/`
   - WebSocket support in `ws/`
-  - OpenAPI documentation via `utoipa` + `utoipa-swagger-ui` (available at `/swagger-ui`)
+  - OpenAPI documentation via `utoipa` + `utoipa-swagger-ui` (available at `/api/docs/`)
 
 - **`src/auth/mod.rs`**: Authentication system
   - `Auth` extractor for Axum handlers (supports Bearer tokens, Basic auth, and query params)
@@ -71,6 +71,10 @@ Deep reference for ByteBurrow's module layout, request flow, and key patterns. S
   - `lucide-vue-next`: icon system
 - **Components**: located in `frontend/src/components/`
   - Reusable UI components like FileExplorer, FileViewer, UserSelect
+- **Generated API client** (`frontend/src/api/`): request/response types come from
+  the server's OpenAPI spec, not hand-written duplicates — see below. `frontend/src/types`
+  and `frontend/src/services` re-export / consume these generated types so the
+  frontend can never silently drift from the backend contract.
 
 ## Application Flow
 
@@ -105,8 +109,26 @@ All API endpoints are annotated with `#[utoipa::path(...)]` and grouped by tags.
 3. Register any new request/response schemas in `components(schemas(...))`
 4. If introducing a new tag, add it to the `tags(...)` list
 5. Make the handler `pub(crate)` so the macro can reference it
+6. Run `make openapi-generate` to refresh `frontend/openapi.json` and the generated
+   TypeScript types, then commit both — `make lint` runs `openapi-check`, which fails
+   the build if the committed spec has drifted from the Rust code
 
-**Swagger UI** is available at `/swagger-ui`, OpenAPI JSON at `/api-doc/openapi.json`.
+**Swagger UI** is available at `/api/docs/`, OpenAPI JSON at `/api/docs/openapi.json`.
+
+### Generated TypeScript client
+
+The frontend does not hand-write API types. The spec is the single source of truth:
+
+- `pub fn openapi_json()` in `src/web/mod.rs` serializes `ApiDoc::openapi()`; the
+  `byteburrow_cli openapi` subcommand prints it (no DB / server needed).
+- `make openapi-spec` dumps it to `frontend/openapi.json` (committed).
+- `frontend/src/api/schema.d.ts` is generated from that file by `openapi-typescript`
+  (`npm run generate`, also run automatically by `npm run build`).
+- `frontend/src/api/index.ts` maps the raw schema to friendly aliases (`User`,
+  `Storage`, `Shared`, request bodies, …) that the rest of the app imports.
+
+`make openapi-generate` runs the whole chain (spec → types); `make openapi-check`
+(wired into `make lint`) fails if `frontend/openapi.json` is stale.
 
 ## Key Patterns
 

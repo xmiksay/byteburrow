@@ -5,7 +5,10 @@ export BYTEBURROW__PLUGIN_DIR ?= target/plugins
 .PHONY: help build run dev build-plugins frontend-install frontend-dev frontend-build frontend-dist-stub \
         check fmt fmt-check clippy lint frontend-typecheck frontend-lint \
         test test-unit test-integration frontend-test verify coverage install-hooks \
+        openapi-spec openapi-generate openapi-check \
         migrate-up migrate-down clean
+
+OPENAPI_SPEC ?= frontend/openapi.json
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -50,6 +53,25 @@ frontend-dist-stub: ## Ensure frontend/dist exists (rust_embed needs the folder 
 	@mkdir -p frontend/dist
 	@[ -e frontend/dist/index.html ] || echo '<!doctype html><title>ByteBurrow</title>' > frontend/dist/index.html
 
+## --- OpenAPI / typed client ---
+
+openapi-spec: frontend-dist-stub ## Dump the OpenAPI spec from the Rust code to frontend/openapi.json
+	cargo run --quiet --bin byteburrow_cli -- openapi > $(OPENAPI_SPEC)
+	@echo "Wrote $(OPENAPI_SPEC)"
+
+openapi-generate: openapi-spec frontend-install ## Refresh the spec and regenerate the TS client types
+	cd frontend && . "$$NVM_DIR/nvm.sh" && nvm use && npm run generate
+	@echo "Regenerated frontend/src/api/schema.d.ts"
+
+openapi-check: frontend-dist-stub ## Fail if the committed spec has drifted from the Rust code
+	@cargo run --quiet --bin byteburrow_cli -- openapi > target/openapi-current.json
+	@if ! diff -q $(OPENAPI_SPEC) target/openapi-current.json >/dev/null; then \
+		echo "ERROR: $(OPENAPI_SPEC) is stale — run 'make openapi-generate' and commit the result."; \
+		diff $(OPENAPI_SPEC) target/openapi-current.json | head -40; \
+		exit 1; \
+	fi
+	@echo "OpenAPI spec is in sync with the Rust code."
+
 ## --- Quality gates ---
 
 check: frontend-dist-stub ## Fast workspace typecheck (no codegen)
@@ -70,7 +92,7 @@ frontend-typecheck: frontend-install ## Type-check the frontend (vue-tsc --noEmi
 frontend-lint: frontend-install ## Lint the frontend (ESLint, flat config)
 	cd frontend && . "$$NVM_DIR/nvm.sh" && nvm use && npm run lint
 
-lint: fmt-check clippy frontend-typecheck frontend-lint ## fmt-check + clippy + frontend typecheck + frontend lint
+lint: fmt-check clippy openapi-check frontend-typecheck frontend-lint ## fmt-check + clippy + openapi drift check + frontend typecheck + frontend lint
 
 ## --- Tests ---
 

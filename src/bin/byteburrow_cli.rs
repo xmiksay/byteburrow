@@ -29,6 +29,8 @@ enum Commands {
     },
     /// Load development fixtures (admin user + admin group, no conflict checks)
     Fixtures,
+    /// Print the OpenAPI spec (JSON) to stdout — source for the TS client
+    Openapi,
     /// List all face references in the database
     FaceList,
     /// Test face matching: find unconfirmed faces whose best confirmed match is
@@ -95,6 +97,14 @@ struct AddUserArgs {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+
+    // Dumping the spec must not depend on config/DB — it runs in the frontend
+    // build pipeline where neither DATABASE_URL nor a database is available.
+    if let Commands::Openapi = &cli.command {
+        println!("{}", byteburrow::web::openapi_json());
+        return;
+    }
+
     let config = Config::from_env();
     Config::set(std::sync::Arc::new(config.clone()));
 
@@ -118,6 +128,8 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        // Handled before config loading above; unreachable here.
+        Commands::Openapi => unreachable!(),
         Commands::FaceList => {
             if let Err(e) = face_list(&config).await {
                 eprintln!("Error: {}", e);

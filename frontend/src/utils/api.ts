@@ -1,15 +1,9 @@
-export interface ApiError {
-  error: string
-}
+import type { components, Page } from '../api'
 
-/** A single page of a paginated list endpoint (`Page<T>` on the server). */
-export interface Page<T> {
-  items: T[]
-  page: number
-  per_page: number
-  total: number
-  total_pages: number
-}
+/** Error envelope returned by the API (`ErrorResponse` in the OpenAPI spec). */
+export type ApiError = components['schemas']['ErrorResponse']
+
+export type { Page }
 
 export async function apiCall<T>(
   endpoint: string,

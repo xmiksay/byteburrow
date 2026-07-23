@@ -112,7 +112,7 @@ const getBasename = (path: string) => {
   return path.split('/').filter(s => s).pop() || path
 }
 
-const formatDate = (dateStr?: string) => {
+const formatDate = (dateStr?: string | null) => {
   if (!dateStr) return 'Never'
   return new Date(dateStr).toLocaleDateString(undefined, {
     month: 'short',

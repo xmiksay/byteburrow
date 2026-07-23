@@ -8,7 +8,8 @@ export default defineConfigWithVueTs(
   },
   {
     name: 'app/files-to-ignore',
-    ignores: ['dist/**', 'node_modules/**', 'coverage/**'],
+    // src/api/schema.d.ts is generated from the OpenAPI spec — never lint it.
+    ignores: ['dist/**', 'node_modules/**', 'coverage/**', 'src/api/schema.d.ts'],
   },
   pluginVue.configs['flat/essential'],
   vueTsConfigs.recommended,
