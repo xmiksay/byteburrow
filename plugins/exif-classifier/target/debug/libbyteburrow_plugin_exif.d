@@ -1,1 +1,0 @@
-/mnt/nvme/miksa/projects/cloud/plugins/exif-classifier/target/debug/libbyteburrow_plugin_exif.so: /mnt/nvme/miksa/projects/cloud/byteburrow-plugin-api/src/lib.rs /mnt/nvme/miksa/projects/cloud/plugins/exif-classifier/src/lib.rs

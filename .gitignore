@@ -1,5 +1,8 @@
 /target
+plugins/*/target
 plugins/face-embedder/service/target
+# Plugins are cdylibs — their Cargo.lock is not tracked (unlike the face-embedder binary service)
+plugins/*/Cargo.lock
 /data
 *.log
 .env
