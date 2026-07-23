@@ -3,6 +3,7 @@ use std::path::Path;
 
 use anyhow::Context;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
+use tokio::io::AsyncReadExt;
 use tracing::info;
 
 use crate::entity::{entry, meta, photo};
@@ -20,15 +21,27 @@ pub(super) async fn run_classification(
     hash_bytes: &[u8],
     full_path: &Path,
 ) -> anyhow::Result<()> {
-    // Read file data and determine MIME type. Propagate read errors instead
-    // of defaulting to empty data, which would silently classify unreadable
-    // files (permissions, race, I/O error) as empty. Async read keeps the job
-    // worker off a blocking sync call.
-    let data = tokio::fs::read(full_path)
-        .await
-        .with_context(|| format!("reading file for classification: {}", full_path.display()))?;
-    let mime_type = determine_content_type(full_path, &data);
+    // Determine MIME from a bounded header read instead of slurping the whole
+    // file. The header read also surfaces unreadable/missing files early
+    // (issue #6) — propagating instead of silently classifying them as empty —
+    // before we decide whether the full contents are actually needed.
+    let header = read_mime_header(full_path).await?;
+    let mime_type = determine_content_type(full_path, &header);
     info!(path = &entry.path, mime = mime_type, "Classifying file");
+
+    // Honor `ClassifierPlugin::needs_file_data()`: only load the whole file
+    // when a plugin that will run actually needs the bytes. Plugins that do
+    // their own path-based I/O (and the EXIF fallback, which reads via its own
+    // extractor) never touch this buffer, so reading it would be wasted I/O —
+    // significant for large media. Async read keeps the job worker off a
+    // blocking sync call.
+    let data = if plugins.needs_file_data(mime_type) {
+        tokio::fs::read(full_path)
+            .await
+            .with_context(|| format!("reading file for classification: {}", full_path.display()))?
+    } else {
+        Vec::new()
+    };
 
     // Run classification (plugin path, or the inline-EXIF fallback).
     let result = classify_or_exif(plugins, entry, full_path, &data, mime_type).await?;
@@ -48,6 +61,24 @@ pub(super) async fn run_classification(
     }
 
     Ok(())
+}
+
+/// Magic-byte signatures need at most the first 12 bytes; read a little more
+/// for headroom. Bounded so we never load large media just to sniff its type.
+const MIME_HEADER_LEN: u64 = 64;
+
+/// Read the leading bytes of a file for MIME sniffing, propagating open/read
+/// errors so an unreadable file surfaces instead of being classified as empty.
+async fn read_mime_header(path: &Path) -> anyhow::Result<Vec<u8>> {
+    let file = tokio::fs::File::open(path)
+        .await
+        .with_context(|| format!("opening file for classification: {}", path.display()))?;
+    let mut buf = Vec::with_capacity(MIME_HEADER_LEN as usize);
+    file.take(MIME_HEADER_LEN)
+        .read_to_end(&mut buf)
+        .await
+        .with_context(|| format!("reading file header for classification: {}", path.display()))?;
+    Ok(buf)
 }
 
 /// Run the plugin classification pipeline when plugins are loaded;
