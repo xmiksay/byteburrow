@@ -6,8 +6,20 @@ Deep reference for ByteBurrow's module layout, request flow, and key patterns. S
 
 - **`src/web/`**: Axum HTTP layer
   - Route modules: `user.rs`, `group.rs`, `storage.rs`, `tag.rs`, `photo.rs`
-  - Protocol implementations: `webdav/`, `caldav/`, `carddav/`, `upnp/`
   - WebSocket support in `ws/`
+  - **DAV gateway** (`dav/`): WebDAV (RFC 4918), CalDAV (RFC 4791), and
+    CardDAV (RFC 6352) served under `/dav/storage/<storage_id>/<path>`. All
+    three protocols operate on existing storages — calendars are directories
+    of `.ics` files, address books are directories of `.vcf` files — and go
+    through the same `Auth` extractor (Basic auth works for native clients)
+    and `require_storage_path_access` / `require_storage_path_write_access`
+    authorization as the REST API. `webdav.rs` implements the core HTTP
+    method surface (OPTIONS, PROPFIND, GET/HEAD/PUT, MKCOL, DELETE, COPY,
+    MOVE, LOCK/UNLOCK, PROPPATCH); `caldav.rs` adds `MKCALENDAR` +
+    `calendar-query`/`calendar-multiget` REPORT; `carddav.rs` adds
+    `addressbook-query`/`addressbook-multiget` REPORT; `util.rs` holds the
+    XML (de)serialization, `207 Multi-Status` rendering, and the in-memory
+    lock manager.
   - OpenAPI documentation via `utoipa` + `utoipa-swagger-ui` (available at `/api/docs/`)
 
 - **`src/auth/mod.rs`**: Authentication system
