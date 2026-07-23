@@ -215,10 +215,6 @@ fn get_orientation(custom: &std::collections::HashMap<String, serde_json::Value>
         .unwrap_or(1)
 }
 
-#[no_mangle]
-#[allow(improper_ctypes_definitions)]
-pub extern "C" fn byteburrow_create_plugin() -> *mut dyn ClassifierPlugin {
-    Box::into_raw(Box::new(FaceEmbedder {
-        model: Mutex::new(None),
-    }))
-}
+declare_plugin!(FaceEmbedder {
+    model: Mutex::new(None),
+});

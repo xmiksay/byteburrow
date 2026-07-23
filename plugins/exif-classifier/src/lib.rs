@@ -219,12 +219,7 @@ fn datetime_to_unix(dt: &exif::DateTime) -> Option<i64> {
     }
 }
 
-// FFI constructor
-#[no_mangle]
-#[allow(improper_ctypes_definitions)]
-pub extern "C" fn byteburrow_create_plugin() -> *mut dyn ClassifierPlugin {
-    Box::into_raw(Box::new(ExifClassifier))
-}
+declare_plugin!(ExifClassifier);
 
 #[cfg(test)]
 mod tests {

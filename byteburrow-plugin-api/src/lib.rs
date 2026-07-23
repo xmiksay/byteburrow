@@ -2,9 +2,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
-/// API version constants. Host and plugin must share the same MAJOR version.
+/// API version constants.
+///
+/// Host and plugin must share the same MAJOR version; the plugin's MINOR must be
+/// `<=` the host's (the host only guarantees it provides features up to its own
+/// minor). See `check_api_version` in the host's `src/plugin/mod.rs`.
 pub const API_VERSION_MAJOR: u32 = 0;
-pub const API_VERSION_MINOR: u32 = 2;
+pub const API_VERSION_MINOR: u32 = 3;
 
 // ── File context passed to plugins ───────────────────────────────
 
@@ -54,10 +58,20 @@ pub type PluginConfig = HashMap<String, String>;
 ///
 /// # ABI Safety
 ///
-/// The trait uses safe Rust types. The FFI boundary is a single `extern "C"`
-/// constructor that returns `Box<dyn ClassifierPlugin>`. Both host and plugin
-/// must be compiled with the same Rust compiler version and the same
-/// `byteburrow-plugin-api` crate version.
+/// The trait uses safe Rust types. The FFI boundary is an `extern "C"`
+/// constructor/destructor pair (see [`declare_plugin!`]) that passes a
+/// `Box<dyn ClassifierPlugin>` fat pointer. This is **not** a C-stable ABI:
+/// both host and plugin must be compiled with the same Rust compiler version
+/// and the same `byteburrow-plugin-api` crate version. See ADR 0006 for why
+/// this coupling is accepted and how the host hardens against it (version
+/// gating, `catch_unwind`, plugin-side destructor).
+///
+/// # Panics
+///
+/// The host wraps every `init`/`classify` call in `catch_unwind` and treats a
+/// panicking plugin as failed — a plugin that panics in `classify` is disabled
+/// for the rest of the process. Do not rely on unwinding across the boundary
+/// for control flow; return `Err(String)` instead.
 pub trait ClassifierPlugin: Send + Sync {
     /// Human-readable name (e.g. "EXIF Photo Classifier").
     fn name(&self) -> &str;
@@ -98,10 +112,18 @@ pub trait ClassifierPlugin: Send + Sync {
     fn classify(&self, ctx: &FileContext) -> Result<Option<ClassificationResult>, String>;
 }
 
-// ── FFI constructor ──────────────────────────────────────────────
+// ── FFI constructor / destructor ─────────────────────────────────
 
-/// The symbol name every plugin .so must export.
+/// The constructor symbol every plugin .so must export.
 pub const PLUGIN_CONSTRUCTOR_SYMBOL: &[u8] = b"byteburrow_create_plugin";
+
+/// The destructor symbol every plugin .so should export (added in API 0.3).
+///
+/// The plugin frees the box with *its own* allocator, which keeps host and
+/// plugin from mixing allocators. Plugins built before 0.3 lack this symbol;
+/// the host falls back to freeing the box itself (safe only under the
+/// same-rustc/same-allocator assumption this contract already requires).
+pub const PLUGIN_DESTRUCTOR_SYMBOL: &[u8] = b"byteburrow_destroy_plugin";
 
 /// Signature of the constructor function.
 ///
@@ -110,3 +132,49 @@ pub const PLUGIN_CONSTRUCTOR_SYMBOL: &[u8] = b"byteburrow_create_plugin";
 /// is used only for a stable calling convention, not for cross-language interop.
 #[allow(improper_ctypes_definitions)]
 pub type PluginConstructor = unsafe extern "C" fn() -> *mut dyn ClassifierPlugin;
+
+/// Signature of the destructor function: consumes the pointer returned by the
+/// constructor and drops it with the plugin's allocator.
+#[allow(improper_ctypes_definitions)]
+pub type PluginDestructor = unsafe extern "C" fn(*mut dyn ClassifierPlugin);
+
+/// Export the FFI constructor/destructor pair for a plugin.
+///
+/// Centralizes the `unsafe` ABI boundary so every plugin exports a matching,
+/// correctly-attributed pair instead of copy-pasting it (a wrong signature or a
+/// missing `#[no_mangle]` is a load failure or worse). Pass an expression that
+/// builds the plugin value:
+///
+/// ```ignore
+/// byteburrow_plugin_api::declare_plugin!(MyPlugin::new());
+/// ```
+#[macro_export]
+macro_rules! declare_plugin {
+    ($constructor:expr) => {
+        /// Host-called constructor. Returns an owning fat pointer; free it via
+        /// `byteburrow_destroy_plugin`.
+        #[no_mangle]
+        #[allow(improper_ctypes_definitions)]
+        pub extern "C" fn byteburrow_create_plugin() -> *mut dyn $crate::ClassifierPlugin {
+            let plugin: ::std::boxed::Box<dyn $crate::ClassifierPlugin> =
+                ::std::boxed::Box::new($constructor);
+            ::std::boxed::Box::into_raw(plugin)
+        }
+
+        /// Host-called destructor. Drops a pointer produced by
+        /// `byteburrow_create_plugin` using the plugin's own allocator.
+        ///
+        /// # Safety
+        /// `plugin` must be a pointer returned by `byteburrow_create_plugin` from
+        /// this same library, dropped at most once.
+        #[no_mangle]
+        #[allow(improper_ctypes_definitions)]
+        pub unsafe extern "C" fn byteburrow_destroy_plugin(
+            plugin: *mut dyn $crate::ClassifierPlugin,
+        ) {
+            if !plugin.is_null() {
+                drop(::std::boxed::Box::from_raw(plugin));
+            }
+        }
+    };
+}

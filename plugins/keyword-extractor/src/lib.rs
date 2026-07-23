@@ -1,7 +1,7 @@
 use base64::Engine;
 use byteburrow_plugin_api::{
-    ClassificationResult, ClassifierPlugin, FileContext, PluginConfig, API_VERSION_MAJOR,
-    API_VERSION_MINOR,
+    declare_plugin, ClassificationResult, ClassifierPlugin, FileContext, PluginConfig,
+    API_VERSION_MAJOR, API_VERSION_MINOR,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -206,8 +206,4 @@ impl ClassifierPlugin for KeywordExtractor {
     }
 }
 
-#[no_mangle]
-#[allow(improper_ctypes_definitions)]
-pub extern "C" fn byteburrow_create_plugin() -> *mut dyn ClassifierPlugin {
-    Box::into_raw(Box::new(KeywordExtractor::new()))
-}
+declare_plugin!(KeywordExtractor::new());
