@@ -1197,10 +1197,23 @@ export interface components {
         RenameEntryRequest: {
             new_path: string;
         };
-        /** @description Share entry request */
+        /**
+         * @description Share entry request
+         *
+         *     The same body is used for create (`POST`) and update (`PUT`); both apply
+         *     the fields with replace semantics — the request fully describes the share.
+         */
         ShareEntryRequest: {
             can_write: boolean;
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description Days until the share expires, counted from now.
+             *
+             *     One expiry contract shared by create and update (issue #9 / B8): a
+             *     positive value sets `expires_at = now + days`; `0`, `null`, or an
+             *     absent field means the share never expires. Create and update treat
+             *     this value identically.
+             */
             expires_in_days?: number | null;
             group_ids: number[];
             public_link: boolean;

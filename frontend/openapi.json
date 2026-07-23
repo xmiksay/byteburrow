@@ -3757,7 +3757,7 @@
       },
       "ShareEntryRequest": {
         "type": "object",
-        "description": "Share entry request",
+        "description": "Share entry request\n\nThe same body is used for create (`POST`) and update (`PUT`); both apply\nthe fields with replace semantics — the request fully describes the share.",
         "required": [
           "can_write",
           "public_link",
@@ -3774,6 +3774,7 @@
               "null"
             ],
             "format": "int64",
+            "description": "Days until the share expires, counted from now.\n\nOne expiry contract shared by create and update (issue #9 / B8): a\npositive value sets `expires_at = now + days`; `0`, `null`, or an\nabsent field means the share never expires. Create and update treat\nthis value identically.",
             "minimum": 0
           },
           "group_ids": {

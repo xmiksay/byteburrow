@@ -1226,13 +1226,37 @@ fn generate_directory_index(
 // ---------------------------------------------------------------------------
 
 /// Share entry request
+///
+/// The same body is used for create (`POST`) and update (`PUT`); both apply
+/// the fields with replace semantics — the request fully describes the share.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ShareEntryRequest {
     pub can_write: bool,
+    /// Days until the share expires, counted from now.
+    ///
+    /// One expiry contract shared by create and update (issue #9 / B8): a
+    /// positive value sets `expires_at = now + days`; `0`, `null`, or an
+    /// absent field means the share never expires. Create and update treat
+    /// this value identically.
+    #[schema(minimum = 0)]
     pub expires_in_days: Option<u64>,
     pub public_link: bool,
     pub user_ids: Vec<i32>,
     pub group_ids: Vec<i32>,
+}
+
+/// Resolve a share's absolute expiry timestamp from the request's
+/// `expires_in_days`.
+///
+/// Shared by create and update so their semantics cannot drift (issue #9 /
+/// B8). A positive day count yields `now + days`; `0`, `null`, and an absent
+/// field all mean "never expires" (`None`). Previously create treated `0` as
+/// "expire immediately" (`now + 0`) and an absent field as "never", while
+/// update treated both `0` and absent as "never".
+fn resolve_share_expiry(expires_in_days: Option<u64>) -> Option<chrono::NaiveDateTime> {
+    expires_in_days
+        .filter(|&days| days > 0)
+        .map(|days| chrono::Utc::now().naive_utc() + chrono::Duration::days(days as i64))
 }
 
 /// Share response
@@ -1461,9 +1485,7 @@ pub(crate) async fn share_entry_handler(
 
     let entry_id = entry_model.id;
 
-    let expires_at = payload
-        .expires_in_days
-        .map(|days| chrono::Utc::now().naive_utc() + chrono::Duration::days(days as i64));
+    let expires_at = resolve_share_expiry(payload.expires_in_days);
 
     let (plaintext_token, token_hash) = if payload.public_link {
         let (plaintext, hash) = generate_share_token();
@@ -1567,13 +1589,7 @@ pub(crate) async fn update_share_handler(
 
     require_entry_owner(&auth, &owning_entry, &state.db).await?;
 
-    let expires_at = payload.expires_in_days.and_then(|days| {
-        if days > 0 {
-            Some(chrono::Utc::now().naive_utc() + chrono::Duration::days(days as i64))
-        } else {
-            None
-        }
-    });
+    let expires_at = resolve_share_expiry(payload.expires_in_days);
 
     let (plaintext_token, token_hash) = if payload.public_link {
         if share.token.is_none() {
@@ -2230,4 +2246,31 @@ pub(crate) async fn trigger_hash_handler(
         .map_err(|_| internal("Failed to queue job"))?;
 
     Ok(message("Hash calculation queued"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_share_expiry;
+
+    // Issue #9 / B8: create and update share one expiry contract.
+    #[test]
+    fn positive_days_sets_future_expiry() {
+        let before = chrono::Utc::now().naive_utc();
+        let expiry = resolve_share_expiry(Some(7)).expect("positive days must yield an expiry");
+        let expected = before + chrono::Duration::days(7);
+        // Allow a small clock delta between `before` and the value computed
+        // inside the helper.
+        assert!((expiry - expected).num_seconds().abs() <= 1);
+        assert!(expiry > before);
+    }
+
+    #[test]
+    fn zero_days_never_expires() {
+        assert_eq!(resolve_share_expiry(Some(0)), None);
+    }
+
+    #[test]
+    fn absent_never_expires() {
+        assert_eq!(resolve_share_expiry(None), None);
+    }
 }
