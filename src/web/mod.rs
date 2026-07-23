@@ -429,6 +429,10 @@ pub async fn user_group_ids(db: &DatabaseConnection, user_id: i32) -> Result<Vec
 ///
 /// Use this on every storage file/entry handler to prevent IDOR. Returns `Ok`
 /// on success; returns [`ApiError::Forbidden`] on denial.
+///
+/// The overall share-access model (share ⇒ shared entry's subtree, with this
+/// function's storage-metadata visibility as the deliberate exception) is
+/// recorded in ADR 0005 (`docs/adr/0005-share-access-scope.md`).
 pub async fn require_storage_access(
     auth: &Auth,
     storage: &crate::entity::storage::Model,

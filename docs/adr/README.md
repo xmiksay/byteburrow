@@ -21,3 +21,4 @@ Write an ADR when a change is hard to reverse, affects multiple modules, or trad
 | [0002](0002-code-quality-remediation.md) | Code quality remediation: DRY/KISS/tests/CI | Proposed |
 | [0003](0003-argon2id-password-hashing.md) | Migrate password hashing to Argon2id | Accepted |
 | [0004](0004-api-response-conventions.md) | API response conventions: envelopes, pagination, RPC naming | Accepted |
+| [0005](0005-share-access-scope.md) | Share access scope: entry-subtree, not storage-level | Accepted |
