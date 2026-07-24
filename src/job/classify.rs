@@ -231,55 +231,8 @@ async fn persist_photo(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::migration::Migrator;
-    use sea_orm_migration::MigratorTrait;
-    use std::sync::OnceLock;
-    use tokio::sync::OnceCell;
-
-    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    static DB: OnceCell<DatabaseConnection> = OnceCell::const_new();
-
-    fn runtime() -> &'static tokio::runtime::Runtime {
-        RUNTIME.get_or_init(|| tokio::runtime::Runtime::new().expect("build shared test runtime"))
-    }
-
-    /// Shares the process-lifetime runtime/DB setup pattern used by
-    /// `tests/*_integration.rs` (a per-test `#[tokio::test]` runtime would be
-    /// dropped mid-test and hang the connection pool's background tasks).
-    ///
-    /// Connects with a locally-built `Config` rather than the process-wide
-    /// `Config` singleton: `cargo test --lib` runs every unit test in one
-    /// process, and other modules (e.g. `auth::tests`) already initialize
-    /// that singleton with an unusable `database_url`.
-    async fn test_db() -> &'static DatabaseConnection {
-        DB.get_or_init(|| async {
-            let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-                "postgres://user:password@localhost:15432/byteburrow_test".to_string()
-            });
-            let config = crate::config::Config {
-                database_url,
-                salt: "classify-test-salt".to_string(),
-                server_addr: "0.0.0.0:3000".to_string(),
-                thumbnail_storage: "/tmp/thumbnails".to_string(),
-                base_url: "http://localhost:3000".to_string(),
-                token_expiration_days: 30,
-                token_length: 32,
-                plugin_dir: "/tmp".to_string(),
-                ignore_patterns: vec![],
-                cors_allowed_origins: String::new(),
-                trust_forwarded_headers: false,
-                face_match_threshold: 0.8,
-                face_match_margin: 0.05,
-            };
-
-            let db = crate::db_connect(&config)
-                .await
-                .expect("connect to test database");
-            Migrator::up(&db, None).await.expect("run migrations");
-            db
-        })
-        .await
-    }
+    use crate::test_support::{runtime, test_db};
+    use std::collections::HashMap;
 
     /// Regression test for issue #11: `run_classification` used to run
     /// `face::process_face_embeddings` against `&mut merged.clone()`, so the
@@ -379,6 +332,237 @@ mod tests {
                 result.is_err(),
                 "unreadable file must produce an error, not empty classification"
             );
+        });
+    }
+
+    // ── face::process_face_embeddings (Tier 4) ─────────────────────
+    //
+    // Exercises: multi-face matching, cross-model exemplar skip, and
+    // empty-embedding skip — the three branches `process_face_embeddings`
+    // takes through `face_match::match_embedding`.
+
+    use crate::entity::{contact, face_reference};
+    use crate::face_match::{floats_to_bytes, MatchParams};
+    use chrono::{FixedOffset, Utc};
+
+    /// Insert a contact with a fixed id so face_reference rows can point at it.
+    async fn make_contact(db: &DatabaseConnection, id: i32, name: &str) {
+        contact::ActiveModel {
+            id: Set(id),
+            name: Set(name.to_string()),
+            created_at: Set(Utc::now().with_timezone(&FixedOffset::east_opt(0).unwrap())),
+        }
+        .insert(db)
+        .await
+        .expect("insert contact");
+    }
+
+    /// Insert a confirmed face_reference row for a contact.
+    async fn make_confirmed_ref(
+        db: &DatabaseConnection,
+        hash: &[u8],
+        face_index: i16,
+        contact_id: i32,
+        embedding: &[f32],
+        model_id: &str,
+        model_version: &str,
+    ) {
+        face_reference::ActiveModel {
+            hash: Set(hash.to_vec()),
+            face_index: Set(face_index),
+            contact_id: Set(Some(contact_id)),
+            bbox_x: Set(0),
+            bbox_y: Set(0),
+            bbox_w: Set(10),
+            bbox_h: Set(10),
+            embedding: Set(floats_to_bytes(embedding)),
+            model_id: Set(model_id.to_string()),
+            model_version: Set(model_version.to_string()),
+            dim: Set(embedding.len() as i32),
+            confirmed: Set(true),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert confirmed face_reference");
+    }
+
+    #[test]
+    fn process_face_embeddings_matches_a_known_face() {
+        runtime().block_on(async {
+            let db = test_db().await;
+            // Unique contact id, hash, AND model id per run so accumulated rows
+            // from other tests/runs can't interfere (process_face_embeddings
+            // loads ALL confirmed refs; we must isolate by model identity).
+            let n = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as i32;
+            let contact_id = 700000 + (n % 100000);
+            let hash = format!("face-match-test-{n}").into_bytes();
+            let model_id = format!("match-model-{n}");
+
+            make_contact(db, contact_id, "Face Match Test").await;
+
+            // A confirmed exemplar that the query will match closely. Use a
+            // high-dimensional vector so no other test's low-dim exemplars can
+            // be compared (cross-model skip) and no margin ambiguity arises.
+            let mut exemplar = vec![0.0f32; 64];
+            exemplar[0] = 1.0;
+            make_confirmed_ref(db, &hash, 0, contact_id, &exemplar, &model_id, "1").await;
+
+            let mut query = exemplar.clone();
+            query[0] = 0.99;
+            query[1] = 0.01;
+            let raw_query: Vec<serde_json::Value> =
+                query.iter().map(|f| serde_json::json!(f)).collect();
+
+            let mut merged = MergedClassification {
+                custom: serde_json::json!({
+                    "faces": { "rects": [{ "x": 0, "y": 0, "width": 10, "height": 10 }] },
+                    "face_embeddings_raw": [
+                        { "face_index": 0, "embedding": raw_query,
+                          "model_id": model_id, "model_version": "1" }
+                    ],
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+                ..Default::default()
+            };
+
+            face::process_face_embeddings(
+                db,
+                &hash,
+                &mut merged,
+                MatchParams {
+                    threshold: 0.8,
+                    margin: 0.05,
+                },
+            )
+            .await
+            .expect("process face embeddings");
+
+            let matches = merged
+                .custom
+                .get("face_embeddings")
+                .and_then(|v| v.as_array())
+                .expect("face_embeddings present");
+            assert_eq!(matches.len(), 1);
+            assert_eq!(
+                matches[0].as_i64(),
+                Some(contact_id as i64),
+                "matched the known contact"
+            );
+        });
+    }
+
+    #[test]
+    fn process_face_embeddings_skips_cross_model_exemplars() {
+        // A confirmed exemplar from a different model must be skipped (not
+        // scored as a 0-similarity non-match), leaving no positive match.
+        runtime().block_on(async {
+            let db = test_db().await;
+            let n = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as i32;
+            let contact_id = 710000 + (n % 100000);
+            let hash = format!("face-crossmodel-test-{n}").into_bytes();
+            // Exemplar model differs from the query model; both are unique so
+            // no other test's rows share the query's model identity.
+            let exemplar_model = format!("xmodel-exemplar-{n}");
+            let query_model = format!("xmodel-query-{n}");
+
+            make_contact(db, contact_id, "Cross Model Test").await;
+            let mut exemplar = vec![0.0f32; 64];
+            exemplar[0] = 1.0;
+            make_confirmed_ref(db, &hash, 0, contact_id, &exemplar, &exemplar_model, "1").await;
+
+            let raw_query: Vec<serde_json::Value> =
+                exemplar.iter().map(|f| serde_json::json!(f)).collect();
+            let mut merged = MergedClassification {
+                custom: serde_json::json!({
+                    "faces": { "rects": [{ "x": 0, "y": 0, "width": 10, "height": 10 }] },
+                    "face_embeddings_raw": [
+                        { "face_index": 0, "embedding": raw_query,
+                          "model_id": query_model, "model_version": "1" }
+                    ],
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+                ..Default::default()
+            };
+
+            face::process_face_embeddings(
+                db,
+                &hash,
+                &mut merged,
+                MatchParams {
+                    threshold: 0.8,
+                    margin: 0.0,
+                },
+            )
+            .await
+            .expect("process face embeddings");
+
+            let matches = merged
+                .custom
+                .get("face_embeddings")
+                .and_then(|v| v.as_array())
+                .expect("face_embeddings present");
+            // The sole face matched nothing (cross-model exemplar skipped) → null.
+            assert_eq!(matches.len(), 1);
+            assert!(matches[0].is_null(), "cross-model exemplar must not match");
+        });
+    }
+
+    #[test]
+    fn process_face_embeddings_skips_empty_embedding() {
+        runtime().block_on(async {
+            let db = test_db().await;
+            let n = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as i32;
+            let hash = format!("face-empty-test-{n}").into_bytes();
+            let model_id = format!("empty-model-{n}");
+
+            let mut merged = MergedClassification {
+                custom: serde_json::json!({
+                    "faces": { "rects": [{ "x": 0, "y": 0, "width": 10, "height": 10 }] },
+                    "face_embeddings_raw": [
+                        { "face_index": 0, "embedding": [],
+                          "model_id": model_id, "model_version": "1" }
+                    ],
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+                ..Default::default()
+            };
+
+            // Must not panic and must produce the (null) match array for the face.
+            face::process_face_embeddings(
+                db,
+                &hash,
+                &mut merged,
+                MatchParams {
+                    threshold: 0.8,
+                    margin: 0.0,
+                },
+            )
+            .await
+            .expect("process face embeddings");
+
+            let matches = merged
+                .custom
+                .get("face_embeddings")
+                .and_then(|v| v.as_array())
+                .expect("face_embeddings present");
+            assert_eq!(matches.len(), 1);
+            assert!(matches[0].is_null(), "empty embedding yields no match");
         });
     }
 }

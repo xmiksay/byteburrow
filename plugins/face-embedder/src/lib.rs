@@ -218,3 +218,73 @@ fn get_orientation(custom: &std::collections::HashMap<String, serde_json::Value>
 declare_plugin!(FaceEmbedder {
     model: Mutex::new(None),
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn marker_img() -> DynamicImage {
+        use image::{ImageBuffer, Rgba};
+        let mut buf: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::new(2, 3);
+        buf.put_pixel(0, 0, Rgba([255, 0, 0, 255]));
+        DynamicImage::ImageRgba8(buf)
+    }
+
+    fn marker_pos(img: &DynamicImage) -> (u32, u32) {
+        let rgba = img.to_rgba8();
+        for y in 0..rgba.height() {
+            for x in 0..rgba.width() {
+                if rgba.get_pixel(x, y)[0] == 255 {
+                    return (x, y);
+                }
+            }
+        }
+        panic!("marker pixel not found");
+    }
+
+    #[test]
+    fn get_orientation_defaults_to_one_when_missing() {
+        let custom = HashMap::new();
+        assert_eq!(get_orientation(&custom), 1);
+    }
+
+    #[test]
+    fn get_orientation_reads_exif_orientation() {
+        let mut custom = HashMap::new();
+        custom.insert("exif".to_string(), serde_json::json!({"orientation": 3}));
+        assert_eq!(get_orientation(&custom), 3);
+    }
+
+    #[test]
+    fn orientation_1_is_identity() {
+        let img = marker_img();
+        let oriented = apply_orientation(img, 1);
+        assert_eq!(marker_pos(&oriented), (0, 0));
+        assert_eq!((oriented.width(), oriented.height()), (2, 3));
+    }
+
+    #[test]
+    fn orientation_3_rotates_180() {
+        let img = marker_img();
+        let oriented = apply_orientation(img, 3);
+        assert_eq!(marker_pos(&oriented), (1, 2));
+    }
+
+    #[test]
+    fn orientation_6_rotates_90_cw() {
+        let img = marker_img();
+        let oriented = apply_orientation(img, 6);
+        assert_eq!((oriented.width(), oriented.height()), (3, 2));
+        assert_eq!(marker_pos(&oriented), (2, 0));
+    }
+
+    #[test]
+    fn orientation_8_rotates_270_cw() {
+        let img = marker_img();
+        let oriented = apply_orientation(img, 8);
+        // 270° CW (== 90° CCW): dims swap 2x3 → 3x2; top-left → bottom-left.
+        assert_eq!((oriented.width(), oriented.height()), (3, 2));
+        assert_eq!(marker_pos(&oriented), (0, 1));
+    }
+}
