@@ -27,3 +27,41 @@ pub async fn ensure_thumbnail_dir(thumbnail_path: &Path) -> io::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_hash_is_sharded_into_two_level_dirs() {
+        // {dir}/{first4}/{next2}/{rest}_{size}.png
+        let dir = Path::new("/thumbs");
+        // 16-char hash, first 4 and next 2 are stripped, rest + size in filename.
+        let hash = "0123456789abcdef";
+        let p = get_thumbnail_path(dir, hash, "small");
+        assert_eq!(p, Path::new("/thumbs/0123/45/6789abcdef_small.png"));
+    }
+
+    #[test]
+    fn long_hash_keeps_all_three_components_distinct() {
+        let dir = Path::new("/t");
+        let p = get_thumbnail_path(dir, "aabbccdd", "mini");
+        assert_eq!(p, Path::new("/t/aabb/cc/dd_mini.png"));
+    }
+
+    #[test]
+    fn short_hash_falls_back_to_flat_path() {
+        // Hashes shorter than 6 chars can't shard; fall back to a flat name.
+        let dir = Path::new("/thumbs");
+        let p = get_thumbnail_path(dir, "abc", "large");
+        assert_eq!(p, Path::new("/thumbs/abc_large.png"));
+    }
+
+    #[test]
+    fn exactly_six_char_hash_uses_sharded_path() {
+        // 6 chars: 4 + 2 + empty rest → filename is just "_{size}.png".
+        let dir = Path::new("/thumbs");
+        let p = get_thumbnail_path(dir, "abcdef", "small");
+        assert_eq!(p, Path::new("/thumbs/abcd/ef/_small.png"));
+    }
+}

@@ -207,3 +207,57 @@ impl ClassifierPlugin for KeywordExtractor {
 }
 
 declare_plugin!(KeywordExtractor::new());
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_plain_json_array() {
+        let kw = parse_keywords(r#"["sunset","beach","ocean"]"#).unwrap();
+        assert_eq!(kw, vec!["sunset", "beach", "ocean"]);
+    }
+
+    #[test]
+    fn parse_markdown_fenced_array() {
+        // LLMs often wrap the JSON in a ```json fence.
+        let raw = "Sure! Here are the keywords:\n```json\n[\"cat\",\"dog\"]\n```\n";
+        let kw = parse_keywords(raw).unwrap();
+        assert_eq!(kw, vec!["cat", "dog"]);
+    }
+
+    #[test]
+    fn parse_text_wrapped_array() {
+        // Prose before and after the array.
+        let raw = "The keywords are [\"red\",\"green\",\"blue\"] hope that helps";
+        let kw = parse_keywords(raw).unwrap();
+        assert_eq!(kw, vec!["red", "green", "blue"]);
+    }
+
+    #[test]
+    fn parse_unparseable_returns_err() {
+        assert!(parse_keywords("just some words, no array here").is_err());
+    }
+
+    #[test]
+    fn clean_keywords_trims_lowercases_and_caps_length() {
+        let input = vec![
+            "  SunSet ".to_string(),
+            "BEACH".to_string(),
+            "".to_string(),
+            "x".repeat(60),
+        ];
+        let cleaned = clean_keywords(input);
+        // Empty dropped, over-50-char dropped, rest trimmed+lowercased.
+        assert_eq!(cleaned, vec!["sunset", "beach"]);
+    }
+
+    #[test]
+    fn clean_keywords_keeps_fifty_char_boundary() {
+        // Exactly 50 chars is kept; 51 is dropped.
+        let kept = "k".repeat(50);
+        let dropped = "k".repeat(51);
+        let cleaned = clean_keywords(vec![kept.clone(), dropped]);
+        assert_eq!(cleaned, vec![kept]);
+    }
+}

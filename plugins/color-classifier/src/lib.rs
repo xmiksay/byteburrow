@@ -173,4 +173,73 @@ mod tests {
         let pixels = [(0, 0, 0), (255, 255, 255), (100, 50, 200)];
         assert_eq!(compute_average(&pixels), Some((118, 101, 151)));
     }
+
+    // ── quantize roundtrip ─────────────────────────────────────────
+
+    #[test]
+    fn quantize_index_roundtrip_is_identity_within_bucket() {
+        // Quantizing loses the low nibble; the reconstructed value is the
+        // bucket's representative (0x0->0, 0x8->136, 0xF->255 via *17).
+        // Any input within a 4-bit bucket maps back to the same representative.
+        for &(r, g, b) in &[(0u8, 0, 0), (255, 255, 255), (17, 34, 51), (136, 170, 204)] {
+            let idx = quantize_index(r, g, b);
+            let (rq, gq, bq) = index_to_rgb(idx);
+            // The representative is the bucket-aligned value.
+            assert_eq!(rq, r - (r % 17));
+            assert_eq!(gq, g - (g % 17));
+            assert_eq!(bq, b - (b % 17));
+        }
+    }
+
+    #[test]
+    fn index_to_rgb_extremes() {
+        // Index 0 → black, index 0xFFF (all 0xF nibbles) → white.
+        assert_eq!(index_to_rgb(0), (0, 0, 0));
+        assert_eq!(index_to_rgb(0xFFF), (255, 255, 255));
+        // Pure red bucket: r=0xF, g=0x0, b=0x0 → idx = 15*256 = 3840.
+        assert_eq!(index_to_rgb(3840), (255, 0, 0));
+    }
+
+    #[test]
+    fn nearest_vga_maps_primary_colors_to_themselves() {
+        assert_eq!(nearest_vga(255, 0, 0), "Red");
+        assert_eq!(nearest_vga(0, 255, 0), "Green");
+        assert_eq!(nearest_vga(0, 0, 255), "Blue");
+        assert_eq!(nearest_vga(255, 255, 255), "White");
+        assert_eq!(nearest_vga(0, 0, 0), "Black");
+    }
+
+    #[test]
+    fn nearest_vga_picks_nearest_named_bucket() {
+        // (128,0,0) is closest to "Maroon" (128,0,0).
+        assert_eq!(nearest_vga(128, 0, 0), "Maroon");
+        // A mid-gray (128,128,128) is exactly "Gray".
+        assert_eq!(nearest_vga(128, 128, 128), "Gray");
+    }
+
+    #[test]
+    fn top_n_colors_orders_by_frequency_and_caps_count() {
+        // 3 reds, 2 greens, 1 blue.
+        let pixels = [
+            (255, 0, 0),
+            (255, 0, 0),
+            (255, 0, 0),
+            (0, 255, 0),
+            (0, 255, 0),
+            (0, 0, 255),
+        ];
+        let top = top_n_colors(&pixels, 2);
+        assert_eq!(top.len(), 2);
+        // Most frequent first.
+        assert_eq!(top[0], (255, 0, 0));
+        assert_eq!(top[1], (0, 255, 0));
+    }
+
+    #[test]
+    fn top_n_colors_returns_at_most_available_buckets() {
+        // All pixels collapse into one quantized bucket.
+        let pixels = [(10, 20, 30), (11, 21, 31)];
+        let top = top_n_colors(&pixels, 3);
+        assert_eq!(top.len(), 1);
+    }
 }

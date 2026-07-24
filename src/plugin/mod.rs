@@ -564,4 +564,94 @@ mod tests {
         entries[0].disable();
         assert!(!any_needs_file_data(&entries, "image/jpeg"));
     }
+
+    // ── pipeline edge cases (GH #43) ───────────────────────────────
+    //
+    // D2's tests above cover ordering, dependency resolution, and
+    // needs_file_data. These add the remaining behaviors the multi-pass loop
+    // must guarantee: MIME-prefix skip during execution, unmet-dependency
+    // loop termination, and that an Erring plugin neither disables itself nor
+    // blocks later plugins in the same pass.
+
+    #[test]
+    fn pipeline_skips_plugin_whose_mime_does_not_match() {
+        // An image-only plugin contributes nothing for text/plain and is not
+        // re-checked in later passes.
+        let entries = vec![entry(
+            FakePlugin::new("img").mime("image/").provides("saw-me"),
+        )];
+        let merged = run_pipeline(&entries, &ctx_for("text/plain", &HashMap::new()));
+        assert!(
+            !merged.custom.contains_key("saw-me"),
+            "image-only plugin must not run for text/plain"
+        );
+    }
+
+    #[test]
+    fn pipeline_runs_plugin_whose_mime_matches_prefix() {
+        let entries = vec![entry(FakePlugin::new("img").mime("image/").provides("ran"))];
+        let merged = run_pipeline(&entries, &ctx_for("image/jpeg", &HashMap::new()));
+        assert!(merged.custom.contains_key("ran"));
+    }
+
+    #[test]
+    fn unmet_dependency_terminates_without_running() {
+        // A plugin whose requirement is never produced is skipped and the loop
+        // ends (no infinite passes); the producer still runs.
+        let entries = vec![
+            entry(FakePlugin::new("producer").provides("have")),
+            entry(FakePlugin::new("waiter").requires("never")),
+        ];
+        let merged = run_pipeline(&sorted(entries), &ctx_for("image/jpeg", &HashMap::new()));
+        assert!(merged.custom.contains_key("have"), "producer ran");
+        assert!(
+            !merged.keywords.iter().any(|k| k == "waiter"),
+            "waiter never ran (unmet dependency)"
+        );
+    }
+
+    /// A fake that returns Err on classify, used to verify the host does not
+    /// disable on a plain error (only on a panic) and keeps the pass going.
+    struct FailingPlugin {
+        name: &'static str,
+    }
+
+    impl ClassifierPlugin for FailingPlugin {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn version(&self) -> &str {
+            "0.0.0"
+        }
+        fn mime_interests(&self) -> &[&str] {
+            &[]
+        }
+        fn needs_file_data(&self) -> bool {
+            false
+        }
+        fn init(&mut self, _config: &PluginConfig) -> Result<(), String> {
+            Ok(())
+        }
+        fn classify(&self, _ctx: &FileContext) -> Result<Option<ClassificationResult>, String> {
+            Err("boom".to_string())
+        }
+    }
+
+    #[test]
+    fn failed_plugin_does_not_disable_and_pass_continues() {
+        // A returning-Err plugin must NOT be disabled (only panics do that), and
+        // a later plugin in the same pass still runs.
+        let entries: Vec<TestEntry> = vec![
+            TestEntry {
+                plugin: Box::new(FailingPlugin { name: "failer" }),
+                disabled: AtomicBool::new(false),
+            },
+            entry(FakePlugin::new("after").provides("after-ran")),
+        ];
+        let merged = run_pipeline(&entries, &ctx_for("image/jpeg", &HashMap::new()));
+        // The failing plugin is not disabled…
+        assert!(!entries[0].disabled.load(Ordering::Relaxed));
+        // …and the later plugin still ran.
+        assert!(merged.custom.contains_key("after-ran"));
+    }
 }

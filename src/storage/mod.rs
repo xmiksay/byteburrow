@@ -689,4 +689,266 @@ mod tests {
             .expect_err("write outside root must be rejected");
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
     }
+
+    // ── list_directory_fs (filesystem only, no DB) ────────────────
+
+    /// Build a storage rooted at a fresh temp dir with one file + one subdir.
+    /// Uses a caller-supplied `storage_id` so each DB-backed test isolates its
+    /// rows from the others (all share one migrated test database).
+    async fn temp_storage_with_tree() -> Storage {
+        temp_storage_with_tree_id(9001).await
+    }
+
+    async fn temp_storage_with_tree_id(storage_id: i32) -> Storage {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "byteburrow_storage_tree_{}_{}",
+            std::process::id(),
+            n
+        ));
+        fs::create_dir_all(&root).await.unwrap();
+        fs::write(root.join("file_a.txt"), b"hello").await.unwrap();
+        fs::write(root.join("file_b.bin"), [0u8; 100])
+            .await
+            .unwrap();
+        fs::create_dir_all(root.join("subdir")).await.unwrap();
+
+        Storage::new(storage::Model {
+            id: storage_id,
+            name: "test".to_string(),
+            description: None,
+            path: root.to_string_lossy().into_owned(),
+            default_user: 1,
+            default_group: 1,
+            ignore_patterns: String::new(),
+        })
+    }
+
+    #[tokio::test]
+    async fn list_directory_fs_reports_relative_paths_types_and_sizes() {
+        let storage = temp_storage_with_tree().await;
+
+        let entries = storage.list_directory_fs("").await.expect("list fs root");
+        let by_path: std::collections::HashMap<String, DirectoryEntry> =
+            entries.into_iter().map(|e| (e.path.clone(), e)).collect();
+
+        let a = by_path.get("file_a.txt").expect("file_a.txt present");
+        assert_eq!(a.entry_type, EntryType::File);
+        assert_eq!(a.size, 5);
+        assert!(a.id.is_none(), "FS-only entries carry no DB id");
+
+        let b = by_path.get("file_b.bin").expect("file_b.bin present");
+        assert_eq!(b.entry_type, EntryType::File);
+        assert_eq!(b.size, 100);
+
+        let dir = by_path.get("subdir").expect("subdir present");
+        assert_eq!(dir.entry_type, EntryType::Directory);
+    }
+
+    // ── DB-backed entry tests ──────────────────────────────────────
+    //
+    // These use the shared runtime + migrated DB (see `crate::test_support`).
+    // They run under `#[test]` + `block_on`, NOT `#[tokio::test]`, because the
+    // process-global runtime must outlive the test (a per-test runtime would
+    // drop mid-test and hang the connection pool's background tasks).
+    //
+    // `entry` has FKs to `storage`/`user`/`group`, so each test inserts real
+    // rows (auto-increment ids) rather than a fake hardcoded storage id.
+
+    use crate::entity::{group, user};
+    use crate::test_support;
+
+    /// Insert a user, group, and storage row, returning a `Storage` whose
+    /// `model.id` exists in the DB (satisfying the `entry.storage_id` FK).
+    async fn db_storage_with_tree() -> Storage {
+        let db = test_support::test_db().await;
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let uname = format!("dbtree_user_{n}");
+
+        let u = user::ActiveModel {
+            name: Set(uname.clone()),
+            description: Set(None),
+            username: Set(uname),
+            // Placeholder password — these storage tests never authenticate.
+            password: Set(format!("dbtree_pw_{n}")),
+            enabled: Set(true),
+            admin: Set(false),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert user");
+
+        let g = group::ActiveModel {
+            name: Set(format!("dbtree_group_{n}")),
+            description: Set(None),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert group");
+
+        let root =
+            std::env::temp_dir().join(format!("byteburrow_dbtree_{}_{}", std::process::id(), n));
+        fs::create_dir_all(&root).await.unwrap();
+        fs::write(root.join("file_a.txt"), b"hello").await.unwrap();
+        fs::write(root.join("file_b.bin"), [0u8; 100])
+            .await
+            .unwrap();
+        fs::create_dir_all(root.join("subdir")).await.unwrap();
+
+        let s = storage::ActiveModel {
+            name: Set(format!("dbtree_storage_{n}")),
+            description: Set(None),
+            path: Set(root.to_string_lossy().into_owned()),
+            default_user: Set(u.id),
+            default_group: Set(g.id),
+            ignore_patterns: Set(String::new()),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert storage");
+
+        Storage::new(s)
+    }
+
+    #[test]
+    fn get_parent_id_creates_ancestor_chain_and_is_idempotent() {
+        test_support::runtime().block_on(async {
+            let storage = db_storage_with_tree().await;
+            let db = test_support::test_db().await;
+            // Create nested on-disk dirs so get_parent_id can read metadata.
+            fs::create_dir_all(storage.model.path.clone() + "/a/b/c")
+                .await
+                .unwrap();
+
+            // get_parent_id("a/b/c/file.txt") → dir_path "a/b/c" → id of "a/b/c".
+            let c_id = storage
+                .get_parent_id(db, "a/b/c/file.txt")
+                .await
+                .expect("get_parent_id resolves a/b/c");
+
+            // get_parent_id("a/b/c") → dir_path "a/b" → id of "a/b" (c's parent).
+            let b_id = storage
+                .get_parent_id(db, "a/b/c")
+                .await
+                .expect("get_parent_id resolves a/b");
+
+            // Re-calling the same path returns the existing id (no duplicate).
+            let c_id_again = storage.get_parent_id(db, "a/b/c/file.txt").await.unwrap();
+            assert_eq!(c_id, c_id_again, "idempotent re-call returns same id");
+            assert_ne!(c_id, b_id, "a/b/c and its parent a/b are distinct entries");
+
+            // Walk up: get_parent_id("a/b") → "a" → get_parent_id("a") → "a" root.
+            let a_id = storage.get_parent_id(db, "a/b").await.unwrap();
+            let root_id = storage.get_parent_id(db, "a").await.unwrap();
+            assert_ne!(b_id, a_id);
+            // "a" has no '/', so get_parent_id("a") returns the id of "a" itself.
+            assert_eq!(a_id, root_id, "root-level dir resolves to itself");
+        });
+    }
+
+    #[test]
+    fn ensure_entry_creates_then_returns_existing_and_sets_parent() {
+        test_support::runtime().block_on(async {
+            let storage = db_storage_with_tree().await;
+            let db = test_support::test_db().await;
+            fs::create_dir_all(storage.model.path.clone() + "/nested")
+                .await
+                .unwrap();
+            fs::write(storage.model.path.clone() + "/nested/leaf.txt", b"leaf")
+                .await
+                .unwrap();
+
+            let first = storage
+                .ensure_entry(db, "nested/leaf.txt")
+                .await
+                .expect("ensure_entry first");
+            assert_eq!(first.path, "nested/leaf.txt");
+            assert_eq!(first.entry_type, EntryType::File);
+            assert!(
+                first.parent_id.is_some(),
+                "nested entry must carry a parent_id"
+            );
+
+            let second = storage
+                .ensure_entry(db, "nested/leaf.txt")
+                .await
+                .expect("ensure_entry second");
+            assert_eq!(
+                first.id, second.id,
+                "second call returns the existing entry, not a duplicate"
+            );
+        });
+    }
+
+    #[test]
+    fn list_directory_merges_fs_and_db() {
+        test_support::runtime().block_on(async {
+            let storage = db_storage_with_tree().await;
+            let db = test_support::test_db().await;
+
+            // Ensure the on-disk file so it lands in the DB.
+            storage
+                .ensure_entry(db, "file_a.txt")
+                .await
+                .expect("ensure file_a");
+
+            let entries = storage
+                .list_directory(db, "")
+                .await
+                .expect("list_directory");
+
+            let find = |name: &str| {
+                entries
+                    .iter()
+                    .find(|e| e.path == name)
+                    .unwrap_or_else(|| panic!("missing {name}"))
+            };
+
+            // file_a.txt is in both FS and DB → carries a DB id.
+            let a = find("file_a.txt");
+            assert!(a.id.is_some(), "merged entry carries DB id");
+
+            // file_b.bin is FS-only → id None.
+            let b = find("file_b.bin");
+            assert!(b.id.is_none(), "FS-only entry has id None");
+        });
+    }
+
+    // ── format_size ───────────────────────────────────────────────
+
+    #[test]
+    fn format_size_bytes_unchanged() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(1), "1 B");
+        assert_eq!(format_size(500), "500 B");
+        assert_eq!(format_size(1023), "1023 B");
+    }
+
+    #[test]
+    fn format_size_kilobyte_boundary() {
+        // Exactly 1024 B == 1.0 KB.
+        assert_eq!(format_size(1024), "1.0 KB");
+        assert_eq!(format_size(1536), "1.5 KB");
+    }
+
+    #[test]
+    fn format_size_megabyte_boundary() {
+        // 1024^2 == 1.0 MB.
+        assert_eq!(format_size(1024 * 1024), "1.0 MB");
+        // 2.5 MB
+        let two_half = (2.5 * 1024.0 * 1024.0) as i64;
+        assert_eq!(format_size(two_half), "2.5 MB");
+    }
+
+    #[test]
+    fn format_size_gigabyte_and_up() {
+        assert_eq!(format_size(1024 * 1024 * 1024), "1.0 GB");
+        // 5 GB stays in GB (TB is the next unit but below TB threshold).
+        assert_eq!(format_size(5 * 1024 * 1024 * 1024), "5.0 GB");
+        // The terabyte boundary is the last unit: a huge size is capped at TB.
+        assert_eq!(format_size(1024_i64.pow(4)), "1.0 TB");
+    }
 }
