@@ -50,6 +50,7 @@ pub async fn test_db() -> &'static DatabaseConnection {
             trust_forwarded_headers: false,
             face_match_threshold: 0.8,
             face_match_margin: 0.05,
+            plugin: std::collections::HashMap::new(),
         };
 
         let db = crate::db_connect(&config)

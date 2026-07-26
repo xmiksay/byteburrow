@@ -296,6 +296,25 @@ Pass 3: Face embedding/recognition (requires custom "faces") → adds custom["pe
 Pass N: Keyword extraction, color classification (image/*) → add custom["keywords"], custom["colors"]
 ```
 
+**Plugin configuration:** the host forwards a single `PluginConfig`
+(`HashMap<String, String>`) into every plugin's `init()`. It is the `plugin`
+section of `Config`, populated from `BYTEBURROW__PLUGIN__<KEY>` environment
+variables (the trailing segment after `PLUGIN__` becomes a lowercased key, e.g.
+`BYTEBURROW__PLUGIN__OLLAMA_URL` → `ollama_url`). The same map is passed to
+every plugin; keys are globally namespaced by convention, and each plugin reads
+only the keys it recognizes. For backward compatibility each plugin still falls
+back to a legacy `BYTEBURROW_<KEY>` process env var and then a built-in default
+when a key is absent, but the config map takes precedence. Keys accepted by the
+bundled plugins:
+
+| Plugin | Key | Default | Meaning |
+|--------|-----|---------|---------|
+| keyword-extractor | `ollama_url` | `http://127.0.0.1:11434` | Ollama base URL |
+| keyword-extractor | `ollama_model` | `qwen3.5:9b` | vision model name |
+| keyword-extractor | `ollama_timeout` | `120` | request timeout (seconds) |
+| face-detector | `face_max_dim` | `640` | longest image edge (px) before downscaling for detection |
+| face-embedder | `face_embed_model` | `/etc/byteburrow/models/recognition_resnet27.onnx` | path to the ONNX embedding model |
+
 **Creating a new plugin:**
 1. Create a new crate in `plugins/` with `crate-type = ["cdylib"]`
 2. Depend on `byteburrow-plugin-api`

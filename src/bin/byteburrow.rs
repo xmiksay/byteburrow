@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::Path;
 
 use byteburrow::{
@@ -31,10 +30,10 @@ async fn main() {
         .await
         .expect("Failed to run migrations");
 
-    // Load classifier plugins
-    let plugin_config = HashMap::new();
+    // Load classifier plugins, forwarding the `[plugin]` config section
+    // (from BYTEBURROW__PLUGIN__* env vars) into each plugin's `init`.
     let plugins =
-        PluginRegistry::load_from_directory(Path::new(&config.plugin_dir), &plugin_config);
+        PluginRegistry::load_from_directory(Path::new(&config.plugin_dir), &config.plugin);
 
     plugins.log_summary();
 
