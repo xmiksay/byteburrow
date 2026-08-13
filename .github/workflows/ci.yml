@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+# Cancel in-progress runs on the same ref when a new commit is pushed.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Rust: fmt + clippy + OpenAPI drift ──────────────────────────────
+  rust-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: rust-checks
+      - run: make frontend-dist-stub
+      - run: make fmt-check
+      - run: make clippy
+      - run: make openapi-check
+
+  # ── Frontend: lint + typecheck + tests ──────────────────────────────
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      # `npm ci` requires a lockfile; fall back to `npm install` if one
+      # has not been committed yet.
+      - name: Install dependencies
+        working-directory: frontend
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+      - run: npm --prefix frontend run lint
+      - run: npm --prefix frontend run typecheck
+      - run: npm --prefix frontend run test
+
+  # ── Rust unit tests (no DB) ─────────────────────────────────────────
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: unit-tests
+      - run: make frontend-dist-stub
+      - run: make test-unit
+
+  # ── Rust integration tests (Postgres service) ───────────────────────
+  integration-tests:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgres://user:password@localhost:5432/byteburrow_test
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: user
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: byteburrow_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U user -d byteburrow_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: integration-tests
+      - run: make frontend-dist-stub
+      - run: make test-integration
