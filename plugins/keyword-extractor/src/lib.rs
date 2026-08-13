@@ -9,7 +9,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 const DEFAULT_OLLAMA_URL: &str = "http://127.0.0.1:11434";
-const DEFAULT_MODEL: &str = "qwen3.5:9b";
+const DEFAULT_MODEL: &str = "llava:7b";
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
 const PROMPT: &str = "\
@@ -145,14 +145,15 @@ impl ClassifierPlugin for KeywordExtractor {
     fn init(&mut self, config: &PluginConfig) -> Result<(), String> {
         if let Some(url) = config
             .get("ollama_url")
-            .or(std::env::var("BYTEBURROW_OLLAMA_URL").ok().as_ref())
+            .or(std::env::var("BYTEBURROW__OLLAMA_URL").ok().as_ref())
         {
             self.ollama_url = url.clone();
         }
 
-        if let Some(model) = config
-            .get("ollama_model")
-            .or(std::env::var("BYTEBURROW_OLLAMA_MODEL").ok().as_ref())
+        if let Some(model) =
+            config
+                .get("ollama_model")
+                .or(std::env::var("BYTEBURROW__OLLAMA_MODEL").ok().as_ref())
         {
             self.model = model.clone();
         }
@@ -160,7 +161,7 @@ impl ClassifierPlugin for KeywordExtractor {
         if let Some(timeout) =
             config
                 .get("ollama_timeout")
-                .or(std::env::var("BYTEBURROW_OLLAMA_TIMEOUT").ok().as_ref())
+                .or(std::env::var("BYTEBURROW__OLLAMA_TIMEOUT").ok().as_ref())
         {
             let secs: u64 = timeout
                 .parse()

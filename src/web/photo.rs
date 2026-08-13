@@ -2,8 +2,8 @@ use crate::auth::Auth;
 use crate::entity::{entry, photo};
 use crate::job::Job;
 use crate::web::{
-    bad_request, internal, message, not_found_msg, require_admin, ApiError, AppState,
-    ErrorResponse, MessageResponse,
+    accessible_storage_ids, bad_request, internal, message, not_found_msg, require_admin, ApiError,
+    AppState, ErrorResponse, MessageResponse,
 };
 use axum::{
     extract::{Path, State},
@@ -41,7 +41,13 @@ pub fn router() -> Router<Arc<AppState>> {
 async fn enrich_photos(
     db: &sea_orm::DatabaseConnection,
     photos: Vec<photo::Model>,
+    accessible: Option<&[i32]>,
 ) -> Result<Vec<PhotoResponse>, ApiError> {
+    // Non-admin with access to no storage sees nothing.
+    if matches!(accessible, Some(ids) if ids.is_empty()) {
+        return Ok(vec![]);
+    }
+
     if photos.is_empty() {
         return Ok(vec![]);
     }
@@ -52,24 +58,48 @@ async fn enrich_photos(
         .all(db)
         .await?;
 
-    let entry_map: HashMap<Vec<u8>, &entry::Model> = entries
-        .iter()
-        .filter_map(|e| e.hash.as_ref().map(|h| (h.clone(), e)))
-        .collect();
+    // A photo may have several entries (same hash, different storages). A
+    // non-admin may see it iff AT LEAST ONE entry's storage is accessible;
+    // an admin (`accessible == None`) sees all of them.
+    let entries_by_hash: HashMap<Vec<u8>, Vec<&entry::Model>> =
+        entries.iter().fold(HashMap::new(), |mut acc, e| {
+            if let Some(h) = e.hash.as_ref() {
+                acc.entry(h.clone()).or_default().push(e);
+            }
+            acc
+        });
 
     Ok(photos
         .into_iter()
-        .map(|p| {
-            let entry = entry_map.get(&p.hash);
-            PhotoResponse {
+        .filter_map(|p| {
+            let Some(ents) = entries_by_hash.get(&p.hash) else {
+                // Orphaned photo with no entry: admins see it, others don't.
+                return accessible.is_none().then_some(PhotoResponse {
+                    hash: hex::encode(&p.hash),
+                    storage_id: None,
+                    path: None,
+                    latitude: p.latitude,
+                    longitude: p.longitude,
+                    date: p.date.map(|d| d.to_string()),
+                    keywords: p.keywords,
+                });
+            };
+            // Pick the first entry whose storage is accessible (for admins,
+            // any entry). Guarantees we never leak a storage the user can't
+            // open via the chosen `storage_id`/`path`.
+            let entry = match accessible {
+                None => ents.first().copied(),
+                Some(ids) => ents.iter().find(|e| ids.contains(&e.storage_id)).copied(),
+            };
+            entry.map(|e| PhotoResponse {
                 hash: hex::encode(&p.hash),
-                storage_id: entry.map(|e| e.storage_id),
-                path: entry.map(|e| e.path.clone()),
+                storage_id: Some(e.storage_id),
+                path: Some(e.path.clone()),
                 latitude: p.latitude,
                 longitude: p.longitude,
                 date: p.date.map(|d| d.to_string()),
                 keywords: p.keywords,
-            }
+            })
         })
         .collect())
 }
@@ -85,7 +115,7 @@ fn date_range(
     let start = NaiveDate::from_ymd_opt(year, month.unwrap_or(1), day.unwrap_or(1))
         .ok_or_else(|| bad_request("Invalid date"))?
         .and_hms_opt(0, 0, 0)
-        .unwrap();
+        .expect("midnight is always valid");
 
     // Exclusive end: next day for day scopes, first-of-next-month otherwise.
     let end = match (month, day) {
@@ -93,21 +123,21 @@ fn date_range(
             NaiveDate::from_ymd_opt(year, m, d)
                 .ok_or_else(|| bad_request("Invalid date"))?
                 .and_hms_opt(0, 0, 0)
-                .unwrap()
+                .expect("midnight is always valid")
                 + chrono::Duration::days(1)
         }
         (Some(12), _) => NaiveDate::from_ymd_opt(year + 1, 1, 1)
             .ok_or_else(|| bad_request("Invalid date"))?
             .and_hms_opt(0, 0, 0)
-            .unwrap(),
+            .expect("midnight is always valid"),
         (Some(m), _) => NaiveDate::from_ymd_opt(year, m + 1, 1)
             .ok_or_else(|| bad_request("Invalid date"))?
             .and_hms_opt(0, 0, 0)
-            .unwrap(),
+            .expect("midnight is always valid"),
         (None, _) => NaiveDate::from_ymd_opt(year + 1, 1, 1)
             .ok_or_else(|| bad_request("Invalid date"))?
             .and_hms_opt(0, 0, 0)
-            .unwrap(),
+            .expect("midnight is always valid"),
     };
 
     Ok((start, end))
@@ -125,15 +155,19 @@ fn date_range(
     security(("bearer" = []))
 )]
 pub(crate) async fn list_photos(
-    _auth: Auth,
+    auth: Auth,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<PhotoResponse>>, ApiError> {
+    let accessible = accessible_storage_ids(&auth, &state.db).await?;
+
     let photos = photo::Entity::find()
         .filter(photo::Column::Date.is_null())
         .all(&state.db)
         .await?;
 
-    Ok(Json(enrich_photos(&state.db, photos).await?))
+    Ok(Json(
+        enrich_photos(&state.db, photos, accessible.as_deref()).await?,
+    ))
 }
 
 /// List photos by year
@@ -150,11 +184,13 @@ pub(crate) async fn list_photos(
     security(("bearer" = []))
 )]
 pub(crate) async fn list_by_year(
-    _auth: Auth,
+    auth: Auth,
     Path(year): Path<i32>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<PhotoResponse>>, ApiError> {
     let (start, end) = date_range(year, None, None)?;
+
+    let accessible = accessible_storage_ids(&auth, &state.db).await?;
 
     let photos = photo::Entity::find()
         .filter(photo::Column::Date.gte(start))
@@ -163,7 +199,9 @@ pub(crate) async fn list_by_year(
         .all(&state.db)
         .await?;
 
-    Ok(Json(enrich_photos(&state.db, photos).await?))
+    Ok(Json(
+        enrich_photos(&state.db, photos, accessible.as_deref()).await?,
+    ))
 }
 
 /// List photos by year and month
@@ -183,11 +221,13 @@ pub(crate) async fn list_by_year(
     security(("bearer" = []))
 )]
 pub(crate) async fn list_by_year_month(
-    _auth: Auth,
+    auth: Auth,
     Path((year, month)): Path<(i32, u32)>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<PhotoResponse>>, ApiError> {
     let (start, end) = date_range(year, Some(month), None)?;
+
+    let accessible = accessible_storage_ids(&auth, &state.db).await?;
 
     let photos = photo::Entity::find()
         .filter(photo::Column::Date.gte(start))
@@ -196,7 +236,9 @@ pub(crate) async fn list_by_year_month(
         .all(&state.db)
         .await?;
 
-    Ok(Json(enrich_photos(&state.db, photos).await?))
+    Ok(Json(
+        enrich_photos(&state.db, photos, accessible.as_deref()).await?,
+    ))
 }
 
 /// List photos by year, month, and day
@@ -217,11 +259,13 @@ pub(crate) async fn list_by_year_month(
     security(("bearer" = []))
 )]
 pub(crate) async fn list_by_year_month_day(
-    _auth: Auth,
+    auth: Auth,
     Path((year, month, day)): Path<(i32, u32, u32)>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<PhotoResponse>>, ApiError> {
     let (start, end) = date_range(year, Some(month), Some(day))?;
+
+    let accessible = accessible_storage_ids(&auth, &state.db).await?;
 
     let photos = photo::Entity::find()
         .filter(photo::Column::Date.gte(start))
@@ -230,7 +274,9 @@ pub(crate) async fn list_by_year_month_day(
         .all(&state.db)
         .await?;
 
-    Ok(Json(enrich_photos(&state.db, photos).await?))
+    Ok(Json(
+        enrich_photos(&state.db, photos, accessible.as_deref()).await?,
+    ))
 }
 
 /// Regenerate thumbnail for a photo
@@ -264,11 +310,11 @@ pub(crate) async fn regenerate_thumbnail(
     // Dispatch job to regenerate thumbnails
     state
         .job_sender
-        .send(Job::CreateThumbnail {
+        .try_send(Job::CreateThumbnail {
             hash: hash_bytes,
             regenerate: true,
         })
-        .map_err(|_| internal("Failed to dispatch regeneration job"))?;
+        .map_err(|_| internal("Job queue is full or closed"))?;
 
     Ok((
         StatusCode::ACCEPTED,

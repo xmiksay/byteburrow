@@ -11,7 +11,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use sea_orm::{ActiveModelTrait, EntityTrait, PaginatorTrait, Set};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, Set};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -128,6 +128,13 @@ async fn change_password_handler(
         return Err(AuthOrApiError::Api(forbidden("Permission denied")));
     }
 
+    // M17: enforce a minimum password length.
+    if payload.password.len() < 8 {
+        return Err(AuthOrApiError::Api(bad_request(
+            "Password must be at least 8 characters",
+        )));
+    }
+
     // Find user
     let user = user::Entity::find_by_id(id)
         .one(&state.db)
@@ -139,6 +146,12 @@ async fn change_password_handler(
     active_user.password = Set(Auth::hash_password(&payload.password)
         .map_err(|_| AuthOrApiError::Api(internal("Failed to hash password")))?);
     active_user.update(&state.db).await?;
+
+    // Revoke all existing sessions for this user so stolen/old credentials
+    // can no longer be used after a password rotation. (H15)
+    Auth::revoke_all_tokens_by_user_id(id, &state.db)
+        .await
+        .map_err(|_| AuthOrApiError::Api(internal("Failed to revoke sessions")))?;
 
     Ok(message("Password changed successfully"))
 }
@@ -171,6 +184,18 @@ async fn login_handler(
     let trust_forwarded_headers = crate::config::Config::get().trust_forwarded_headers;
     let ip_address = crate::auth::resolve_ip_address(&headers, Some(peer), trust_forwarded_headers);
 
+    // M1: throttle login brute-force / credential stuffing per client IP. The
+    // check runs *before* authentication and counts the attempt either way, so
+    // a flood of guesses keeps the window hot until it elapses. An unknown IP
+    // (no peer, no trusted forwarded header) is bucketed under "unknown" so it
+    // is still throttled rather than bypassed.
+    let ip_key = ip_address.as_deref().unwrap_or("unknown");
+    if !crate::web::rate_limit::login_limiter().check(ip_key) {
+        return Err(AuthOrApiError::Api(crate::web::rate_limited(
+            crate::web::rate_limit::login_limiter().window().as_secs(),
+        )));
+    }
+
     // Authenticate user
     let auth = Auth::from_user_password(&payload.username, &payload.password, &state.db)
         .await
@@ -181,7 +206,7 @@ async fn login_handler(
     let token = auth
         .create_token(&state.db, user_agent, ip_address)
         .await
-        .map_err(|e| AuthOrApiError::Api(internal(format!("Failed to create token: {e:?}"))))?;
+        .map_err(|_| AuthOrApiError::Api(internal("Failed to create token")))?;
 
     // Build Set-Cookie header for HttpOnly session cookie. This is the only
     // place the raw token is ever sent to the client (issue #10) — it never
@@ -193,7 +218,7 @@ async fn login_handler(
         ""
     };
     let cookie_value = format!(
-        "session_token={}; HttpOnly; SameSite=Strict; Path=/api; Max-Age={}{}",
+        "session_token={}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}{}",
         token, max_age, secure_flag
     );
 
@@ -350,6 +375,11 @@ async fn create_user_handler(
         )));
     }
 
+    // M17: enforce a minimum password length on create.
+    if payload.password.len() < 8 {
+        return Err(bad_request("Password must be at least 8 characters"));
+    }
+
     // Hash password
     let password_hash =
         Auth::hash_password(&payload.password).map_err(|_| internal("Failed to hash password"))?;
@@ -404,6 +434,31 @@ async fn update_user_handler(
                 "Username '{}' already exists",
                 new_username
             )));
+        }
+    }
+
+    // M17: enforce a minimum password length on update.
+    if let Some(ref password) = payload.password {
+        if password.len() < 8 {
+            return Err(bad_request("Password must be at least 8 characters"));
+        }
+    }
+
+    // M18: prevent an admin from demoting or disabling themselves if they
+    // are the last admin (which would lock out the system).
+    let demoting_self = auth.user.id == user_id;
+    let removing_admin = payload.admin == Some(false);
+    let disabling_self = payload.enabled == Some(false) && demoting_self;
+    if demoting_self && (removing_admin || disabling_self) {
+        let admins = user::Entity::find()
+            .filter(user::Column::Admin.eq(true))
+            .filter(user::Column::Enabled.eq(true))
+            .all(&state.db)
+            .await?;
+        if admins.len() <= 1 {
+            return Err(bad_request(
+                "Cannot demote or disable the last enabled admin",
+            ));
         }
     }
 

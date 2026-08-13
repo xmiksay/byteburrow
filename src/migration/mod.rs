@@ -18,6 +18,8 @@ mod m20220101_000016_contact;
 mod m20220101_000017_face_reference;
 mod m20220101_000018_face_reference_model_meta;
 mod m20220101_000019_shared_owner;
+mod m20220101_000020_dav_lock;
+mod m20220101_000021_indexes;
 
 pub struct Migrator;
 
@@ -43,6 +45,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20220101_000017_face_reference::Migration),
             Box::new(m20220101_000018_face_reference_model_meta::Migration),
             Box::new(m20220101_000019_shared_owner::Migration),
+            Box::new(m20220101_000020_dav_lock::Migration),
+            Box::new(m20220101_000021_indexes::Migration),
         ]
     }
 }

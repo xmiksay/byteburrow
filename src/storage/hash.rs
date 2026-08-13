@@ -28,17 +28,21 @@ impl Storage {
 
         let model = self.ensure_entry(db, sub_path).await?;
 
-        // Skip if DB record already has a hash and is not older than FS
+        // Skip if DB record already has a hash and the file hasn't changed.
+        // We compare both mtime (H13: sub-second race) AND size, so a file
+        // rewritten within the same second with different content (different
+        // size) is still re-hashed.
         if let Some(existing_hash) = model.hash.clone() {
-            if (fs_modified - model.modified_at).num_seconds() < 1 {
+            let fs_size = tokio::fs::metadata(&full_path).await?.len();
+            let same_mtime = (fs_modified - model.modified_at).num_seconds().abs() < 1;
+            let same_size = fs_size == model.size as u64;
+            if same_mtime && same_size {
                 info!(path = sub_path, "Hash up-to-date, skipping");
                 return Ok((false, existing_hash, model));
             } else {
                 info!(
-                    "Hash is calcuated, file is newer: {:?} {:?} {}",
-                    model.modified_at,
-                    fs_modified,
-                    fs_modified - model.modified_at
+                    "Hash is stale (mtime_match={}, size_match={}, db_size={}, fs_size={}), rehashing",
+                    same_mtime, same_size, model.size, fs_size
                 );
             }
         }
@@ -56,8 +60,10 @@ impl Storage {
         let hash = hasher.finalize().to_vec();
 
         let mut active: entry::ActiveModel = model.into();
+        let fs_size_meta = tokio::fs::metadata(&full_path).await?;
         active.hash = Set(Some(hash.clone()));
         active.modified_at = Set(fs_modified);
+        active.size = Set(fs_size_meta.len() as i64);
         let updated_model = active.update(db).await?;
         info!(path = sub_path, hash = hex::encode(&hash), "Hash updated");
 

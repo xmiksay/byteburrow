@@ -126,8 +126,21 @@ fn run_pipeline<E: PipelineEntry>(entries: &[E], ctx: &FileContext) -> MergedCla
             }
             let plugin = entry.classifier();
 
-            // Check MIME interest
-            let interests = plugin.mime_interests();
+            // Check MIME interest (M12: guard against a panic in the plugin's
+            // metadata methods, which would otherwise abort the process).
+            let interests = catch_unwind(AssertUnwindSafe(|| plugin.mime_interests()));
+            let interests = match interests {
+                Ok(i) => i,
+                Err(_) => {
+                    error!(
+                        plugin = plugin.name(),
+                        "Plugin panicked in mime_interests; disabling it"
+                    );
+                    entry.disable();
+                    ran[i] = true;
+                    continue;
+                }
+            };
             if !interests.is_empty()
                 && !interests
                     .iter()
@@ -137,8 +150,20 @@ fn run_pipeline<E: PipelineEntry>(entries: &[E], ctx: &FileContext) -> MergedCla
                 continue;
             }
 
-            // Check custom metadata requirements
-            let required_custom = plugin.custom_requires();
+            // Check custom metadata requirements (M12)
+            let required_custom = catch_unwind(AssertUnwindSafe(|| plugin.custom_requires()));
+            let required_custom = match required_custom {
+                Ok(r) => r,
+                Err(_) => {
+                    error!(
+                        plugin = plugin.name(),
+                        "Plugin panicked in custom_requires; disabling it"
+                    );
+                    entry.disable();
+                    ran[i] = true;
+                    continue;
+                }
+            };
             if !required_custom
                 .iter()
                 .all(|key| current_custom.contains_key(*key))

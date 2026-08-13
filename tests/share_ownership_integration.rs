@@ -54,6 +54,7 @@ async fn test_db() -> &'static DatabaseConnection {
                 trust_forwarded_headers: false,
                 face_match_threshold: 0.8,
                 face_match_margin: 0.05,
+                plugin: std::collections::HashMap::new(),
             }));
         });
 
@@ -267,6 +268,7 @@ fn make_app_state(db: DatabaseConnection) -> Arc<AppState> {
         config: (*Config::get()).clone(),
         jinja: Environment::new(),
         job_sender,
+        notify_reload: std::sync::Arc::new(tokio::sync::Notify::new()),
     })
 }
 

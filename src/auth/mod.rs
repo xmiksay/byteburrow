@@ -438,8 +438,17 @@ impl Auth {
 
     /// Revoke all tokens for the current user
     pub async fn revoke_all_tokens<C: ConnectionTrait>(&self, db: &C) -> Result<(), AuthError> {
+        Self::revoke_all_tokens_by_user_id(self.user.id, db).await
+    }
+
+    /// Revoke all tokens for a given user id (used after a password change,
+    /// which may be performed by an admin on behalf of another user).
+    pub async fn revoke_all_tokens_by_user_id<C: ConnectionTrait>(
+        user_id: i32,
+        db: &C,
+    ) -> Result<(), AuthError> {
         token::Entity::delete_many()
-            .filter(token::Column::UserId.eq(self.user.id))
+            .filter(token::Column::UserId.eq(user_id))
             .exec(db)
             .await?;
         Ok(())

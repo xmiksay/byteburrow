@@ -54,7 +54,7 @@ impl ClassifierPlugin for FaceDetector {
             }
         }
 
-        *self.detector.lock().unwrap() = Some(detector);
+        *self.detector.lock().unwrap_or_else(|e| e.into_inner()) = Some(detector);
         Ok(())
     }
 
@@ -90,7 +90,7 @@ impl ClassifierPlugin for FaceDetector {
         let image_data = rustface::ImageData::new(gray.as_raw(), w, h);
 
         let faces = {
-            let mut guard = self.detector.lock().unwrap();
+            let mut guard = self.detector.lock().unwrap_or_else(|e| e.into_inner());
             let detector = guard.as_mut().ok_or("Face detector not initialized")?;
             detector.detect(&image_data)
         };

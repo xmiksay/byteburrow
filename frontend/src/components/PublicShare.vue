@@ -184,6 +184,18 @@ const fileInput = ref<HTMLInputElement | null>(null)
 
 const canWrite = computed(() => shareInfo.value?.can_write)
 
+// Reflect tag changes made inside FileViewer back into the entries list and
+// the currently-selected file ref (which FileViewer renders).
+const handleViewerTagsUpdated = (newTags: number[]) => {
+  if (!selectedFile.value) return
+  const path = selectedFile.value.path
+  selectedFile.value.tags = newTags
+  const entry = entries.value.find(e => e.path === path)
+  if (entry) {
+    entry.tags = newTags
+  }
+}
+
 const handleCreateFolder = async () => {
   const name = prompt('Folder name:')
   if (!name) return
@@ -397,6 +409,7 @@ onMounted(() => {
       :share-id="token" 
       :read-only="!canWrite"
       @close="selectedFile = null"
+      @tags-updated="handleViewerTagsUpdated"
     />
 
     <MediaViewer

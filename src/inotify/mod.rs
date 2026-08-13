@@ -1,10 +1,12 @@
-use crate::entity::{entry, storage};
+use crate::entity::{entry, face_reference, meta, photo, storage};
 use crate::job::{Job, JobSender, ProcessMode};
 use notify::{
     event::{CreateKind, ModifyKind, RemoveKind, RenameMode},
     Event, EventKind, RecommendedWatcher, RecursiveMode, Result as NotifyResult, Watcher,
 };
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
+use sea_orm::{
+    ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -28,15 +30,22 @@ pub struct InotifyHandler {
     watcher: Option<RecommendedWatcher>,
     /// entry_id -> watched entry metadata
     watched_entries: HashMap<i32, WatchedEntry>,
+    /// Signal from the web layer that watched entries changed (H12).
+    notify_reload: Arc<tokio::sync::Notify>,
 }
 
 impl InotifyHandler {
-    pub fn new(db: DatabaseConnection, job_sender: JobSender) -> Self {
+    pub fn new(
+        db: DatabaseConnection,
+        job_sender: JobSender,
+        notify_reload: Arc<tokio::sync::Notify>,
+    ) -> Self {
         Self {
             db: Arc::new(db),
             job_sender,
             watcher: None,
             watched_entries: HashMap::new(),
+            notify_reload,
         }
     }
 
@@ -68,7 +77,9 @@ impl InotifyHandler {
             error!("Failed to load initial watched entries: {}", e);
         }
 
-        let reload_interval = tokio::time::Duration::from_secs(60);
+        // H12: shrink the reload interval from 60s to 15s to reduce the
+        // window where new watch dirs aren't watched.
+        let reload_interval = tokio::time::Duration::from_secs(15);
         let mut reload_timer = tokio::time::interval(reload_interval);
 
         loop {
@@ -77,6 +88,14 @@ impl InotifyHandler {
                     self.handle_event(event).await;
                 }
                 _ = reload_timer.tick() => {
+                    if let Err(e) = self.reload_watched_entries().await {
+                        error!("Failed to reload watched entries: {}", e);
+                    }
+                }
+                // H12: immediate reload when the web layer signals a change
+                // (e.g. after `set_notify`).
+                _ = self.notify_reload.notified() => {
+                    info!("Notify-reload signal received; reloading watched entries");
                     if let Err(e) = self.reload_watched_entries().await {
                         error!("Failed to reload watched entries: {}", e);
                     }
@@ -279,7 +298,7 @@ impl InotifyHandler {
             }
             info!("File created in storage {}: {}", storage_id, rel);
             self.job_sender
-                .send(Job::ProcessFile {
+                .try_send(Job::ProcessFile {
                     storage_id,
                     path: rel,
                     mode: ProcessMode::Auto,
@@ -301,12 +320,92 @@ impl InotifyHandler {
             }
             debug!("File modified in storage {}: {}", storage_id, rel);
             self.job_sender
-                .send(Job::ProcessFile {
+                .try_send(Job::ProcessFile {
                     storage_id,
                     path: rel,
                     mode: ProcessMode::Auto,
                 })
                 .ok();
+        }
+    }
+
+    /// Purge a single entry row and, if it was the last reference to its hash,
+    /// also remove the hash-keyed `meta`/`photo`/`face_reference` rows and the
+    /// on-disk thumbnails. Shares cascade automatically via the `shared` FK.
+    async fn purge_entry_cascade(&self, entry: &entry::Model) {
+        let db = self.db.as_ref();
+
+        // 1. Delete the entry row by id. Shares cascade automatically.
+        if let Err(e) = entry::Entity::delete_by_id(entry.id).exec(db).await {
+            error!(entry_id = entry.id, error = %e, "Failed to delete entry row");
+            return;
+        }
+
+        // 2. If the entry had a hash, clean up hash-keyed rows only when no other
+        //    entry references the same hash (same content at another path/storage).
+        if let Some(hash) = &entry.hash {
+            let remaining = entry::Entity::find()
+                .filter(entry::Column::Hash.eq(hash.clone()))
+                .count(db)
+                .await;
+
+            let should_purge_hash = match remaining {
+                Ok(0) => true,
+                Ok(n) => {
+                    debug!(hash = %hex::encode(hash), remaining = n, "Hash still referenced; keeping hash-keyed rows");
+                    false
+                }
+                Err(e) => {
+                    // Couldn't verify references — leave the hash-keyed rows in
+                    // place rather than risk deleting shared data.
+                    error!(hash = %hex::encode(hash), error = %e, "Failed to count hash references; skipping hash cleanup");
+                    false
+                }
+            };
+
+            if should_purge_hash {
+                let hash_hex = hex::encode(hash);
+
+                if let Err(e) = meta::Entity::delete_many()
+                    .filter(meta::Column::Hash.eq(hash.clone()))
+                    .exec(db)
+                    .await
+                {
+                    error!(hash = %hash_hex, error = %e, "Failed to delete meta row");
+                }
+                if let Err(e) = photo::Entity::delete_many()
+                    .filter(photo::Column::Hash.eq(hash.clone()))
+                    .exec(db)
+                    .await
+                {
+                    error!(hash = %hash_hex, error = %e, "Failed to delete photo row");
+                }
+                if let Err(e) = face_reference::Entity::delete_many()
+                    .filter(face_reference::Column::Hash.eq(hash.clone()))
+                    .exec(db)
+                    .await
+                {
+                    error!(hash = %hash_hex, error = %e, "Failed to delete face_reference rows");
+                }
+
+                // Best-effort: remove the on-disk thumbnails. Missing files or
+                // I/O errors are logged but not fatal.
+                let thumbnail_dir =
+                    std::path::PathBuf::from(&crate::config::Config::get().thumbnail_storage);
+                for size in ["mini", "small", "large"] {
+                    let thumb_path = crate::storage::thumbnail::get_thumbnail_path(
+                        &thumbnail_dir,
+                        &hash_hex,
+                        size,
+                    );
+                    if let Err(e) = tokio::fs::remove_file(&thumb_path).await {
+                        // NotFound is expected when no thumbnail existed.
+                        warn!(hash = %hash_hex, size, error = %e, "Failed to remove thumbnail");
+                    }
+                }
+
+                debug!(hash = %hash_hex, "Purged hash-keyed rows and thumbnails");
+            }
         }
     }
 
@@ -321,8 +420,26 @@ impl InotifyHandler {
             if crate::ignore::is_ignored(&rel, ignore_patterns) {
                 return;
             }
-            info!("File removed in storage {}: {}", storage_id, rel);
-            // TODO: Handle file deletion in database
+            info!(storage_id, path = %rel, "File removed");
+
+            let entry = match entry::Entity::find()
+                .filter(entry::Column::StorageId.eq(storage_id))
+                .filter(entry::Column::Path.eq(&rel))
+                .one(self.db.as_ref())
+                .await
+            {
+                Ok(Some(m)) => m,
+                Ok(None) => {
+                    debug!(storage_id, path = %rel, "Removed file not tracked in DB");
+                    return;
+                }
+                Err(e) => {
+                    error!(storage_id, path = %rel, error = %e, "Failed to look up removed file");
+                    return;
+                }
+            };
+
+            self.purge_entry_cascade(&entry).await;
         }
     }
 
@@ -340,7 +457,7 @@ impl InotifyHandler {
             }
             info!("File renamed in storage {}: {}", storage_id, rel);
             self.job_sender
-                .send(Job::ProcessFile {
+                .try_send(Job::ProcessFile {
                     storage_id,
                     path: rel,
                     mode: ProcessMode::Auto,
@@ -362,7 +479,7 @@ impl InotifyHandler {
             }
             info!("Folder created in storage {}: {}", storage_id, rel);
             self.job_sender
-                .send(Job::ProcessFile {
+                .try_send(Job::ProcessFile {
                     storage_id,
                     path: rel,
                     mode: ProcessMode::Auto,
@@ -382,8 +499,32 @@ impl InotifyHandler {
             if crate::ignore::is_ignored(&rel, ignore_patterns) {
                 return;
             }
-            info!("Folder removed in storage {}: {}", storage_id, rel);
-            // TODO: Handle folder deletion in database
+            info!(storage_id, path = %rel, "Folder removed");
+
+            // Match the folder itself plus everything nested under it.
+            let prefix = format!("{rel}/");
+            let cond = Condition::any()
+                .add(entry::Column::Path.eq(&rel))
+                .add(entry::Column::Path.like(format!("{}%", prefix)));
+
+            let entries = match entry::Entity::find()
+                .filter(entry::Column::StorageId.eq(storage_id))
+                .filter(cond)
+                .all(self.db.as_ref())
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    error!(storage_id, path = %rel, error = %e, "Failed to look up removed folder contents");
+                    return;
+                }
+            };
+
+            let count = entries.len();
+            for entry in &entries {
+                self.purge_entry_cascade(entry).await;
+            }
+            info!(storage_id, path = %rel, removed = count, "Purged folder entries");
         }
     }
 }

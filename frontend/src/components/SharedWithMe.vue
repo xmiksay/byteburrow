@@ -201,6 +201,18 @@ const closeFileViewer = () => {
   selectedFile.value = null
 }
 
+// Reflect tag changes made inside FileViewer back into the entries list and
+// the currently-selected file ref (which FileViewer renders).
+const handleViewerTagsUpdated = (newTags: number[]) => {
+  if (!selectedFile.value) return
+  const path = selectedFile.value.path
+  selectedFile.value.tags = newTags
+  const entry = entries.value.find(e => e.path === path)
+  if (entry) {
+    entry.tags = newTags
+  }
+}
+
 // Write operations
 const openCreateModal = (type: 'Directory' | 'File') => {
   createType.value = type
@@ -506,6 +518,7 @@ onMounted(() => {
       :share-id="selectedShare.id"
       :read-only="!canWrite"
       @close="closeFileViewer"
+      @tags-updated="handleViewerTagsUpdated"
     />
 
     <!-- Media Viewer Modal -->

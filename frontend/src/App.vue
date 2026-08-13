@@ -22,6 +22,7 @@ import Login from './components/Login.vue'
 import ChangePasswordDialog from './components/ChangePasswordDialog.vue'
 import { useAuth } from './composables/useAuth'
 import { api } from './utils/api'
+import { storageService } from './services/storage'
 
 const router = useRouter()
 const route = useRoute()
@@ -94,8 +95,7 @@ const fetchData = async () => {
   try {
     loading.value = true
     error.value = null
-    const response = await api.get<{ user: any; storages: any[] }>('/api/storage')
-    storages.value = response.storages
+    storages.value = await storageService.getStorages()
   } catch (err: any) {
     error.value = err.message
     // If we get an auth error, the token might be invalid

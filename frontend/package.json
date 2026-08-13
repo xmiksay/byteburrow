@@ -15,6 +15,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "dompurify": "^3.4.13",
     "highlight.js": "^11.11.1",
     "lucide-vue-next": "^0.363.0",
     "marked": "^17.0.1",

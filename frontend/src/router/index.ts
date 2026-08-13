@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import type { RouteRecordRaw } from 'vue-router'
+import { useAuth } from '../composables/useAuth'
 
 // Lazy load components for better performance
 const FileExplorer = () => import('../components/FileExplorer.vue')
@@ -93,6 +94,27 @@ const routes: RouteRecordRaw[] = [
 const router = createRouter({
     history: createWebHistory(),
     routes
+})
+
+// Auth guard: protect every route that isn't marked public. When the user
+// is unauthenticated, send them to the default `/files` route — App.vue
+// renders the login overlay there — and carry a `redirect` query so we can
+// bounce back to the requested page after a successful login.
+router.beforeEach((to) => {
+    if (to.meta.public) {
+        return true
+    }
+
+    const { isAuthenticated } = useAuth()
+    if (!isAuthenticated.value) {
+        // Avoid an infinite redirect loop when already heading to the default route.
+        if (to.path === '/files') {
+            return true
+        }
+        return { path: '/files', query: { redirect: to.fullPath } }
+    }
+
+    return true
 })
 
 // Update page title on route change

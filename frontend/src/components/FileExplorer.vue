@@ -210,6 +210,18 @@ const getTagName = (tagId: number) => {
   return allTags.value.find(t => t.id === tagId)?.name || `Tag ${tagId}`
 }
 
+// Reflect tag changes made inside FileViewer back into the entries list and
+// the currently-selected file ref (which FileViewer renders).
+const handleViewerTagsUpdated = (newTags: number[]) => {
+  if (!selectedFile.value) return
+  const path = selectedFile.value.path
+  selectedFile.value.tags = newTags
+  const entry = entries.value.find(e => e.path === path)
+  if (entry) {
+    entry.tags = newTags
+  }
+}
+
 onMounted(() => {
   fetchStorages()
   fetchTags()
@@ -457,6 +469,7 @@ const deleteEntry = async (entry: DirectoryEntry) => {
       :storage="selectedStorage"
       :entry="selectedFile"
       @close="selectedFile = null"
+      @tags-updated="handleViewerTagsUpdated"
     />
 
     <!-- Media Viewer Modal -->

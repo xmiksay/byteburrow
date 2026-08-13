@@ -55,6 +55,7 @@ async fn test_db() -> &'static DatabaseConnection {
                 trust_forwarded_headers: false,
                 face_match_threshold: 0.8,
                 face_match_margin: 0.05,
+                plugin: std::collections::HashMap::new(),
             }));
         });
 
@@ -131,8 +132,8 @@ async fn create_test_storage(
 fn make_state(db: DatabaseConnection) -> Arc<AppState> {
     use minijinja::Environment;
     let jinja = Environment::new();
-    let (_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    // JobSender is a type alias for mpsc::UnboundedSender<Job>; build one
+    let (_tx, _rx) = tokio::sync::mpsc::channel(16);
+    // JobSender is a type alias for mpsc::Sender<Job>; build one
     // directly. The receiver is intentionally dropped — no job runner spins
     // up in the test.
     let job_sender = _tx;
@@ -141,6 +142,7 @@ fn make_state(db: DatabaseConnection) -> Arc<AppState> {
         config: Config::get().as_ref().clone(),
         jinja,
         job_sender,
+        notify_reload: std::sync::Arc::new(tokio::sync::Notify::new()),
     })
 }
 
@@ -514,5 +516,66 @@ fn webdav_unauthenticated_rejected() {
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    });
+}
+
+/// Regression for H5: a directory listing must not let a filename containing
+/// `"` break out of the `href` attribute (attribute-breakout XSS). The href
+/// must be percent-encoded and the link text HTML-escaped.
+#[test]
+fn webdav_directory_listing_escapes_quote_in_filename() {
+    runtime().block_on(async {
+        let db = test_db().await;
+        let (user, password) = create_test_user(db, "dav_listing").await;
+        let group_id = create_test_group(db, "dav_listing_grp").await;
+        let storage = create_test_storage(db, user.id, group_id, "listing").await;
+        let state = make_state(db.clone());
+        let auth = (user.username.as_str(), password.as_str());
+
+        // PUT a file whose name contains a double quote (and a space, to check
+        // URL-validity). WebDAV PUT builds the path from the URI, so we encode
+        // the name in the request URI the way a client would.
+        let encoded = "evil%22%20xss.txt";
+        let put_uri = format!("/dav/storage/{}/{encoded}", storage.id);
+        let (status, _) = dav_request(
+            state.clone(),
+            "PUT",
+            &put_uri,
+            Some(auth),
+            &[],
+            b"pwned".to_vec(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        // GET the directory listing (the storage root).
+        let (status, body) = dav_request(
+            state.clone(),
+            "GET",
+            &format!("/dav/storage/{}/", storage.id),
+            Some(auth),
+            &[],
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let html = String::from_utf8_lossy(&body);
+
+        // The href must percent-encode the quote — no raw `"` inside the
+        // attribute value, so an injected attribute/script tag cannot form.
+        assert!(
+            html.contains("href=\"evil%22%20xss.txt\""),
+            "expected percent-encoded href in listing: {html}"
+        );
+        // The link text must HTML-escape the quote.
+        assert!(
+            html.contains("evil&quot; xss.txt"),
+            "expected HTML-escaped link text in listing: {html}"
+        );
+        // No injected attribute or tag may appear.
+        assert!(
+            !html.contains("onerror") && !html.contains("<script"),
+            "listing must not contain injected markup: {html}"
+        );
     });
 }

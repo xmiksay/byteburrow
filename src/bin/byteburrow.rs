@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use byteburrow::{
     config::Config, db_connect, inotify::InotifyHandler, job::JobRunner, migration::Migrator,
@@ -30,6 +31,12 @@ async fn main() {
         .await
         .expect("Failed to run migrations");
 
+    // Rehydrate the in-memory WebDAV lock map from the persisted `dav_lock`
+    // table so locks survive a restart (C4 Part C).
+    if let Err(e) = byteburrow::web::dav::util::load_active_locks(&db).await {
+        tracing::warn!("Failed to reload WebDAV locks from DB: {e}");
+    }
+
     // Load classifier plugins, forwarding the `[plugin]` config section
     // (from BYTEBURROW__PLUGIN__* env vars) into each plugin's `init`.
     let plugins =
@@ -38,7 +45,9 @@ async fn main() {
     plugins.log_summary();
 
     let (job_runner, job_sender) = JobRunner::new(db.clone(), plugins);
-    let inotify_handler = InotifyHandler::new(db.clone(), job_sender.clone());
+    let notify_reload = Arc::new(tokio::sync::Notify::new());
+    let inotify_handler =
+        InotifyHandler::new(db.clone(), job_sender.clone(), notify_reload.clone());
 
     // Run the job runner on a dedicated OS thread — it owns its own
     // low-priority tokio runtime and blocks until the channel closes.
@@ -51,6 +60,6 @@ async fn main() {
     // watcher, keeping request handling at normal OS priority.
     tokio::select! {
         _ = inotify_handler.run() => tracing::warn!("Inotify handler exited"),
-        _ = byteburrow::web::run(config, db, job_sender) => tracing::warn!("Web server exited"),
+        _ = byteburrow::web::run(config, db, job_sender, notify_reload) => tracing::warn!("Web server exited"),
     }
 }
