@@ -61,7 +61,7 @@ const fetchUsers = async () => {
   try {
     loading.value = true
     error.value = null
-    users.value = await api.get<UserResponse[]>('/api/user')
+    users.value = await api.getAll<UserResponse>('/api/user')
   } catch (err: any) {
     error.value = err.message
   } finally {

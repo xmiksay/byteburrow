@@ -1,6 +1,14 @@
 import { api } from '../utils/api'
 import type { Storage, CreateStorageRequest, UpdateStorageRequest, DirectoryListingResponse, MetaResponse } from '../types'
 
+/** Percent-encode each segment of a multi-segment path, preserving the `/` separators. */
+function encodePath(path: string): string {
+    return path
+        .split('/')
+        .map(segment => encodeURIComponent(segment))
+        .join('/')
+}
+
 export const storageService = {
     async getStorages(): Promise<Storage[]> {
         return api.getAll<Storage>('/api/storage')
@@ -19,12 +27,12 @@ export const storageService = {
     },
 
     async listDirectory(storageId: number, path: string = ''): Promise<DirectoryListingResponse> {
-        const encodedPath = path ? `/${path}` : ''
+        const encodedPath = path ? `/${encodePath(path)}` : ''
         return api.get<DirectoryListingResponse>(`/api/storage/${storageId}/list${encodedPath}`)
     },
 
     async getFileContent(storageId: number, path: string): Promise<string> {
-        const response = await fetch(`/api/storage/${storageId}/show/${path}`, {
+        const response = await fetch(`/api/storage/${storageId}/show/${encodePath(path)}`, {
             credentials: 'same-origin'
         })
         if (!response.ok) throw new Error('Failed to fetch file content')
@@ -32,35 +40,35 @@ export const storageService = {
     },
 
     async updateFileContent(storageId: number, path: string, content: string): Promise<{ message: string }> {
-        return api.putRaw<{ message: string }>(`/api/storage/${storageId}/update/${path}`, content)
+        return api.putRaw<{ message: string }>(`/api/storage/${storageId}/update/${encodePath(path)}`, content)
     },
 
     async createEntry(storageId: number, path: string, type: 'File' | 'Directory'): Promise<{ message: string }> {
-        return api.post<{ message: string }>(`/api/storage/${storageId}/create/${path}`, { entry_type: type })
+        return api.post<{ message: string }>(`/api/storage/${storageId}/create/${encodePath(path)}`, { entry_type: type })
     },
 
     async renameEntry(storageId: number, oldPath: string, newPath: string): Promise<{ message: string }> {
-        return api.post<{ message: string }>(`/api/storage/${storageId}/rename/${oldPath}`, { new_path: newPath })
+        return api.post<{ message: string }>(`/api/storage/${storageId}/rename/${encodePath(oldPath)}`, { new_path: newPath })
     },
 
     async removeEntry(storageId: number, path: string): Promise<{ message: string }> {
-        return api.delete<{ message: string }>(`/api/storage/${storageId}/remove/${path}`)
+        return api.delete<{ message: string }>(`/api/storage/${storageId}/remove/${encodePath(path)}`)
     },
 
     async updateEntryTags(storageId: number, path: string, tags: number[]): Promise<{ message: string }> {
-        return api.put<{ message: string }>(`/api/storage/${storageId}/tags/${path}`, { tags })
+        return api.put<{ message: string }>(`/api/storage/${storageId}/tags/${encodePath(path)}`, { tags })
     },
 
     async triggerHash(storageId: number, path: string): Promise<{ message: string }> {
-        return api.post<{ message: string }>(`/api/storage/${storageId}/hash/${path}?mode=force`)
+        return api.post<{ message: string }>(`/api/storage/${storageId}/hash/${encodePath(path)}?mode=force`)
     },
 
     async shareEntry(storageId: number, path: string, data: any): Promise<any> {
-        return api.post<any>(`/api/storage/${storageId}/share/${path}`, data)
+        return api.post<any>(`/api/storage/${storageId}/share/${encodePath(path)}`, data)
     },
 
     async getShares(storageId: number, path: string): Promise<any[]> {
-        return api.get<any[]>(`/api/storage/${storageId}/share/${path}`)
+        return api.get<any[]>(`/api/storage/${storageId}/share/${encodePath(path)}`)
     },
 
     async getSharesWithMe(): Promise<any[]> {
@@ -68,12 +76,12 @@ export const storageService = {
     },
 
     async listShareDirectory(shareId: number | string, path: string = ''): Promise<DirectoryListingResponse> {
-        const encodedPath = path ? `/${path}` : ''
+        const encodedPath = path ? `/${encodePath(path)}` : ''
         return api.get<DirectoryListingResponse>(`/api/storage/share/${shareId}/list${encodedPath}`)
     },
 
     async getShareFileContent(shareId: number | string, path: string): Promise<string> {
-        const response = await fetch(`/api/storage/share/${shareId}/show/${path}`, {
+        const response = await fetch(`/api/storage/share/${shareId}/show/${encodePath(path)}`, {
             credentials: 'same-origin'
         })
         if (!response.ok) throw new Error('Failed to fetch file content')
@@ -98,15 +106,15 @@ export const storageService = {
 
     // Share-based write operations
     async createShareEntry(shareId: number | string, path: string, entryType: 'Directory' | 'File'): Promise<{ message: string }> {
-        return api.post<{ message: string }>(`/api/storage/share/${shareId}/create/${path}`, { entry_type: entryType })
+        return api.post<{ message: string }>(`/api/storage/share/${shareId}/create/${encodePath(path)}`, { entry_type: entryType })
     },
 
     async renameShareEntry(shareId: number | string, oldPath: string, newPath: string): Promise<{ message: string }> {
-        return api.post<{ message: string }>(`/api/storage/share/${shareId}/rename/${oldPath}`, { new_path: newPath })
+        return api.post<{ message: string }>(`/api/storage/share/${shareId}/rename/${encodePath(oldPath)}`, { new_path: newPath })
     },
 
     async removeShareEntry(shareId: number | string, path: string): Promise<{ message: string }> {
-        return api.delete<{ message: string }>(`/api/storage/share/${shareId}/remove/${path}`)
+        return api.delete<{ message: string }>(`/api/storage/share/${shareId}/remove/${encodePath(path)}`)
     },
 
     async updateShareFileContent(shareId: number | string, path: string, content: string | Blob): Promise<{ message: string }> {
@@ -116,7 +124,7 @@ export const storageService = {
             headers['Content-Type'] = 'text/plain'
         }
 
-        const response = await fetch(`/api/storage/share/${shareId}/update/${path}`, {
+        const response = await fetch(`/api/storage/share/${shareId}/update/${encodePath(path)}`, {
             method: 'PUT',
             headers,
             credentials: 'same-origin',
@@ -130,7 +138,7 @@ export const storageService = {
     },
 
     async updateShareEntryTags(shareId: number | string, path: string, tags: number[]): Promise<{ message: string }> {
-        return api.put<{ message: string }>(`/api/storage/share/${shareId}/tags/${path}`, { tags })
+        return api.put<{ message: string }>(`/api/storage/share/${shareId}/tags/${encodePath(path)}`, { tags })
     },
 
     async getMeta(hash: number[]): Promise<MetaResponse | null> {

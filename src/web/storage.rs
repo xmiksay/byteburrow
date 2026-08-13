@@ -143,7 +143,7 @@ fn dispatch_hash_jobs(state: &AppState, entries: &[DirectoryEntry]) {
         .for_each(|e| {
             state
                 .job_sender
-                .send(crate::job::Job::ProcessFile {
+                .try_send(crate::job::Job::ProcessFile {
                     storage_id: e.storage_id,
                     path: e.path.clone(),
                     mode: crate::job::ProcessMode::Auto,
@@ -161,8 +161,7 @@ async fn serve_file_response(
     let mut service = ServeFile::new(full_path);
     let mut res = Service::<Request<Body>>::call(&mut service, req)
         .await
-        .map_err(|e| match e {})
-        .unwrap()
+        .unwrap_or_else(|e| match e {})
         .into_response();
     res.headers_mut().insert(
         header::CONTENT_TYPE,
@@ -245,6 +244,40 @@ fn join_share_path(base_path: &str, sub_path: &str) -> String {
     }
 }
 
+/// Collapse `.` and `..` segments lexically on a relative path string. Empty
+/// and `.` segments are dropped; `..` pops the last accumulated segment. A `..`
+/// that would pop above the root is also dropped — we are rooted at the share
+/// base, so an escape surfaces as a normalized result that no longer shares the
+/// base's prefix (and is therefore rejected by [`require_within_share`]). (H6)
+fn normalize_lexical(path: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    for seg in path.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                out.pop();
+            }
+            s => out.push(s),
+        }
+    }
+    out.join("/")
+}
+
+/// Verify that `full_path` is lexically contained within `base_path`'s subtree
+/// (i.e. equals `base_path` or is nested under it), after normalizing `..`
+/// segments. Returns a forbidden error otherwise. This confines share write
+/// handlers to the shared folder even when `..` still resolves inside the
+/// wider storage root. (H6)
+fn require_within_share(base_path: &str, full_path: &str) -> Result<(), ApiError> {
+    let base = normalize_lexical(base_path.trim_matches('/'));
+    let full = normalize_lexical(full_path.trim_matches('/'));
+    if full == base || full.starts_with(&format!("{base}/")) || base.is_empty() {
+        Ok(())
+    } else {
+        Err(forbidden("Path escapes the shared folder"))
+    }
+}
+
 /// Upsert the `tags` column of the `meta` row keyed by `entry.hash`,
 /// preserving any existing `keywords`/`custom` classification data.
 /// Fails with 409 if the entry hasn't been hashed yet (tags are
@@ -291,6 +324,42 @@ async fn set_entry_tags(
 
 /// Create storage router with all storage-related endpoints
 pub fn router() -> Router<Arc<AppState>> {
+    // Share-based access routes — every handler resolves the share via
+    // `get_share_context`, where a public token is accepted without auth.
+    // That makes the `{share_id}` segment a brute-force/enumeration target
+    // (H16), so this group is wrapped in the per-IP share rate limiter.
+    // Authenticated share-management routes (`/share`, `/share/with-me`,
+    // `/:id/share/…`) deliberately live outside this group and are not
+    // throttled, since they require a valid session.
+    let share_access = Router::new()
+        .route(
+            "/share/:share_id",
+            get(get_share_info_handler)
+                .put(update_share_handler)
+                .delete(delete_share_handler),
+        )
+        .route("/share/:share_id/list", get(share_list_root_handler))
+        .route("/share/:share_id/list/", get(share_list_root_handler))
+        .route("/share/:share_id/list/*path", get(share_list_handler))
+        .route("/share/:share_id/index", get(share_index_root_handler))
+        .route("/share/:share_id/index/", get(share_index_root_handler))
+        .route("/share/:share_id/index/*path", get(share_index_handler))
+        .route("/share/:share_id/show/*path", get(share_show_handler))
+        .route("/share/:share_id/update/*path", put(share_update_handler))
+        .route("/share/:share_id/create/*path", post(share_create_handler))
+        .route("/share/:share_id/rename/*path", post(share_rename_handler))
+        .route(
+            "/share/:share_id/remove/*path",
+            axum::routing::delete(share_remove_handler),
+        )
+        .route(
+            "/share/:share_id/tags/*path",
+            put(share_update_entry_tags_handler),
+        )
+        .layer(axum::middleware::from_fn(
+            crate::web::rate_limit::share_rate_limit,
+        ));
+
     Router::new()
         .route("/", get(list_storages_handler).post(create_storage_handler))
         .route("/share", get(list_all_user_shares_handler))
@@ -320,31 +389,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/:id/tags/*path", put(update_entry_tags_handler))
         .route("/:id/share/*path", get(list_shares_handler))
         .route("/:id/share/*path", post(share_entry_handler))
-        .route(
-            "/share/:share_id",
-            get(get_share_info_handler)
-                .put(update_share_handler)
-                .delete(delete_share_handler),
-        )
-        // Share-based access routes
-        .route("/share/:share_id/list", get(share_list_root_handler))
-        .route("/share/:share_id/list/", get(share_list_root_handler))
-        .route("/share/:share_id/list/*path", get(share_list_handler))
-        .route("/share/:share_id/index", get(share_index_root_handler))
-        .route("/share/:share_id/index/", get(share_index_root_handler))
-        .route("/share/:share_id/index/*path", get(share_index_handler))
-        .route("/share/:share_id/show/*path", get(share_show_handler))
-        .route("/share/:share_id/update/*path", put(share_update_handler))
-        .route("/share/:share_id/create/*path", post(share_create_handler))
-        .route("/share/:share_id/rename/*path", post(share_rename_handler))
-        .route(
-            "/share/:share_id/remove/*path",
-            axum::routing::delete(share_remove_handler),
-        )
-        .route(
-            "/share/:share_id/tags/*path",
-            put(share_update_entry_tags_handler),
-        )
+        .merge(share_access)
         .route("/thumbnail/:hash/:size", get(thumbnail_handler))
         .route("/meta/:hash", get(get_meta_handler))
 }
@@ -979,6 +1024,9 @@ pub(crate) async fn create_entry_handler(
                     .set_notify(&state.db, &path, true)
                     .await
                     .map_err(|e| internal(format!("Error setting notify: {e}")))?;
+                // H12: trigger an immediate inotify reload so the new watch
+                // dir is picked up without waiting for the 15s timer.
+                state.notify_reload.notify_one();
             }
         }
         EntryType::File => {
@@ -2011,6 +2059,7 @@ pub(crate) async fn share_update_handler(
     }
 
     let full_path = join_share_path(&entry_model.path, &path);
+    require_within_share(&entry_model.path, &full_path)?;
 
     storage
         .save_file(&full_path, &body)
@@ -2050,6 +2099,7 @@ pub(crate) async fn share_create_handler(
     }
 
     let full_path = join_share_path(&entry_model.path, &path);
+    require_within_share(&entry_model.path, &full_path)?;
 
     match payload.entry_type {
         EntryType::Directory => {
@@ -2102,6 +2152,8 @@ pub(crate) async fn share_rename_handler(
     let base_path = entry_model.path.trim_matches('/');
     let old_full_path = join_share_path(base_path, &path);
     let new_full_path = join_share_path(base_path, &payload.new_path);
+    require_within_share(&entry_model.path, &old_full_path)?;
+    require_within_share(&entry_model.path, &new_full_path)?;
 
     storage
         .rename_entry(&old_full_path, &new_full_path)
@@ -2145,6 +2197,7 @@ pub(crate) async fn share_remove_handler(
     } else {
         join_share_path(base_path, sub_path_clean)
     };
+    require_within_share(&entry_model.path, &full_path)?;
 
     storage
         .remove_entry(&full_path)
@@ -2238,19 +2291,19 @@ pub(crate) async fn trigger_hash_handler(
 
     state
         .job_sender
-        .send(crate::job::Job::ProcessFile {
+        .try_send(crate::job::Job::ProcessFile {
             storage_id,
             path: path.trim_matches('/').to_string(),
             mode,
         })
-        .map_err(|_| internal("Failed to queue job"))?;
+        .map_err(|_| internal("Job queue is full or closed"))?;
 
     Ok(message("Hash calculation queued"))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_share_expiry;
+    use super::{join_share_path, normalize_lexical, require_within_share, resolve_share_expiry};
 
     // Issue #9 / B8: create and update share one expiry contract.
     #[test]
@@ -2272,5 +2325,49 @@ mod tests {
     #[test]
     fn absent_never_expires() {
         assert_eq!(resolve_share_expiry(None), None);
+    }
+
+    // H6: share-subtree write containment helpers.
+    #[test]
+    fn normalize_lexical_drops_dot_and_resolves_dotdot() {
+        assert_eq!(normalize_lexical("a/b"), "a/b");
+        assert_eq!(normalize_lexical("a/./b"), "a/b");
+        assert_eq!(normalize_lexical("a/sub/../file"), "a/file");
+        // A leading ".." pops nothing (rooted at the share base) and is dropped.
+        assert_eq!(normalize_lexical("../sibling"), "sibling");
+        assert_eq!(normalize_lexical("dir_a/../../dir_b/file"), "dir_b/file");
+        assert_eq!(normalize_lexical(""), "");
+        assert_eq!(normalize_lexical("/"), "");
+    }
+
+    #[test]
+    fn require_within_share_allows_descendants() {
+        // base "dir_a", plain file
+        let full = join_share_path("dir_a", "file.txt");
+        assert!(require_within_share("dir_a", &full).is_ok());
+        // base "dir_a", nested file with internal ".."
+        let full = join_share_path("dir_a", "sub/../file");
+        assert!(require_within_share("dir_a", &full).is_ok());
+        // base "dir_a", exactly the base
+        let full = join_share_path("dir_a", "");
+        assert!(require_within_share("dir_a", &full).is_ok());
+    }
+
+    #[test]
+    fn require_within_share_rejects_escape() {
+        // dir_a/../../dir_b/file -> dir_b/file -> not under dir_a
+        let full = join_share_path("dir_a", "../../dir_b/file");
+        assert!(require_within_share("dir_a", &full).is_err());
+        // ../sibling escapes to a sibling of the base
+        let full = join_share_path("dir_a", "../sibling");
+        assert!(require_within_share("dir_a", &full).is_err());
+    }
+
+    #[test]
+    fn require_within_share_empty_base_shares_whole_storage() {
+        // base "" (share of storage root): anything is allowed.
+        let full = join_share_path("", "anywhere/file");
+        assert!(require_within_share("", &full).is_ok());
+        assert!(require_within_share("", "dir_b/file").is_ok());
     }
 }

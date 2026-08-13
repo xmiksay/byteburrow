@@ -1,25 +1,30 @@
-use std::sync::Mutex;
+use std::io::Cursor;
+use std::time::Duration;
 
 use byteburrow_plugin_api::*;
 use image::DynamicImage;
-use tract_onnx::prelude::*;
 
-/// FaceONNX recognition_resnet27: input 1x3x128x128, output 512-dim embedding
+/// FaceONNX recognition_resnet27: input 1x3x128x128, output 512-dim embedding.
 const MODEL_INPUT_SIZE: u32 = 128;
-const DEFAULT_MODEL_PATH: &str = "/etc/byteburrow/models/recognition_resnet27.onnx";
+const DEFAULT_ENDPOINT: &str = "http://localhost:8090/";
+const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
 /// Identity of the vector space these embeddings live in. Persisted with every
-/// embedding so the recognition side can refuse to compare vectors produced by a
-/// different model or a different pre/post-processing pipeline. Bump the version
-/// whenever the model file OR the pre-processing here changes in a way that
-/// shifts the embedding space.
+/// embedding so the recognition side can refuse to compare vectors produced by
+/// a different model. The HTTP service (`plugins/face-embedder/service`) uses
+/// the same FaceONNX recognition_resnet27 model, so the identity matches.
 const MODEL_ID: &str = "faceonnx-recognition-resnet27";
 const MODEL_VERSION: &str = "1";
 
-type ModelType = SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>;
-
+/// Delegates face embedding to an external HTTP service. The endpoint receives
+/// a cropped+resized face image (JPEG bytes) and returns `{"embedding": [...]}`.
+///
+/// Uses a single shared [`ureq::Agent`] (internally Arc'd, `Send + Sync`) — no
+/// `Mutex`, no per-request Tokio runtime (H10/H11). The agent is constructed
+/// once in `init`.
 struct FaceEmbedder {
-    model: Mutex<Option<ModelType>>,
+    endpoint: String,
+    agent: Option<ureq::Agent>,
 }
 
 unsafe impl Send for FaceEmbedder {}
@@ -31,7 +36,11 @@ impl ClassifierPlugin for FaceEmbedder {
     }
 
     fn version(&self) -> &str {
-        "0.1.0"
+        "0.2.0"
+    }
+
+    fn api_version(&self) -> (u32, u32) {
+        (API_VERSION_MAJOR, API_VERSION_MINOR)
     }
 
     fn mime_interests(&self) -> &[&str] {
@@ -47,29 +56,29 @@ impl ClassifierPlugin for FaceEmbedder {
     }
 
     fn init(&mut self, config: &PluginConfig) -> Result<(), String> {
-        let model_path = config
-            .get("face_embed_model")
+        self.endpoint = config
+            .get("face_embed_endpoint")
             .cloned()
-            .or_else(|| std::env::var("BYTEBURROW_FACE_EMBED_MODEL").ok())
-            .unwrap_or_else(|| DEFAULT_MODEL_PATH.to_string());
+            .or_else(|| std::env::var("BYTEBURROW__FACE_EMBED_ENDPOINT").ok())
+            .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string());
 
-        let model = tract_onnx::onnx()
-            .model_for_path(&model_path)
-            .map_err(|e| format!("Failed to load ONNX model from {model_path}: {e}"))?
-            .with_input_fact(
-                0,
-                InferenceFact::dt_shape(
-                    f32::datum_type(),
-                    tvec![1, 3, MODEL_INPUT_SIZE as i64, MODEL_INPUT_SIZE as i64],
-                ),
-            )
-            .map_err(|e| format!("Failed to set input shape: {e}"))?
-            .into_optimized()
-            .map_err(|e| format!("Failed to optimize model: {e}"))?
-            .into_runnable()
-            .map_err(|e| format!("Failed to make model runnable: {e}"))?;
+        let timeout_secs = config
+            .get("face_embed_timeout")
+            .and_then(|s| s.parse::<u64>().ok())
+            .or_else(|| {
+                std::env::var("BYTEBURROW__FACE_EMBED_TIMEOUT")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+            })
+            .unwrap_or(DEFAULT_TIMEOUT_SECS);
 
-        *self.model.lock().unwrap() = Some(model);
+        let agent = ureq::Agent::new_with_config(
+            ureq::config::Config::builder()
+                .timeout_global(Some(Duration::from_secs(timeout_secs)))
+                .build(),
+        );
+
+        self.agent = Some(agent);
         Ok(())
     }
 
@@ -91,6 +100,11 @@ impl ClassifierPlugin for FaceEmbedder {
 
         // Apply EXIF orientation
         let img = apply_orientation(img, get_orientation(ctx.custom));
+
+        let agent = match &self.agent {
+            Some(a) => a,
+            None => return Err("Face embedder not initialized".to_string()),
+        };
 
         let mut embeddings = Vec::new();
 
@@ -117,7 +131,7 @@ impl ClassifierPlugin for FaceEmbedder {
                 image::imageops::FilterType::Triangle,
             );
 
-            match self.compute_embedding(&resized) {
+            match compute_embedding(agent, &self.endpoint, &resized) {
                 Ok(embedding) => {
                     embeddings.push(serde_json::json!({
                         "face_index": i,
@@ -148,50 +162,28 @@ impl ClassifierPlugin for FaceEmbedder {
     }
 }
 
-impl FaceEmbedder {
-    fn compute_embedding(&self, img: &DynamicImage) -> Result<Vec<f32>, String> {
-        let rgb = img.to_rgb8();
-        let (w, h) = (rgb.width() as usize, rgb.height() as usize);
+/// POST the cropped face (as JPEG) to the embedding endpoint and parse the
+/// `{"embedding": [...]}` response. Synchronous via `ureq` — no Tokio runtime
+/// involved (H10), and `agent` is shared without a lock (H11).
+fn compute_embedding(
+    agent: &ureq::Agent,
+    endpoint: &str,
+    img: &DynamicImage,
+) -> Result<Vec<f32>, String> {
+    let mut buffer = Vec::new();
+    img.write_to(&mut Cursor::new(&mut buffer), image::ImageFormat::Jpeg)
+        .map_err(|e| format!("Failed to encode image: {e}"))?;
 
-        // Build CHW tensor in BGR order, normalized: (pixel - 127.5) / 128.0
-        // FaceONNX uses BGR input with this normalization
-        let mut data = vec![0f32; 3 * h * w];
-        for y_pos in 0..h {
-            for x_pos in 0..w {
-                let pixel = rgb.get_pixel(x_pos as u32, y_pos as u32);
-                let idx = y_pos * w + x_pos;
-                // Channel order: BGR (Blue=ch0, Green=ch1, Red=ch2)
-                data[idx] = (pixel[2] as f32 - 127.5) / 128.0; // B
-                data[h * w + idx] = (pixel[1] as f32 - 127.5) / 128.0; // G
-                data[2 * h * w + idx] = (pixel[0] as f32 - 127.5) / 128.0; // R
-            }
-        }
+    let response: EmbeddingResponse = agent
+        .post(endpoint)
+        .header("Content-Type", "image/jpeg")
+        .send(&buffer)
+        .map_err(|e| format!("HTTP request failed: {e}"))?
+        .body_mut()
+        .read_json()
+        .map_err(|e| format!("Failed to parse embedding response: {e}"))?;
 
-        let tensor: Tensor =
-            tract_onnx::prelude::tract_ndarray::Array4::from_shape_vec((1, 3, h, w), data)
-                .map_err(|e| format!("Tensor creation failed: {e}"))?
-                .into();
-
-        let guard = self.model.lock().unwrap();
-        let model = guard.as_ref().ok_or("Model not initialized")?;
-
-        let result = model
-            .run(tvec![tensor.into()])
-            .map_err(|e| format!("Inference failed: {e}"))?;
-
-        let output = result[0]
-            .to_array_view::<f32>()
-            .map_err(|e| format!("Output extraction failed: {e}"))?;
-
-        // L2 normalize the embedding
-        let raw: Vec<f32> = output.iter().copied().collect();
-        let norm: f32 = raw.iter().map(|v| v * v).sum::<f32>().sqrt();
-        if norm > 0.0 {
-            Ok(raw.iter().map(|v| v / norm).collect())
-        } else {
-            Ok(raw)
-        }
-    }
+    Ok(response.embedding)
 }
 
 fn apply_orientation(img: DynamicImage, orientation: u64) -> DynamicImage {
@@ -215,8 +207,14 @@ fn get_orientation(custom: &std::collections::HashMap<String, serde_json::Value>
         .unwrap_or(1)
 }
 
+#[derive(serde::Deserialize)]
+struct EmbeddingResponse {
+    embedding: Vec<f32>,
+}
+
 declare_plugin!(FaceEmbedder {
-    model: Mutex::new(None),
+    endpoint: String::new(),
+    agent: None,
 });
 
 #[cfg(test)]

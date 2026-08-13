@@ -3,7 +3,7 @@ name = "byteburrow-plugin-face-embed"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-description = "Face embedding plugin for ByteBurrow — local inference via tract"
+description = "Face embedding plugin for ByteBurrow — remote inference via HTTP"
 
 [lib]
 crate-type = ["cdylib"]
@@ -12,4 +12,5 @@ crate-type = ["cdylib"]
 byteburrow-plugin-api = { path = "../../byteburrow-plugin-api" }
 image = { workspace = true }
 serde_json = { workspace = true }
-tract-onnx = "0.21"
+serde = { workspace = true, features = ["derive"] }
+ureq = { version = "3", features = ["json"] }

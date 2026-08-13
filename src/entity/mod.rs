@@ -1,4 +1,5 @@
 pub mod contact;
+pub mod dav_lock;
 pub mod entry;
 pub mod face_reference;
 pub mod group;

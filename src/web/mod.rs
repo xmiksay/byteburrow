@@ -1,6 +1,7 @@
 pub mod dav;
 pub mod group;
 pub mod photo;
+pub mod rate_limit;
 pub mod storage;
 pub mod tag;
 pub mod user;
@@ -12,7 +13,8 @@ use crate::job::JobSender;
 use crate::storage::format_size;
 use axum::{
     extract::State,
-    http::{header, StatusCode, Uri},
+    http::{header, HeaderValue, Method, StatusCode, Uri},
+    middleware::from_fn,
     response::IntoResponse,
     routing::get,
     Json, Router,
@@ -180,6 +182,14 @@ pub enum ApiError {
     UnauthorizedMsg { msg: String },
     /// The requested share has expired (410 Gone).
     Gone { msg: String },
+    /// The resource is locked by another user (423 Locked). Carries the
+    /// conflicting lock so the body can include its token per RFC 4918 §10.6.
+    /// (C4 Part B.)
+    Locked { lock_token: String },
+    /// The caller has sent too many requests and is being throttled
+    /// (429 Too Many Requests). Carries the window length so the response can
+    /// advise the client how long to wait via `Retry-After`. (M1 + H16.)
+    RateLimited { retry_after_secs: u64 },
     /// Any other internal failure (500 Internal Server Error).
     Internal { msg: String },
 }
@@ -207,6 +217,46 @@ impl IntoResponse for ApiError {
             ),
             ApiError::UnauthorizedMsg { msg } => (StatusCode::UNAUTHORIZED, msg.clone()),
             ApiError::Gone { msg } => (StatusCode::GONE, msg.clone()),
+            ApiError::Locked { lock_token } => {
+                // RFC 4918 §10.6: a 423 response carries an XML error body
+                // naming the lock that blocked the request.
+                let body = format!(
+                    "<?xml version=\"1.0\" encoding=\"utf-8\"?>\
+                     <D:error xmlns:D=\"DAV:\">\
+                     <D:lock-token-submitted>\
+                     <D:locktoken><D:href>{token}</D:href></D:locktoken>\
+                     </D:lock-token-submitted>\
+                     </D:error>",
+                    token = lock_token
+                        .replace('&', "&amp;")
+                        .replace('<', "&lt;")
+                        .replace('>', "&gt;")
+                );
+                let mut resp = (
+                    StatusCode::LOCKED,
+                    [(header::CONTENT_TYPE, "application/xml; charset=utf-8")],
+                )
+                    .into_response();
+                *resp.body_mut() = axum::body::Body::from(body);
+                return resp;
+            }
+            ApiError::RateLimited { retry_after_secs } => {
+                // 429 Too Many Requests with a `Retry-After` hint (RFC 9110
+                // §15.6.4) so well-behaved clients back off for the configured
+                // window before retrying.
+                let body = Json(ErrorResponse {
+                    error: "Too many requests".to_string(),
+                });
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [(
+                        header::RETRY_AFTER,
+                        HeaderValue::from_str(&retry_after_secs.to_string()).unwrap(),
+                    )],
+                    body,
+                )
+                    .into_response();
+            }
             ApiError::Internal { msg } => {
                 tracing::error!("Internal error: {msg}");
                 (StatusCode::INTERNAL_SERVER_ERROR, msg.clone())
@@ -274,6 +324,13 @@ pub fn internal<S: Into<String>>(msg: S) -> ApiError {
 /// Construct an unauthorized error (401 + WWW-Authenticate) with a message.
 pub fn unauthorized_msg<S: Into<String>>(msg: S) -> ApiError {
     ApiError::UnauthorizedMsg { msg: msg.into() }
+}
+
+/// Construct a rate-limited error (429 + `Retry-After`). `retry_after_secs`
+/// should be the limiter's window length, so well-behaved clients know how long
+/// to back off before retrying.
+pub fn rate_limited(retry_after_secs: u64) -> ApiError {
+    ApiError::RateLimited { retry_after_secs }
 }
 
 // ---------------------------------------------------------------------------
@@ -464,6 +521,38 @@ pub async fn require_storage_access(
     }
 
     Err(forbidden("Access denied to this storage"))
+}
+
+/// Load the set of storage ids a non-admin user is authorized to *see*
+/// (for listing purposes, mirroring [`require_storage_access`]): they own
+/// the storage, are in its default group, or have a share referencing any
+/// entry in it.
+///
+/// Returns `Ok(None)` for admins — meaning "no filter, all storages". For
+/// non-admins returns `Ok(Some(ids))`, which is empty when the user has
+/// access to no storage at all. Callers use the result to scope photo
+/// listings (see `src/web/photo.rs`): a photo is visible to a non-admin iff
+/// at least one of its entries lives in an accessible storage.
+pub async fn accessible_storage_ids(
+    auth: &Auth,
+    db: &DatabaseConnection,
+) -> Result<Option<Vec<i32>>, ApiError> {
+    if auth.user.admin {
+        return Ok(None);
+    }
+    let user_id = auth.user.id;
+    let groups = user_group_ids(db, user_id).await?;
+
+    let mut ids = Vec::new();
+    for storage in crate::entity::storage::Entity::find().all(db).await? {
+        if is_owner(&storage, user_id)
+            || groups.contains(&storage.default_group)
+            || has_share_for_storage(db, storage.id, user_id, &groups).await?
+        {
+            ids.push(storage.id);
+        }
+    }
+    Ok(Some(ids))
 }
 
 /// The user is the storage's default owner.
@@ -679,6 +768,10 @@ pub struct AppState {
     pub config: Config,
     pub jinja: Environment<'static>,
     pub job_sender: JobSender,
+    /// Signal to the inotify handler that watched entries changed and should
+    /// be reloaded immediately (H12 — avoids up to a 60s delay before a newly
+    /// watched directory is actually watched).
+    pub notify_reload: Arc<tokio::sync::Notify>,
 }
 
 /// OpenAPI documentation
@@ -845,7 +938,257 @@ impl Modify for SecurityAddon {
     }
 }
 
-pub async fn run(config: Config, db: DatabaseConnection, job_sender: JobSender) {
+// ---------------------------------------------------------------------------
+// Stateless CSRF defense (C5)
+// ---------------------------------------------------------------------------
+//
+// `SameSite=Strict` + `HttpOnly` cookies mitigate CSRF at the browser level,
+// but if an operator ever opens `CORS_ALLOWED_ORIGINS` broadly (the CORS layer
+// uses `allow_credentials(true)`), credentialed cross-origin mutation becomes
+// possible. This is a server-side, stateless, OWASP-recommended backstop using
+// the `Sec-Fetch-Site` header (primary) with an `Origin` fallback. No tokens,
+// no storage, no frontend changes.
+//
+// Only unsafe methods (POST/PUT/DELETE/PATCH) are checked; safe methods and
+// OPTIONS preflight always pass through.
+
+/// An HTTP method that mutates server state and therefore requires a CSRF
+/// check. GET/HEAD/OPTIONS/TRACE are never checked.
+fn is_unsafe_method(method: &Method) -> bool {
+    matches!(
+        *method,
+        Method::POST | Method::PUT | Method::DELETE | Method::PATCH
+    )
+}
+
+/// Derive the server's own origin (scheme + host + port, no path) from
+/// `base_url`. Returns the trimmed origin string, or the raw `base_url` if it
+/// has no path component to strip (the common case where `base_url` is already
+/// just an origin like `http://localhost:3000`).
+fn origin_from_base_url(base_url: &str) -> String {
+    // base_url is `http(s)://host[:port]` — almost always already origin-only.
+    // Strip a trailing path/query if one is present.
+    let after_scheme = base_url.split("://").nth(1).unwrap_or(base_url);
+    let scheme_prefix_len = base_url.len() - after_scheme.len();
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    base_url[..scheme_prefix_len + authority.len()].to_owned()
+}
+
+/// The pure decision core of the CSRF guard. Extracted so it can be unit-tested
+/// in isolation without spinning up a server.
+///
+/// Inputs:
+/// - `method`: the HTTP method.
+/// - `sec_fetch_site`: the value of the `Sec-Fetch-Site` request header, if
+///   the client sent one.
+/// - `origin`: the value of the `Origin` request header, if present.
+/// - `own_origin`: the server's own origin derived from `base_url`.
+/// - `allowed_origins`: the trusted cross-origin allowlist (from
+///   `cors_allowed_origins`), as an iterator of trimmed origin strings.
+///
+/// Returns `true` to allow, `false` to reject with 403.
+fn csrf_decision<'a, I>(
+    method: &Method,
+    sec_fetch_site: Option<&str>,
+    origin: Option<&str>,
+    own_origin: &str,
+    allowed_origins: I,
+) -> bool
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    // Safe methods are never checked.
+    if !is_unsafe_method(method) {
+        return true;
+    }
+
+    // 1. Sec-Fetch-Site is the primary signal (modern browsers send it on all
+    //    fetches). It is unspoofable from a cross-origin context.
+    if let Some(site) = sec_fetch_site {
+        return matches!(site, "same-origin" | "same-site" | "none");
+    }
+
+    // 2. No Sec-Fetch-Site → either a non-browser client (curl, desktop DAV
+    //    app) or an older browser. Fall back to Origin.
+    let Some(origin) = origin else {
+        // No Origin header at all → legitimate non-browser API client. Allow.
+        return true;
+    };
+
+    // Origin present: allow if it is our own origin or explicitly trusted.
+    origin == own_origin || allowed_origins.into_iter().any(|o| o == origin)
+}
+
+/// The `Origin`/`Sec-Fetch-Site` headers are case-insensitive names but we read
+/// them once here to avoid repeating the lookup. [`HeaderMap::get`] returns the
+/// first value; both headers are single-valued in practice.
+fn read_csrf_headers(headers: &axum::http::HeaderMap) -> (Option<String>, Option<String>) {
+    let sec_fetch_site = headers
+        .get("sec-fetch-site")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let origin = headers
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    (sec_fetch_site, origin)
+}
+
+/// Axum middleware: stateless CSRF guard for unsafe methods.
+///
+/// See [`csrf_decision`] for the decision logic. Reads config from the global
+/// `Config` singleton (the server sets it before serving).
+async fn csrf_guard(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let method = request.method().clone();
+
+    if !is_unsafe_method(&method) {
+        return next.run(request).await;
+    }
+
+    let (sec_fetch_site, origin) = read_csrf_headers(request.headers());
+    let config = Config::get();
+    let own_origin = origin_from_base_url(&config.base_url);
+    let allowed: Vec<&str> = config
+        .cors_allowed_origins
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let allowed_decision = csrf_decision(
+        &method,
+        sec_fetch_site.as_deref(),
+        origin.as_deref(),
+        &own_origin,
+        allowed.iter().copied(),
+    );
+
+    if allowed_decision {
+        next.run(request).await
+    } else {
+        (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Cross-site request blocked".to_string(),
+            }),
+        )
+            .into_response()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Security response headers (M2) + HSTS
+// ---------------------------------------------------------------------------
+//
+// A single `from_fn` middleware stamps a baseline set of browser security
+// headers on *every* response (200s, 4xx from CSRF/CORS, 5xx errors). Being
+// the outermost layer, it runs after TraceLayer/CORS/CSRF and decorates even
+// short-circuited responses. The heavy lifting is split into pure helpers so
+// the HSTS conditional and the exact directive strings are unit-testable
+// without a server.
+//
+// `Referrer-Policy: no-referrer` doubles as the H16 fix: share tokens ride in
+// the URL path (`/s/<token>`), and `no-referrer` guarantees no `Referer` header
+// leaks them to any third-party origin the rendered page might contact.
+
+/// `Strict-Transport-Security` value, sent only over HTTPS deployments.
+///
+/// HSTS is a *positive* instruction: a browser that sees it over plain HTTP
+/// would simply ignore it, but a man-in-the-middle on the first HTTP hop could
+/// strip it. We therefore only emit it when the operator has explicitly told us
+/// the service is fronted by HTTPS (`base_url` starts with `https://`), so we
+/// never imply a guarantee the deployment can't back up.
+fn hsts_header(base_url: &str) -> Option<&'static str> {
+    base_url
+        .starts_with("https://")
+        .then_some("max-age=31536000; includeSubDomains")
+}
+
+/// Strict Content-Security-Policy.
+///
+/// `frontend/dist/index.html` references only an external `type="module"`
+/// script under `/assets/` — no inline `<script>`, no inline event handlers —
+/// so `script-src 'self'` is safe *without* `'unsafe-inline'`. This is
+/// defense-in-depth: even if the C2 DOMPurify escape hatch let markup through,
+/// or a `/dav/` directory listing rendered an attacker-controlled filename,
+/// inline `<script>`/`on*=` are blocked at the browser.
+fn csp_header() -> &'static str {
+    "default-src 'self'; \
+     script-src 'self'; \
+     style-src 'self' 'unsafe-inline'; \
+     img-src 'self' data: blob:; \
+     font-src 'self'; \
+     connect-src 'self'; \
+     object-src 'none'; \
+     base-uri 'self'; \
+     form-action 'self'"
+}
+
+/// Pure decision core for the security-headers middleware: returns the value
+/// to set (or `None` to leave the header unset) for a given header name.
+/// Extracted so the per-header policy — including the HSTS conditional — is
+/// unit-testable in isolation.
+fn security_header_value(name: &header::HeaderName, base_url: &str) -> Option<&'static str> {
+    match *name {
+        header::X_CONTENT_TYPE_OPTIONS => Some("nosniff"),
+        header::X_FRAME_OPTIONS => Some("DENY"),
+        header::REFERRER_POLICY => Some("no-referrer"),
+        header::CONTENT_SECURITY_POLICY => Some(csp_header()),
+        // HSTS is conditional on the deployment scheme — see `hsts_header`.
+        _ if *name == header::STRICT_TRANSPORT_SECURITY => hsts_header(base_url),
+        _ => None,
+    }
+}
+
+/// Stamp the security-headers baseline onto a response. Inlined into the
+/// middleware below; kept as a function so the header set + HSTS conditional
+/// is exercised by unit tests without standing up an HTTP server.
+fn apply_security_headers(
+    mut response: axum::response::Response,
+    base_url: &str,
+) -> axum::response::Response {
+    let headers = response.headers_mut();
+    for name in [
+        header::X_CONTENT_TYPE_OPTIONS,
+        header::X_FRAME_OPTIONS,
+        header::REFERRER_POLICY,
+        header::CONTENT_SECURITY_POLICY,
+        header::STRICT_TRANSPORT_SECURITY,
+    ] {
+        if let Some(value) = security_header_value(&name, base_url) {
+            // `insert` overwrites any prior value so we always own the
+            // security posture, even if an inner handler set one.
+            headers.insert(name, HeaderValue::from_static(value));
+        }
+    }
+    response
+}
+
+/// `from_fn` middleware: applies the security-headers baseline to every
+/// response, including errors short-circuited by inner layers (CSRF, CORS).
+pub async fn security_headers(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    // `base_url` is the only config field the header policy consults; reading
+    // it here keeps the middleware stateless (no clone into AppState).
+    let base_url = Config::get().base_url.clone();
+    let response = next.run(request).await;
+    apply_security_headers(response, &base_url)
+}
+
+pub async fn run(
+    config: Config,
+    db: DatabaseConnection,
+    job_sender: JobSender,
+    notify_reload: Arc<tokio::sync::Notify>,
+) {
     let mut jinja = Environment::new();
     jinja
         .add_template(
@@ -870,7 +1213,11 @@ pub async fn run(config: Config, db: DatabaseConnection, job_sender: JobSender) 
         config: config.clone(),
         jinja,
         job_sender,
+        notify_reload: notify_reload.clone(),
     });
+
+    // Give the inotify handler a way to trigger an immediate reload. We
+    // already hold one; the web layer signals via `state.notify_reload`.
 
     // API router - all API routes under /api
     let api_router = Router::new()
@@ -892,8 +1239,13 @@ pub async fn run(config: Config, db: DatabaseConnection, job_sender: JobSender) 
         .fallback(get(frontend_handler));
 
     let app = app
+        .layer(from_fn(csrf_guard))
         .layer(build_cors_layer(&config))
         .layer(TraceLayer::new_for_http())
+        // Outermost layer (last `.layer()`): decorates every response,
+        // including errors short-circuited by CSRF/CORS, with the security
+        // baseline (M2) — nosniff / frame-deny / no-referrer / CSP / HSTS.
+        .layer(from_fn(security_headers))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&config.server_addr)
@@ -1041,5 +1393,308 @@ mod tests {
         assert_eq!(empty.total, 0);
         assert_eq!(empty.total_pages, 1);
         assert!(empty.items.is_empty());
+    }
+
+    // --- CSRF guard (C5) ---------------------------------------------------
+
+    use axum::http::Method;
+
+    #[test]
+    fn origin_from_base_url_strips_path() {
+        // The common case: base_url is already just an origin.
+        assert_eq!(
+            origin_from_base_url("http://localhost:3000"),
+            "http://localhost:3000"
+        );
+        // A trailing path/query is stripped down to the origin.
+        assert_eq!(
+            origin_from_base_url("https://cloud.example.com/"),
+            "https://cloud.example.com"
+        );
+        assert_eq!(
+            origin_from_base_url("https://cloud.example.com/some/path?x=1"),
+            "https://cloud.example.com"
+        );
+        // Default scheme + no port.
+        assert_eq!(
+            origin_from_base_url("https://example.com"),
+            "https://example.com"
+        );
+    }
+
+    #[test]
+    fn csrf_safe_methods_always_allowed() {
+        // GET/HEAD/OPTIONS bypass the guard regardless of headers.
+        let own = "http://localhost:3000";
+        for m in [Method::GET, Method::HEAD, Method::OPTIONS] {
+            assert!(
+                csrf_decision(
+                    &m,
+                    Some("cross-site"),
+                    Some("https://evil.example"),
+                    own,
+                    std::iter::empty(),
+                ),
+                "{m:?} should bypass the CSRF guard"
+            );
+        }
+    }
+
+    #[test]
+    fn csrf_sec_fetch_site_allows_same_origin_same_site_none() {
+        let own = "http://localhost:3000";
+        for ok in ["same-origin", "same-site", "none"] {
+            assert!(
+                csrf_decision(
+                    &Method::POST,
+                    Some(ok),
+                    Some("https://evil.example"),
+                    own,
+                    std::iter::empty(),
+                ),
+                "Sec-Fetch-Site={ok} on an unsafe method should be allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn csrf_sec_fetch_site_rejects_cross_site() {
+        assert!(!csrf_decision(
+            &Method::POST,
+            Some("cross-site"),
+            None,
+            "http://localhost:3000",
+            std::iter::empty(),
+        ));
+        // Applies to every unsafe method.
+        for m in [Method::PUT, Method::DELETE, Method::PATCH] {
+            assert!(
+                !csrf_decision(
+                    &m,
+                    Some("cross-site"),
+                    None,
+                    "http://localhost:3000",
+                    std::iter::empty(),
+                ),
+                "{m:?} with Sec-Fetch-Site=cross-site should be blocked"
+            );
+        }
+    }
+
+    #[test]
+    fn csrf_no_headers_means_non_browser_client_allowed() {
+        // curl / a desktop DAV client sends neither header → allow.
+        assert!(csrf_decision(
+            &Method::POST,
+            None,
+            None,
+            "http://localhost:3000",
+            std::iter::empty(),
+        ));
+        assert!(csrf_decision(
+            &Method::DELETE,
+            None,
+            None,
+            "http://localhost:3000",
+            std::iter::empty(),
+        ));
+    }
+
+    #[test]
+    fn csrf_origin_fallback_allows_own_origin() {
+        let own = "http://localhost:3000";
+        assert!(csrf_decision(
+            &Method::POST,
+            None, // no Sec-Fetch-Site (older browser)
+            Some(own),
+            own,
+            std::iter::empty(),
+        ));
+    }
+
+    #[test]
+    fn csrf_origin_fallback_allows_trusted_cors_origin() {
+        let own = "http://localhost:3000";
+        let allowed = ["http://localhost:5173", "https://app.example.com"];
+        assert!(csrf_decision(
+            &Method::PUT,
+            None,
+            Some("http://localhost:5173"),
+            own,
+            allowed.iter().copied(),
+        ));
+        assert!(csrf_decision(
+            &Method::DELETE,
+            None,
+            Some("https://app.example.com"),
+            own,
+            allowed.iter().copied(),
+        ));
+    }
+
+    #[test]
+    fn csrf_origin_fallback_rejects_untrusted_origin() {
+        let own = "http://localhost:3000";
+        let allowed = ["http://localhost:5173"];
+        assert!(!csrf_decision(
+            &Method::POST,
+            None,
+            Some("https://evil.example"),
+            own,
+            allowed.iter().copied(),
+        ));
+        // An Origin that looks like our host but on a different scheme/port is
+        // not trusted (https vs http, 3000 vs 3001).
+        assert!(!csrf_decision(
+            &Method::POST,
+            None,
+            Some("https://localhost:3000"),
+            own,
+            allowed.iter().copied(),
+        ));
+        assert!(!csrf_decision(
+            &Method::POST,
+            None,
+            Some("http://localhost:3001"),
+            own,
+            allowed.iter().copied(),
+        ));
+    }
+
+    #[test]
+    fn csrf_sec_fetch_site_takes_precedence_over_origin() {
+        // Sec-Fetch-Site=cross-site must block even if Origin happens to match.
+        assert!(!csrf_decision(
+            &Method::POST,
+            Some("cross-site"),
+            Some("http://localhost:3000"),
+            "http://localhost:3000",
+            std::iter::empty(),
+        ));
+    }
+
+    #[test]
+    fn csrf_empty_allowed_origins_blocks_all_cross_origin() {
+        // Default config: no CORS allowlist → only same-origin is trusted.
+        let own = "http://localhost:3000";
+        assert!(!csrf_decision(
+            &Method::POST,
+            None,
+            Some("http://localhost:5173"),
+            own,
+            // empty iterator — simulates default empty cors_allowed_origins
+            "".split(',').filter(|s| !s.is_empty()),
+        ));
+    }
+
+    // --- Security response headers (M2) -----------------------------------
+
+    #[test]
+    fn hsts_only_when_base_url_is_https() {
+        // HTTPS deployment → HSTS is advertised.
+        assert_eq!(
+            hsts_header("https://cloud.example.com"),
+            Some("max-age=31536000; includeSubDomains")
+        );
+        // Plain-HTTP deployment → never emit HSTS (a browser would ignore it,
+        // but more importantly an MITM on the first hop could strip it).
+        assert_eq!(hsts_header("http://localhost:3000"), None);
+        // A string that merely contains "https" but isn't an https:// URL must
+        // not trigger HSTS.
+        assert_eq!(hsts_header("ftp://example.com/https"), None);
+    }
+
+    #[test]
+    fn security_headers_unconditional_set() {
+        // These headers apply regardless of deployment scheme.
+        assert_eq!(
+            security_header_value(&header::X_CONTENT_TYPE_OPTIONS, "http://localhost:3000"),
+            Some("nosniff")
+        );
+        assert_eq!(
+            security_header_value(&header::X_FRAME_OPTIONS, "http://localhost:3000"),
+            Some("DENY")
+        );
+        assert_eq!(
+            security_header_value(&header::REFERRER_POLICY, "http://localhost:3000"),
+            Some("no-referrer")
+        );
+    }
+
+    #[test]
+    fn security_headers_csp_is_strict_no_unsafe_inline_script() {
+        let csp = security_header_value(&header::CONTENT_SECURITY_POLICY, "http://localhost:3000")
+            .expect("CSP always set");
+        // The Vue build ships only an external type=module script (verified in
+        // frontend/dist/index.html), so script-src must be 'self' only.
+        assert!(csp.contains("script-src 'self'"));
+        assert!(
+            !csp.contains("script-src 'self' 'unsafe-inline'"),
+            "script-src must NOT include 'unsafe-inline'"
+        );
+        // Defense-in-depth directives that neutralize reflected/stored XSS
+        // even if sanitization (C2 DOMPurify) is bypassed.
+        assert!(csp.contains("object-src 'none'"));
+        assert!(csp.contains("base-uri 'self'"));
+        assert!(csp.contains("form-action 'self'"));
+    }
+
+    #[test]
+    fn security_headers_hsts_via_helper() {
+        // HSTS rides on the same dispatch as the unconditional headers.
+        assert_eq!(
+            security_header_value(&header::STRICT_TRANSPORT_SECURITY, "https://x"),
+            Some("max-age=31536000; includeSubDomains")
+        );
+        assert_eq!(
+            security_header_value(&header::STRICT_TRANSPORT_SECURITY, "http://x"),
+            None
+        );
+    }
+
+    #[test]
+    fn security_headers_unknown_header_returns_none() {
+        assert_eq!(security_header_value(&header::ACCEPT, "https://x"), None);
+    }
+
+    #[test]
+    fn apply_security_headers_overwrites_inner_values() {
+        // A handler may have set its own (weaker) value; the middleware owns
+        // the posture and must overwrite rather than append.
+        let mut resp = (StatusCode::OK, "ok").into_response();
+        resp.headers_mut().insert(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("weak"),
+        );
+        let resp = apply_security_headers(resp, "http://localhost:3000");
+        assert_eq!(
+            resp.headers().get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
+            "nosniff"
+        );
+        // HSTS absent under http, present under https.
+        assert!(resp
+            .headers()
+            .get(header::STRICT_TRANSPORT_SECURITY)
+            .is_none());
+    }
+
+    #[test]
+    fn apply_security_headers_all_present_on_https() {
+        let resp = (StatusCode::OK, "ok").into_response();
+        let resp = apply_security_headers(resp, "https://cloud.example.com");
+        let h = resp.headers();
+        assert_eq!(h.get(header::X_CONTENT_TYPE_OPTIONS).unwrap(), "nosniff");
+        assert_eq!(h.get(header::X_FRAME_OPTIONS).unwrap(), "DENY");
+        assert_eq!(h.get(header::REFERRER_POLICY).unwrap(), "no-referrer");
+        assert!(h
+            .get(header::CONTENT_SECURITY_POLICY)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("script-src 'self'"));
+        assert_eq!(
+            h.get(header::STRICT_TRANSPORT_SECURITY).unwrap(),
+            "max-age=31536000; includeSubDomains"
+        );
     }
 }

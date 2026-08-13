@@ -94,7 +94,7 @@ async fn embed(
                 .map_err(|e| format!("Tensor error: {e}"))?
                 .into();
 
-        let guard = state.model.lock().unwrap();
+        let guard = state.model.lock().unwrap_or_else(|e| e.into_inner());
         let result = guard
             .run(tvec![tensor.into()])
             .map_err(|e| format!("Inference failed: {e}"))?;

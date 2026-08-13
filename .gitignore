@@ -9,3 +9,4 @@ plugins/*/Cargo.lock
 recognition_resnet27.onnx
 /coverage
 coverage-summary.txt
+.entanglement/

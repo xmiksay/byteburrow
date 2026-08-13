@@ -15,6 +15,7 @@ import {
 } from 'lucide-vue-next'
 import { marked } from 'marked'
 import { markedHighlight } from 'marked-highlight'
+import DOMPurify from 'dompurify'
 import hljs from 'highlight.js'
 import 'highlight.js/styles/github-dark.css'
 import { storageService } from '../services/storage'
@@ -42,7 +43,7 @@ const props = defineProps<{
   readOnly?: boolean  // Force read-only mode (e.g., share without write permission)
 }>()
 
-const emit = defineEmits(['close'])
+const emit = defineEmits(['close', 'tags-updated'])
 
 const content = ref('')
 const originalContent = ref('')
@@ -73,7 +74,7 @@ const highlightedContent = computed(() => {
   if (!content.value) return ''
   
   if (isMarkdown.value) {
-    return marked.parse(content.value)
+    return DOMPurify.sanitize(marked.parse(content.value) as string)
   }
   
   // For other code files, highlight based on extension or auto-detect
@@ -84,7 +85,7 @@ const highlightedContent = computed(() => {
     ? hljs.highlight(content.value, { language: lang })
     : hljs.highlightAuto(content.value)
     
-  return `<pre><code class="hljs language-${result.language || 'plaintext'}">${result.value}</code></pre>`
+  return DOMPurify.sanitize(`<pre><code class="hljs language-${result.language || 'plaintext'}">${result.value}</code></pre>`)
 })
 
 const isDirty = computed(() => {
@@ -155,7 +156,7 @@ const fetchTags = async () => {
 }
 
 const handleTagsUpdated = (newTags: number[]) => {
-  props.entry.tags = newTags
+  emit('tags-updated', newTags)
 }
 
 onMounted(fetchTags)

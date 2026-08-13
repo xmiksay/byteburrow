@@ -47,12 +47,17 @@ pub(super) fn extract_exif(
         }
     }
 
-    // Extract date
-    if let Some(dt_field) = exif_data.get_field(exif::Tag::DateTimeOriginal, exif::In::PRIMARY) {
+    // Extract date. Prefer DateTimeOriginal + OffsetTimeOriginal (timezone-
+    // aware) so photos taken in a different TZ are stored in correct UTC.
+    // (M11 — the host fallback previously ignored OffsetTimeOriginal,
+    // diverging from the plugin implementation.)
+    let dt_field = exif_data.get_field(exif::Tag::DateTimeOriginal, exif::In::PRIMARY);
+    let offset_field = exif_data.get_field(exif::Tag::OffsetTimeOriginal, exif::In::PRIMARY);
+    if let Some(dt_field) = dt_field {
         if let exif::Value::Ascii(ref vec) = dt_field.value {
             if let Some(bytes) = vec.first() {
                 if let Ok(dt) = exif::DateTime::from_ascii(bytes) {
-                    date = chrono::NaiveDate::from_ymd_opt(
+                    let naive = chrono::NaiveDate::from_ymd_opt(
                         dt.year.into(),
                         dt.month.into(),
                         dt.day.into(),
@@ -60,12 +65,50 @@ pub(super) fn extract_exif(
                     .and_then(|d| {
                         d.and_hms_opt(dt.hour.into(), dt.minute.into(), dt.second.into())
                     });
+
+                    // Apply the UTC offset if present (e.g. "+02:00").
+                    date = naive.map(|n| {
+                        let offset_val = offset_field.and_then(|off| match &off.value {
+                            exif::Value::Ascii(off_vec) => off_vec.first(),
+                            _ => None,
+                        });
+                        if let Some(off_bytes) = offset_val {
+                            if let Ok(off_str) = std::str::from_utf8(off_bytes) {
+                                if let Some(local) = apply_offset(n, off_str) {
+                                    return local;
+                                }
+                            }
+                        }
+                        // No offset — keep the naive value as-is.
+                        n
+                    });
                 }
             }
         }
     }
 
     (latitude, longitude, date)
+}
+
+/// Parse a `±HH:MM` EXIF offset string and apply it to a naive datetime,
+/// converting the local time to UTC. Returns `None` if the offset is
+/// unparseable.
+fn apply_offset(naive: chrono::NaiveDateTime, offset_str: &str) -> Option<chrono::NaiveDateTime> {
+    // Format: +HH:MM or -HH:MM
+    let bytes = offset_str.as_bytes();
+    if bytes.len() < 6 {
+        return None;
+    }
+    let sign: i64 = match bytes[0] {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return None,
+    };
+    let hours: i64 = std::str::from_utf8(&bytes[1..3]).ok()?.parse().ok()?;
+    let minutes: i64 = std::str::from_utf8(&bytes[4..6]).ok()?.parse().ok()?;
+    let total_secs = sign * (hours * 3600 + minutes * 60);
+    // Local = UTC + offset  →  UTC = local - offset
+    Some(naive - chrono::Duration::seconds(total_secs))
 }
 
 /// Sole caller: `extract_exif` (GPS degrees/minutes/seconds -> decimal).

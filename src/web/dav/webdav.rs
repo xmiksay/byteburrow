@@ -22,7 +22,10 @@ use crate::web::{
     require_storage_path_write_access, ApiError, AppState,
 };
 
-use super::util::{multistatus, parse_timeout, DavProp, DavResponse, LockManager, PropFind};
+use super::util::{
+    check_lock_for_write, delete_lock_async, if_header_tokens, multistatus, parse_timeout,
+    persist_lock, DavProp, DavResponse, LockManager, PropFind,
+};
 
 /// Maximum WebDAV request body we'll buffer in memory (e.g. a PUT). Larger
 /// uploads should use chunked streaming, which a future iteration would add.
@@ -32,6 +35,7 @@ const MAX_DAV_BODY: usize = 256 * 1024 * 1024;
 const H_DAV: HeaderName = HeaderName::from_static("dav");
 const H_DEPTH: HeaderName = HeaderName::from_static("depth");
 const H_DESTINATION: HeaderName = HeaderName::from_static("destination");
+const H_IF: HeaderName = HeaderName::from_static("if");
 const H_LOCK_TOKEN: HeaderName = HeaderName::from_static("lock-token");
 const H_OVERWRITE: HeaderName = HeaderName::from_static("overwrite");
 const H_TIMEOUT: HeaderName = HeaderName::from_static("timeout");
@@ -114,9 +118,9 @@ async fn dispatch_inner(
         "OPTIONS" => Ok(options_response()),
         "GET" => get_handler(&auth, state, &storage, path, trailing_slash).await,
         "HEAD" => head_handler(&auth, state, &storage, path, trailing_slash).await,
-        "PUT" => put_handler(&auth, state, &storage, path, body).await,
-        "DELETE" => delete_handler(&auth, state, &storage, path).await,
-        "MKCOL" => mkcol_handler(&auth, state, &storage, path).await,
+        "PUT" => put_handler(&auth, state, &storage, path, &headers, body).await,
+        "DELETE" => delete_handler(&auth, state, &storage, path, &headers).await,
+        "MKCOL" => mkcol_handler(&auth, state, &storage, path, &headers).await,
         "MKCALENDAR" => super::caldav::mkcalendar(&auth, state, &storage, path).await,
         "COPY" => copy_move_handler(&auth, state, &storage, path, &headers, false).await,
         "MOVE" => copy_move_handler(&auth, state, &storage, path, &headers, true).await,
@@ -125,7 +129,7 @@ async fn dispatch_inner(
         }
         "PROPPATCH" => proppatch_handler(&auth, state, &storage, path, body).await,
         "LOCK" => lock_handler(&auth, state, &storage, path, trailing_slash, &headers, body).await,
-        "UNLOCK" => unlock_handler(storage.model.id, path, &headers).await,
+        "UNLOCK" => unlock_handler(&auth, state, storage.model.id, path, &headers).await,
         "REPORT" => {
             super::caldav::report_dispatcher(&auth, state, &storage, path, body.as_ref()).await
         }
@@ -260,12 +264,14 @@ async fn directory_listing(storage: &Storage, path: &str) -> Response {
         } else {
             ""
         };
+        // The `href` is an attribute context: percent-encode the name (so it
+        // is a valid URL and contains no `"` to break the attribute), then the
+        // slash is a literal path separator. The link text is element content,
+        // so it only needs HTML-escaping.
+        let href_name = encode_path_segment(&name);
+        let text_name = escape_html(&name);
         html.push_str(&format!(
-            "<li><a href=\"{}{}\">{}{}</a></li>",
-            escape_html(&name),
-            slash,
-            escape_html(&name),
-            slash
+            "<li><a href=\"{href_name}{slash}\">{text_name}{slash}</a></li>",
         ));
     }
     html.push_str("</ul></body></html>");
@@ -294,12 +300,21 @@ async fn put_handler(
     state: &Arc<AppState>,
     storage: &Storage,
     path: &str,
+    headers: &HeaderMap,
     body: &Bytes,
 ) -> Result<Response, ApiError> {
     if path.is_empty() {
         return Err(bad_request("Cannot PUT to storage root"));
     }
     require_storage_path_write_access(auth, &storage.model, path, &state.db).await?;
+
+    // C4 Part B: enforce exclusive locks held by other users before mutating.
+    enforce_lock_for_write(
+        storage.model.id,
+        path,
+        auth,
+        &if_header_tokens(headers.get(&H_IF)),
+    )?;
 
     storage
         .save_file(path, body)
@@ -327,11 +342,19 @@ async fn delete_handler(
     state: &Arc<AppState>,
     storage: &Storage,
     path: &str,
+    headers: &HeaderMap,
 ) -> Result<Response, ApiError> {
     if path.is_empty() {
         return Err(bad_request("Cannot DELETE storage root"));
     }
     require_storage_path_write_access(auth, &storage.model, path, &state.db).await?;
+
+    enforce_lock_for_write(
+        storage.model.id,
+        path,
+        auth,
+        &if_header_tokens(headers.get(&H_IF)),
+    )?;
 
     storage
         .remove_entry(path)
@@ -349,11 +372,19 @@ async fn mkcol_handler(
     state: &Arc<AppState>,
     storage: &Storage,
     path: &str,
+    headers: &HeaderMap,
 ) -> Result<Response, ApiError> {
     if path.is_empty() {
         return Err(bad_request("Cannot MKCOL storage root"));
     }
     require_storage_path_write_access(auth, &storage.model, path, &state.db).await?;
+
+    enforce_lock_for_write(
+        storage.model.id,
+        path,
+        auth,
+        &if_header_tokens(headers.get(&H_IF)),
+    )?;
 
     let exists = storage.get_full_path(path);
     if tokio::fs::try_exists(&exists).await.unwrap_or(false) {
@@ -414,6 +445,14 @@ async fn copy_move_handler(
             })?;
         require_storage_path_write_access(auth, &dst_storage.model, dest_path, &state.db).await?;
     }
+
+    // C4 Part B: enforce exclusive locks. MOVE removes the source, so it needs
+    // a lock check on both src and dest; COPY only needs the dest check.
+    let if_tokens = if_header_tokens(headers.get(&H_IF));
+    if is_move {
+        enforce_lock_for_write(storage.model.id, src, auth, &if_tokens)?;
+    }
+    enforce_lock_for_write(dest_storage_id, dest_path, auth, &if_tokens)?;
 
     let overwrite = headers
         .get(&H_OVERWRITE)
@@ -775,8 +814,29 @@ async fn lock_handler(
     let depth = parse_depth(headers);
     let timeout = parse_timeout(headers.get(&H_TIMEOUT));
     let owner = parse_lock_owner(body);
+    let expires = std::time::SystemTime::now() + std::time::Duration::from_secs(timeout);
 
-    let token = LockManager::lock(storage.model.id, path, owner, depth, timeout);
+    let token = LockManager::lock(
+        storage.model.id,
+        path,
+        owner.clone(),
+        depth,
+        timeout,
+        auth.user.id,
+    );
+
+    // C4 Part C: persist the lock so it survives a restart. Best-effort.
+    persist_lock(
+        &state.db,
+        storage.model.id,
+        path,
+        depth,
+        &owner,
+        auth.user.id,
+        expires,
+        &token,
+    )
+    .await;
 
     let lock_xml = format!(
         "<?xml version=\"1.0\" encoding=\"utf-8\"?>\
@@ -828,6 +888,8 @@ fn parse_lock_owner(body: &Bytes) -> String {
 }
 
 async fn unlock_handler(
+    auth: &Auth,
+    state: &Arc<AppState>,
     storage_id: i32,
     path: &str,
     headers: &HeaderMap,
@@ -843,7 +905,10 @@ async fn unlock_handler(
         })
         .ok_or_else(|| bad_request("Lock-Token header required"))?;
 
-    if LockManager::unlock(storage_id, path, &token) {
+    // C4 Part A: only the lock owner (or an admin) may release the token.
+    if LockManager::unlock(storage_id, path, &token, auth.user.id, auth.user.admin) {
+        // C4 Part C: best-effort delete of the persisted durability row.
+        delete_lock_async(&state.db, &token).await;
         Ok(StatusCode::NO_CONTENT.into_response())
     } else {
         Err(conflict("Lock token not found or already released"))
@@ -854,6 +919,30 @@ async fn unlock_handler(
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Enforce WebDAV exclusive locks before a write mutation (C4 Part B).
+///
+/// Translates a blocking [`LockConflict`] into an `ApiError::Locked` (→ 423)
+/// so handlers can use `?`. RFC 4918 §10.6 requires the lock token in the body.
+fn enforce_lock_for_write(
+    storage_id: i32,
+    path: &str,
+    auth: &Auth,
+    if_header_tokens: &[String],
+) -> Result<(), ApiError> {
+    match check_lock_for_write(
+        storage_id,
+        path,
+        auth.user.id,
+        auth.user.admin,
+        if_header_tokens,
+    ) {
+        Ok(()) => Ok(()),
+        Err(conflict) => Err(ApiError::Locked {
+            lock_token: conflict.lock.token,
+        }),
+    }
+}
+
 fn map_io_to_api(e: std::io::Error, path: &str) -> ApiError {
     match e.kind() {
         std::io::ErrorKind::NotFound => not_found_msg(format!("Resource not found: {path}")),
@@ -862,8 +951,121 @@ fn map_io_to_api(e: std::io::Error, path: &str) -> ApiError {
     }
 }
 
+/// HTML-escape `&`, `<`, `>`, and `"`.
+///
+/// This escapes `"` as `&quot;` unconditionally. Escaping a double quote in
+/// HTML element content is harmless, and escaping it inside an attribute value
+/// (e.g. `href="…"`) is *required* — a filename containing `"` would otherwise
+/// break out of the attribute and allow attribute-injection / XSS. Keep this
+/// in sync with [`super::util::push_escaped`] (which also escapes quotes when
+/// `is_attr` is set, though there that flag is always-on for hrefs).
 fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Percent-encode a single path segment for use inside an `href="…"` attribute.
+///
+/// Filenames may contain spaces, `#`, `?`, `"`, and other characters that are
+/// either invalid in a URL or would break out of the attribute; we encode
+/// everything except the unreserved set plus `/` (so a directory name with a
+/// literal slash — impossible on POSIX, but harmless — round-trips). The result
+/// still contains only ASCII, so it is safe to interpolate into an HTML
+/// attribute without further escaping.
+fn encode_path_segment(s: &str) -> String {
+    use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+
+    // Reserved + delimiters that have meaning in a URL path. We keep `/` so a
+    // segment containing a slash round-trips; everything else that's special
+    // in a URL or HTML attribute gets percent-encoded.
+    const SEGMENT: &AsciiSet = &CONTROLS
+        .add(b' ')
+        .add(b'"')
+        .add(b'#')
+        .add(b'%')
+        .add(b'<')
+        .add(b'>')
+        .add(b'?')
+        .add(b'`')
+        .add(b'{')
+        .add(b'|')
+        .add(b'}');
+
+    utf8_percent_encode(s, SEGMENT).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escape_html_escapes_quotes() {
+        // Regression for H5: a double quote must be escaped so it cannot break
+        // out of an `href="…"` attribute.
+        assert_eq!(escape_html(r#"a"b"#), "a&quot;b");
+        assert_eq!(escape_html("<>&\""), "&lt;&gt;&amp;&quot;");
+        // & is escaped first, so a literal &quot; survives intact.
+        assert_eq!(escape_html("&"), "&amp;");
+    }
+
+    #[test]
+    fn encode_path_segment_handles_dangerous_chars() {
+        // A quote must be percent-encoded so the attribute can't be broken,
+        // even though we also HTML-escape it elsewhere.
+        assert_eq!(encode_path_segment(r#"a"b"#), "a%22b");
+        // Spaces, fragments, and queries are encoded so the URL stays valid.
+        assert_eq!(encode_path_segment("a b"), "a%20b");
+        assert_eq!(encode_path_segment("a#b"), "a%23b");
+        assert_eq!(encode_path_segment("a?b"), "a%3Fb");
+        // Unreserved characters pass through untouched.
+        assert_eq!(encode_path_segment("plain.txt"), "plain.txt");
+        assert_eq!(encode_path_segment("café.md"), "caf%C3%A9.md");
+    }
+
+    /// Render just the `<li>` line for one entry, mirroring `directory_listing`.
+    fn render_li(name: &str, is_dir: bool) -> String {
+        let slash = if is_dir { "/" } else { "" };
+        let href_name = encode_path_segment(name);
+        let text_name = escape_html(name);
+        format!("<li><a href=\"{href_name}{slash}\">{text_name}{slash}</a></li>")
+    }
+
+    #[test]
+    fn directory_li_escapes_attribute_breakout() {
+        // The original bug: a filename with a `"` broke out of the href
+        // attribute. Both the href (percent-encoded) and the text
+        // (HTML-escaped) must now be inert.
+        let li = render_li(r#"evil".txt"#, false);
+        // The href must contain no raw double-quote between its opening and
+        // closing quote — i.e. the quote must be percent-encoded as %22.
+        assert!(
+            li.contains("href=\"evil%22.txt\""),
+            "quote must be percent-encoded in href: {li}"
+        );
+        // And the link text must have the quote HTML-escaped.
+        assert!(li.contains(">evil&quot;.txt<"));
+        // No raw `"` may appear anywhere except as the attribute delimiters.
+        assert_eq!(
+            li.matches('"').count(),
+            2,
+            "only the two href attribute delimiters may be raw quotes: {li}"
+        );
+    }
+
+    #[test]
+    fn directory_li_keeps_url_valid_for_spaces() {
+        // A space in a filename must not produce a raw space in the href.
+        let li = render_li("my file.txt", false);
+        assert!(li.contains("href=\"my%20file.txt\""));
+        assert!(li.contains(">my file.txt<"));
+    }
+
+    #[test]
+    fn directory_li_for_directory_has_trailing_slash() {
+        let li = render_li("subdir", true);
+        assert!(li.contains("href=\"subdir/\""));
+        assert!(li.contains(">subdir/</a>"));
+    }
 }

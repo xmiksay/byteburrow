@@ -44,10 +44,15 @@ pub enum Job {
     CreateThumbnail { hash: Vec<u8>, regenerate: bool },
 }
 
-pub type JobSender = mpsc::UnboundedSender<Job>;
+/// Bounded channel capacity — prevents OOM under bulk file copy (M8). Jobs
+/// that can't be enqueued immediately are rejected (the sender logs and drops
+/// them); this is the safe backpressure behavior for a background classifier.
+const JOB_CHANNEL_CAPACITY: usize = 1024;
+
+pub type JobSender = mpsc::Sender<Job>;
 
 pub struct JobRunner {
-    rx: mpsc::UnboundedReceiver<Job>,
+    rx: mpsc::Receiver<Job>,
     db: Arc<DatabaseConnection>,
     semaphore: Arc<Semaphore>,
     plugins: Arc<PluginRegistry>,
@@ -56,7 +61,7 @@ pub struct JobRunner {
 
 impl JobRunner {
     pub fn new(db: DatabaseConnection, plugins: PluginRegistry) -> (Self, JobSender) {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(JOB_CHANNEL_CAPACITY);
         let workers = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
@@ -69,9 +74,7 @@ impl JobRunner {
                 // Set lower scheduling priority for job threads so the web
                 // server (running on the main runtime) is always preferred
                 // by the OS scheduler.
-                unsafe {
-                    libc::nice(JOB_THREAD_NICE);
-                }
+                let _ = unsafe { libc::nice(JOB_THREAD_NICE) }; // M14: don't ignore failure
             })
             .enable_all()
             .build()
@@ -91,12 +94,17 @@ impl JobRunner {
 
     /// Run the job processing loop. This blocks the calling thread and
     /// executes all jobs on the dedicated low-priority runtime.
+    ///
+    /// When the sender is dropped, the channel drains: in-flight jobs are
+    /// awaited (M6 — graceful shutdown) before the runtime shuts down.
     pub fn run(mut self) {
         self.runtime.block_on(async move {
             info!(
-                "Job runner started (dedicated runtime, nice {})",
-                JOB_THREAD_NICE
+                "Job runner started (dedicated runtime, nice {}, channel cap {})",
+                JOB_THREAD_NICE, JOB_CHANNEL_CAPACITY
             );
+            // Track spawned jobs so we can await them on shutdown (M6).
+            let mut tasks = tokio::task::JoinSet::new();
             while let Some(job) = self.rx.recv().await {
                 let permit = self
                     .semaphore
@@ -106,7 +114,7 @@ impl JobRunner {
                     .expect("semaphore is never closed");
                 let db = self.db.clone();
                 let plugins = self.plugins.clone();
-                tokio::spawn(async move {
+                tasks.spawn(async move {
                     info!(?job, "Processing job");
                     if let Err(e) = Self::process_job(&db, &plugins, job).await {
                         error!("Job failed: {e}");
@@ -114,6 +122,12 @@ impl JobRunner {
                     drop(permit);
                 });
             }
+            // M6: graceful drain — wait for all in-flight jobs to finish.
+            info!(
+                "Job channel closed; draining {} in-flight job(s)",
+                tasks.len()
+            );
+            while tasks.join_next().await.is_some() {}
             info!("Job runner stopped");
         });
     }
