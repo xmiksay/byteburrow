@@ -17,11 +17,15 @@ services:
     environment:
       DATABASE_URL: postgres://${DATABASE_USER:-user}:${DATABASE_PASSWORD:-password}@db:5432/${DATABASE_NAME:-cloud_db}
       SERVER_ADDR: 0.0.0.0:3000
+      # Delegate face embedding to the face-embedder service below. Commented out
+      # because in-process embedding is the default; uncomment to use the service
+      # (and add face-embedder to depends_on if you want strict start ordering).
+      # BYTEBURROW__PLUGIN__FACE_EMBED_ENDPOINT=http://face-embedder:8090/
     ports:
       - "3000:3000"
     depends_on:
       - db
-      
+
   pgadmin:
     image: dpage/pgadmin4
     restart: always
@@ -32,6 +36,28 @@ services:
       - "5050:80"
     depends_on:
       - db
+
+  # Standalone face-embedding microservice (plugins/face-embedder/service).
+  # The ONNX model is not part of the repo — place it on the host and point
+  # FACE_EMBED_MODEL_PATH at it (defaults to ./models/recognition_resnet27.onnx).
+  face-embedder:
+    build:
+      context: ./plugins/face-embedder/service
+    restart: unless-stopped
+    environment:
+      LISTEN_ADDR: 0.0.0.0:8090
+      MODEL_PATH: /models/recognition_resnet27.onnx
+    ports:
+      - "8090:8090"
+    volumes:
+      - ${FACE_EMBED_MODEL_PATH:-./models/recognition_resnet27.onnx}:/models/recognition_resnet27.onnx:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8090/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # Model load + optimization happens before the listener binds.
+      start_period: 60s
 
 volumes:
   postgres_data:
