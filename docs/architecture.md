@@ -69,6 +69,7 @@ Deep reference for ByteBurrow's module layout, request flow, and key patterns. S
   - `face-embedder/`: face embedding vectors for recognition (ships a standalone ONNX inference microservice at `face-embedder/service/`, its own Cargo workspace)
   - `keyword-extractor/`: image keyword/tag extraction
   - `color-classifier/`: dominant color classification
+  - Plugins that delegate ML to external services follow one pattern — see [plugins-external-services.md](plugins-external-services.md) and [ADR 0007](adr/0007-external-ml-provider-seam.md)
 
 - **`src/config/`**: Configuration management
   - Global singleton config loaded from environment variables
