@@ -1956,6 +1956,75 @@
         ]
       }
     },
+    "/api/storage/{id}/scan": {
+      "post": {
+        "tags": [
+          "storage"
+        ],
+        "summary": "Scan a storage tree: ensure every non-ignored path has an `entry` row and\nqueue background processing (`ProcessFile { mode: Auto }`) for unhashed\nfiles.",
+        "description": "This is the explicit replacement for the GET-triggered hashing that used\nto live in the directory-listing handlers (issue #37): listing endpoints\nare now side-effect free; only this POST (and the inotify watcher /\nper-file `POST /:id/hash/*path`) enqueues work.\n\nLike the inotify initial scan, the walk runs to completion within the\nrequest — bounded by the storage tree, with the storage's ignore patterns\napplied. Symlinked directories are classified as `EntryType::Symlink` and\ntherefore not recursed into, so the walk cannot cycle or escape the tree.\nPOST /api/storage/:id/scan",
+        "operationId": "scan_storage_handler",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Storage ID",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Scan finished; summary of what was done",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Write access denied to this storage",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Storage not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/storage/{id}/share/{path}": {
       "get": {
         "tags": [
@@ -3752,6 +3821,26 @@
         "properties": {
           "new_path": {
             "type": "string"
+          }
+        }
+      },
+      "ScanResponse": {
+        "type": "object",
+        "description": "Scan summary returned by `POST /api/storage/:id/scan`.",
+        "required": [
+          "created",
+          "queued"
+        ],
+        "properties": {
+          "created": {
+            "type": "integer",
+            "description": "Number of `entry` rows the scan created.",
+            "minimum": 0
+          },
+          "queued": {
+            "type": "integer",
+            "description": "Number of unhashed files for which a `ProcessFile` job was queued.",
+            "minimum": 0
           }
         }
       },

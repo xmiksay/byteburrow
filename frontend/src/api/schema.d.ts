@@ -615,6 +615,37 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/storage/{id}/scan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Scan a storage tree: ensure every non-ignored path has an `entry` row and
+         *     queue background processing (`ProcessFile { mode: Auto }`) for unhashed
+         *     files.
+         * @description This is the explicit replacement for the GET-triggered hashing that used
+         *     to live in the directory-listing handlers (issue #37): listing endpoints
+         *     are now side-effect free; only this POST (and the inotify watcher /
+         *     per-file `POST /:id/hash/*path`) enqueues work.
+         *
+         *     Like the inotify initial scan, the walk runs to completion within the
+         *     request — bounded by the storage tree, with the storage's ignore patterns
+         *     applied. Symlinked directories are classified as `EntryType::Symlink` and
+         *     therefore not recursed into, so the walk cannot cycle or escape the tree.
+         *     POST /api/storage/:id/scan
+         */
+        post: operations["scan_storage_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/storage/{id}/share/{path}": {
         parameters: {
             query?: never;
@@ -1196,6 +1227,13 @@ export interface components {
         /** @description Rename entry request */
         RenameEntryRequest: {
             new_path: string;
+        };
+        /** @description Scan summary returned by `POST /api/storage/:id/scan`. */
+        ScanResponse: {
+            /** @description Number of `entry` rows the scan created. */
+            created: number;
+            /** @description Number of unhashed files for which a `ProcessFile` job was queued. */
+            queued: number;
         };
         /**
          * @description Share entry request
@@ -2659,6 +2697,56 @@ export interface operations {
             };
             /** @description Error renaming entry */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    scan_storage_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Storage ID */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Scan finished; summary of what was done */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScanResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Write access denied to this storage */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Storage not found */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
