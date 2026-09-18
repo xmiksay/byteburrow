@@ -286,8 +286,12 @@ fn expired_share_returns_410_gone_on_share_index() {
         );
 
         // Backdate the row directly, as if the days had elapsed.
-        set_expires_at(&db, share_id, Some(Utc::now().naive_utc() - chrono::Duration::hours(1)))
-            .await;
+        set_expires_at(
+            &db,
+            share_id,
+            Some(Utc::now().naive_utc() - chrono::Duration::hours(1)),
+        )
+        .await;
 
         // Share index (file inside the shared directory): 410 + exact body.
         let req = Request::builder()

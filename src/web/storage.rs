@@ -2367,7 +2367,9 @@ async fn scan_tree(
             Vec::new()
         }
         Err(e) => {
-            return Err(internal(format!("Error scanning directory '{sub_path}': {e}")))
+            return Err(internal(format!(
+                "Error scanning directory '{sub_path}': {e}"
+            )))
         }
     };
 
@@ -2408,13 +2410,11 @@ async fn scan_tree(
                 Box::pin(scan_tree(storage, state, ignore_patterns, &rel, summary)).await?;
             }
             EntryType::File if model.hash.is_none() => {
-                match state
-                    .job_sender
-                    .try_send(crate::job::Job::ProcessFile {
-                        storage_id: storage.model.id,
-                        path: rel.clone(),
-                        mode: crate::job::ProcessMode::Auto,
-                    }) {
+                match state.job_sender.try_send(crate::job::Job::ProcessFile {
+                    storage_id: storage.model.id,
+                    path: rel.clone(),
+                    mode: crate::job::ProcessMode::Auto,
+                }) {
                     Ok(()) => summary.queued += 1,
                     // Same backpressure contract as the inotify watcher and
                     // the old `dispatch_hash_jobs`: log and drop (M8).

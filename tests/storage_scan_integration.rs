@@ -129,7 +129,9 @@ async fn make_storage_with_tree(
     ));
     tokio::fs::create_dir_all(root.join("sub")).await.unwrap();
     tokio::fs::create_dir_all(root.join(".git")).await.unwrap();
-    tokio::fs::write(root.join("alpha.txt"), b"alpha").await.unwrap();
+    tokio::fs::write(root.join("alpha.txt"), b"alpha")
+        .await
+        .unwrap();
     tokio::fs::write(root.join("sub/nested.txt"), b"nested")
         .await
         .unwrap();
@@ -227,7 +229,10 @@ fn scan_creates_entry_rows_and_reports_summary() {
             .unwrap();
         let paths: Vec<&str> = rows.iter().map(|e| e.path.as_str()).collect();
         for expected in ["alpha.txt", "sub", "sub/nested.txt"] {
-            assert!(paths.contains(&expected), "missing {expected}, got {paths:?}");
+            assert!(
+                paths.contains(&expected),
+                "missing {expected}, got {paths:?}"
+            );
         }
         assert!(
             !paths.iter().any(|p| p.starts_with(".git")),
