@@ -98,8 +98,16 @@ impl ClassifierPlugin for FaceEmbedder {
             Err(_) => return Ok(None),
         };
 
-        // Apply EXIF orientation
-        let img = apply_orientation(img, get_orientation(ctx.custom));
+        // The detector publishes rects in ORIGINAL stored-pixel coordinates
+        // (it detects on the orientation-corrected image, then maps the boxes
+        // back). So: crop the raw decoded image first, then orient the small
+        // crop for the model. Orientation comes from the detector's "faces"
+        // payload; the exif custom key is a legacy fallback for payloads that
+        // don't carry it.
+        let orientation = faces
+            .get("orientation")
+            .and_then(|v| v.as_u64())
+            .unwrap_or_else(|| get_orientation(ctx.custom));
 
         let agent = match &self.agent {
             Some(a) => a,
@@ -129,7 +137,12 @@ impl ClassifierPlugin for FaceEmbedder {
             let h = h.min(img.height().saturating_sub(y));
 
             let crop = img.crop_imm(x, y, w, h);
-            let resized = crop.resize_exact(
+            // Orient the small crop for the model (the rect itself is in
+            // stored coordinates; only the pixels fed to the model need the
+            // rotation). Orienting the crop — not the whole image — keeps the
+            // per-face cost proportional to the face size.
+            let oriented = apply_orientation(crop, orientation);
+            let resized = oriented.resize_exact(
                 MODEL_INPUT_SIZE,
                 MODEL_INPUT_SIZE,
                 image::imageops::FilterType::Triangle,
