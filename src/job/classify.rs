@@ -10,9 +10,9 @@ use crate::entity::{entry, meta, photo};
 use crate::plugin::{MergedClassification, PluginRegistry};
 use crate::storage::determine_content_type;
 
-use super::{exif, face, is_image_file};
+use super::{exif, face};
 
-/// Classify a file (plugin path or EXIF fallback) and persist the results.
+/// Classify a file (host-native EXIF + plugin pipeline) and persist the results.
 /// Sole caller: `JobRunner::process_file`.
 pub(super) async fn run_classification(
     db: &DatabaseConnection,
@@ -31,7 +31,7 @@ pub(super) async fn run_classification(
 
     // Honor `ClassifierPlugin::needs_file_data()`: only load the whole file
     // when a plugin that will run actually needs the bytes. Plugins that do
-    // their own path-based I/O (and the EXIF fallback, which reads via its own
+    // their own path-based I/O (and host-native EXIF, which reads via its own
     // extractor) never touch this buffer, so reading it would be wasted I/O —
     // significant for large media. Async read keeps the job worker off a
     // blocking sync call.
@@ -43,7 +43,7 @@ pub(super) async fn run_classification(
         Vec::new()
     };
 
-    // Run classification (plugin path, or the inline-EXIF fallback).
+    // Run classification (host-native EXIF + plugin pipeline).
     let result = classify_or_exif(plugins, entry, full_path, &data, mime_type).await?;
 
     if let Some(mut merged) = result {
@@ -81,12 +81,17 @@ async fn read_mime_header(path: &Path) -> anyhow::Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// Run the plugin classification pipeline when plugins are loaded;
-/// otherwise fall back to inline EXIF extraction for images.
+/// Run the plugin classification pipeline (when plugins are loaded) layered
+/// over host-native EXIF extraction.
 ///
-/// Returns `Ok(Some(merged))` when the plugin path produced a
-/// [`MergedClassification`], `Ok(None)` for the EXIF fallback (which writes
-/// the photo row directly), so callers know not to re-persist.
+/// Native EXIF (`exif::extract_exif`, issue #20) always runs for images, so
+/// GPS / capture date / camera metadata work with an empty plugin directory.
+/// Its custom keys are seeded into the pipeline's shared custom map — chained
+/// plugins read `custom["exif"]["orientation"]` — and the pipeline's own
+/// results take precedence over the native values when both produce one.
+///
+/// Returns `Ok(None)` only when there is nothing to persist: no plugins
+/// loaded and the file is not an image.
 async fn classify_or_exif(
     plugins: &PluginRegistry,
     entry: &entry::Model,
@@ -94,32 +99,64 @@ async fn classify_or_exif(
     data: &[u8],
     mime_type: &'static str,
 ) -> anyhow::Result<Option<MergedClassification>> {
-    if !plugins.is_empty() {
-        let existing_custom: HashMap<String, serde_json::Value> = HashMap::new();
-        let ctx = byteburrow_plugin_api::FileContext {
-            path: &entry.path,
-            full_path,
-            data,
-            mime_type,
-            size: entry.size as u64,
-            custom: &existing_custom,
-        };
-        Ok(Some(plugins.classify_file(&ctx)))
+    // The exif-classifier plugin's `mime_interests()` was `&["image/"]`; the
+    // same gate selects the native path. A wrong extension with image magic
+    // bytes still qualifies (`determine_content_type` sniffs both).
+    let is_image = mime_type.starts_with("image/");
+
+    let native = if is_image {
+        exif::extract_exif(full_path)
     } else {
-        // Fallback: inline EXIF extraction when no plugins loaded.
-        if is_image_file(&entry.path) {
-            info!(path = &entry.path, "Processing image (inline, no plugins)");
-            let (latitude, longitude, date) = exif::extract_exif(full_path);
-            let merged = MergedClassification {
-                latitude,
-                longitude,
-                date_unix: date.map(|d| d.and_utc().timestamp()),
-                ..Default::default()
-            };
-            Ok(Some(merged))
-        } else {
-            Ok(None)
+        MergedClassification::default()
+    };
+
+    if plugins.is_empty() {
+        if !is_image {
+            return Ok(None);
         }
+        info!(path = &entry.path, "Processing image (inline, no plugins)");
+        return Ok(Some(native));
+    }
+
+    // Seed the pipeline's shared custom map with the native EXIF keys so
+    // chained plugins see them exactly as they did when the exif-classifier
+    // plugin published them in pass 1 (face-embedder requires "faces" and
+    // reads custom["exif"]["orientation"]; face-detector falls back to it).
+    // `run_pipeline` does not absorb ctx.custom into its result, so the
+    // native keys are folded back in below.
+    let existing_custom: HashMap<String, serde_json::Value> =
+        native.custom.clone().into_iter().collect();
+    let ctx = byteburrow_plugin_api::FileContext {
+        path: &entry.path,
+        full_path,
+        data,
+        mime_type,
+        size: entry.size as u64,
+        custom: &existing_custom,
+    };
+    let mut merged = plugins.classify_file(&ctx);
+
+    // Plugins win; native EXIF fills the gaps.
+    fill_gaps_from_native(&mut merged, native);
+
+    Ok(Some(merged))
+}
+
+/// Layer native EXIF results *under* `merged`: structured fields and custom
+/// keys a plugin already produced are kept; native values only fill the ones
+/// no plugin supplied. Native EXIF emits no keywords, so those are untouched.
+fn fill_gaps_from_native(merged: &mut MergedClassification, native: MergedClassification) {
+    if merged.latitude.is_none() {
+        merged.latitude = native.latitude;
+    }
+    if merged.longitude.is_none() {
+        merged.longitude = native.longitude;
+    }
+    if merged.date_unix.is_none() {
+        merged.date_unix = native.date_unix;
+    }
+    for (k, v) in native.custom {
+        merged.custom.entry(k).or_insert(v);
     }
 }
 

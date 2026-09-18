@@ -64,7 +64,7 @@ Deep reference for ByteBurrow's module layout, request flow, and key patterns. S
   - No heavy dependencies (only `serde` + `serde_json`)
 
 - **`plugins/`**: Plugin implementations (each is a `cdylib` crate)
-  - `exif-classifier/`: EXIF metadata extraction (GPS, date, camera info)
+  - EXIF extraction (GPS, date, camera info) is **host-native** in `src/job/exif.rs` (issue #20) — the `exif-classifier` plugin was removed
   - `face-detector/`: face bounding-box detection on classified photos
   - `face-embedder/`: face embedding vectors for recognition (ships a standalone ONNX inference microservice at `face-embedder/service/`, its own Cargo workspace)
   - `keyword-extractor/`: image keyword/tag extraction
@@ -303,9 +303,8 @@ Plugins are dynamic libraries (`.so`) that classify files. Each plugin implement
 
 **Multi-pass execution:** Plugins declare dependencies via `custom_requires()`. The host runs them in iterative passes until no new plugins become eligible:
 ```
-Pass 1: EXIF plugin (no requirements) → adds custom["date"], geo, keywords
-Pass 2: Face detection (image/*) → adds custom["faces"]
-Pass 3: Face embedding/recognition (requires custom "faces") → adds custom["people"]
+Pass 1: face detection (image/*) → adds custom["faces"] (host-native EXIF, `src/job/exif.rs`, has already seeded custom["exif"] before any pass runs)
+Pass 2: Face embedding/recognition (requires custom "faces") → adds custom["people"]
 Pass N: Keyword extraction, color classification (image/*) → add custom["keywords"], custom["colors"]
 ```
 

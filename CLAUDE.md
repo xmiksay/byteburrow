@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-ByteBurrow is a modern personal cloud storage and file management system built with Rust (backend) and Vue 3 (frontend). It provides file management, user/group administration, WebDAV/CalDAV/CardDAV gateways onto its storages, and a plugin-based file classification pipeline (EXIF, face detection/recognition, keyword extraction, color classification).
+ByteBurrow is a modern personal cloud storage and file management system built with Rust (backend) and Vue 3 (frontend). It provides file management, user/group administration, WebDAV/CalDAV/CardDAV gateways onto its storages, and a file classification pipeline (host-native EXIF extraction in `src/job/exif.rs`, plus face detection/recognition, keyword extraction, and color classification plugins).
 
 ## Development Commands
 
