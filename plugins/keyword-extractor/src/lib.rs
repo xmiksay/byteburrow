@@ -12,7 +12,7 @@ const DEFAULT_OLLAMA_URL: &str = "http://127.0.0.1:11434";
 const DEFAULT_MODEL: &str = "llava:7b";
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
-const PROMPT: &str = "\
+const DEFAULT_PROMPT: &str = "\
 Analyze this image and extract descriptive keywords. \
 Return ONLY a JSON array of lowercase English keyword strings, nothing else. \
 Include keywords for: objects, scene type, colors, mood, activities, setting (indoor/outdoor), \
@@ -23,6 +23,7 @@ Keep keywords concise (1-3 words each). Return 5-20 keywords.";
 pub struct KeywordExtractor {
     ollama_url: String,
     model: String,
+    prompt: String,
     timeout: Duration,
     /// Only one Ollama request in-flight at a time.
     inflight: Mutex<()>,
@@ -52,6 +53,7 @@ impl KeywordExtractor {
         Self {
             ollama_url: DEFAULT_OLLAMA_URL.to_string(),
             model: DEFAULT_MODEL.to_string(),
+            prompt: DEFAULT_PROMPT.to_string(),
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             inflight: Mutex::new(()),
         }
@@ -62,7 +64,7 @@ impl KeywordExtractor {
 
         let request = OllamaRequest {
             model: &self.model,
-            prompt: PROMPT,
+            prompt: &self.prompt,
             images: vec![b64],
             stream: false,
             options: OllamaOptions { temperature: 0.3 },
@@ -169,6 +171,14 @@ impl ClassifierPlugin for KeywordExtractor {
             self.timeout = Duration::from_secs(secs);
         }
 
+        if let Some(prompt) =
+            config
+                .get("keyword_prompt")
+                .or(std::env::var("BYTEBURROW__KEYWORD_PROMPT").ok().as_ref())
+        {
+            self.prompt = prompt.clone();
+        }
+
         Ok(())
     }
 
@@ -181,14 +191,16 @@ impl ClassifierPlugin for KeywordExtractor {
         // Other job threads block here until the current request finishes.
         let _guard = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
 
-        let keywords = match self.call_ollama(ctx.data) {
-            Ok(kw) if kw.is_empty() => return Ok(None),
-            Ok(kw) => kw,
-            Err(e) => {
-                eprintln!("keyword-extractor: {e}");
-                return Ok(None);
-            }
-        };
+        // Error split (issue #24): transport-level failures (connection
+        // refused, timeout, bad HTTP status, unreadable body) surface as
+        // `Err` so the host pipeline logs them as `Failed` — a systemic
+        // problem like Ollama being down must be visible, not silent.
+        // `Ok(None)` is reserved for semantic no-results (the model answered,
+        // but produced no usable keywords).
+        let keywords = self.call_ollama(ctx.data)?;
+        if keywords.is_empty() {
+            return Ok(None);
+        }
 
         let mut custom = HashMap::new();
         custom.insert(
@@ -260,5 +272,68 @@ mod tests {
         let dropped = "k".repeat(51);
         let cleaned = clean_keywords(vec![kept.clone(), dropped]);
         assert_eq!(cleaned, vec![kept]);
+    }
+
+    // ── Config plumbing (issue #24) ─────────────────────────────────
+
+    fn configured(cfg: &[(&str, &str)]) -> KeywordExtractor {
+        let mut p = KeywordExtractor::new();
+        let config: PluginConfig = cfg
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        p.init(&config).expect("init should accept valid config");
+        p
+    }
+
+    #[test]
+    fn init_defaults_match_constants() {
+        let mut p = KeywordExtractor::new();
+        let config: PluginConfig = PluginConfig::new();
+        p.init(&config).expect("empty config keeps defaults");
+        assert_eq!(p.ollama_url, DEFAULT_OLLAMA_URL);
+        assert_eq!(p.model, DEFAULT_MODEL);
+        assert_eq!(p.prompt, DEFAULT_PROMPT);
+        assert_eq!(p.timeout, Duration::from_secs(DEFAULT_TIMEOUT_SECS));
+    }
+
+    #[test]
+    fn init_accepts_custom_prompt_and_existing_keys() {
+        let p = configured(&[
+            ("keyword_prompt", "One word max."),
+            ("ollama_model", "qwen3.5:9b"),
+        ]);
+        assert_eq!(p.prompt, "One word max.");
+        assert_eq!(p.model, "qwen3.5:9b");
+    }
+
+    #[test]
+    fn init_rejects_invalid_timeout() {
+        let mut p = KeywordExtractor::new();
+        let config: PluginConfig = [("ollama_timeout".to_string(), "soon".to_string())]
+            .into_iter()
+            .collect();
+        assert!(p.init(&config).is_err());
+    }
+
+    // ── Error-split contract (issue #24) ────────────────────────────
+    //
+    // Transport failures must surface as `Err` (host logs them as Failed);
+    // semantic no-results stay `Ok(None)`. `call_ollama` needs a live
+    // Ollama, so the split is exercised through `parse_keywords`, which
+    // owns the semantic boundary on the response side: an unparseable
+    // model answer is a transport-shaped `Err`, and the empty-list case
+    // (model answered with no keywords) maps to `Ok(None)` in `classify`.
+
+    #[test]
+    fn unparseable_response_is_transport_err_not_silent_none() {
+        assert!(parse_keywords("no array at all").is_err());
+    }
+
+    #[test]
+    fn empty_keyword_list_is_semantic_none() {
+        let raw = "[]";
+        let kw = parse_keywords(raw).expect("empty array parses");
+        assert!(kw.is_empty(), "classify maps this to Ok(None)");
     }
 }
