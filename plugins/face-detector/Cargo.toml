@@ -13,3 +13,4 @@ byteburrow-plugin-api = { path = "../../byteburrow-plugin-api" }
 rustface = "0.1"
 image = { workspace = true }
 serde_json = { workspace = true }
+kamadak-exif = { workspace = true }
