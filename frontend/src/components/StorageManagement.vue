@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import { Database, Edit, Trash2, X, Save, Plus } from 'lucide-vue-next'
+import { Database, Edit, Trash2, X, Save, Plus, Scan } from 'lucide-vue-next'
+import { api } from '../utils/api'
 import { storageService } from '../services/storage'
 import { userService } from '../services/user'
 import { groupService } from '../services/group'
@@ -13,6 +14,8 @@ const users = ref<User[]>([])
 const groups = ref<Group[]>([])
 const loading = ref(true)
 const error = ref<string | null>(null)
+const success = ref<string | null>(null)
+const scanningId = ref<number | null>(null)
 
 // Modal state
 const showModal = ref(false)
@@ -170,6 +173,24 @@ const deleteStorage = async (storageId: number, name: string) => {
   }
 }
 
+// POST /api/storage/:id/scan — discover files and queue hashing/classification
+// (listings are side-effect free, so discovery is an explicit action now).
+const scanStorage = async (storageId: number) => {
+  try {
+    scanningId.value = storageId
+    error.value = null
+    const summary = await api.post<{ created: number; queued: number }>(
+      `/api/storage/${storageId}/scan`
+    )
+    success.value = `Scan complete: ${summary.created} new entr${summary.created === 1 ? 'y' : 'ies'}, ${summary.queued} file${summary.queued === 1 ? '' : 's'} queued for processing`
+    setTimeout(() => (success.value = null), 6000)
+  } catch (err: any) {
+    error.value = err.message
+  } finally {
+    scanningId.value = null
+  }
+}
+
 onMounted(() => {
   fetchData()
 })
@@ -191,6 +212,13 @@ onMounted(() => {
     <div v-if="error" class="error-banner glass-panel">
       <p>{{ error }}</p>
       <button @click="error = null" class="btn-icon">
+        <X :size="16" />
+      </button>
+    </div>
+    
+    <div v-if="success" class="success-banner glass-panel">
+      <p>{{ success }}</p>
+      <button @click="success = null" class="btn-icon">
         <X :size="16" />
       </button>
     </div>
@@ -234,6 +262,14 @@ onMounted(() => {
             </td>
             <td>
               <div class="actions">
+                <button
+                  class="btn-icon"
+                  :disabled="scanningId === storage.id"
+                  @click="scanStorage(storage.id)"
+                  :title="scanningId === storage.id ? 'Scanning…' : 'Scan storage for new files'"
+                >
+                  <Scan :size="16" :class="{ spinning: scanningId === storage.id }" />
+                </button>
                 <button class="btn-icon" @click="openEditModal(storage)" title="Edit storage">
                   <Edit :size="16" />
                 </button>
@@ -385,6 +421,26 @@ onMounted(() => {
   border: 1px solid rgba(239, 68, 68, 0.3);
   border-radius: 8px;
   color: #ef4444;
+}
+
+.success-banner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px;
+  background: rgba(34, 197, 94, 0.1);
+  border: 1px solid rgba(34, 197, 94, 0.3);
+  border-radius: 8px;
+  color: #22c55e;
+}
+
+.btn-icon:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.spinning {
+  animation: spin 1s linear infinite;
 }
 
 .storages-table {

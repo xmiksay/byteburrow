@@ -814,6 +814,7 @@ pub struct AppState {
         storage::create_storage_handler,
         storage::update_storage_handler,
         storage::delete_storage_handler,
+        storage::scan_storage_handler,
         // File content endpoints
         storage::get_file_content_handler,
         storage::download_file_handler,
@@ -876,6 +877,7 @@ pub struct AppState {
             tag::CreateTagRequest,
             tag::UpdateTagRequest,
             storage::StorageResponse,
+            storage::ScanResponse,
             storage::CreateStorageRequest,
             storage::UpdateStorageRequest,
             storage::CreateEntryRequest,

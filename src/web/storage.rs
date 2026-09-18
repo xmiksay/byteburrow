@@ -135,23 +135,6 @@ fn storage_lookup_err(e: sea_orm::DbErr, storage_id: i32) -> ApiError {
     }
 }
 
-/// Dispatch background `ProcessFile` jobs for any unhashed files in `entries`.
-fn dispatch_hash_jobs(state: &AppState, entries: &[DirectoryEntry]) {
-    entries
-        .iter()
-        .filter(|e| e.hash.is_none() && e.entry_type == EntryType::File)
-        .for_each(|e| {
-            state
-                .job_sender
-                .try_send(crate::job::Job::ProcessFile {
-                    storage_id: e.storage_id,
-                    path: e.path.clone(),
-                    mode: crate::job::ProcessMode::Auto,
-                })
-                .ok();
-        });
-}
-
 /// Build a one-shot [`ServeFile`] response with a forced Content-Type header.
 async fn serve_file_response(
     full_path: std::path::PathBuf,
@@ -386,6 +369,7 @@ pub fn router() -> Router<Arc<AppState>> {
             axum::routing::delete(remove_entry_handler),
         )
         .route("/:id/hash/*path", post(trigger_hash_handler))
+        .route("/:id/scan", post(scan_storage_handler))
         .route("/:id/tags/*path", put(update_entry_tags_handler))
         .route("/:id/share/*path", get(list_shares_handler))
         .route("/:id/share/*path", post(share_entry_handler))
@@ -836,9 +820,6 @@ async fn directory_index_impl(
         .list_directory(&state.db, normalized_path)
         .await
         .map_err(|e| internal(format!("Error listing directory: {e}")))?;
-
-    dispatch_hash_jobs(&state, &entries);
-
     let html =
         generate_directory_index(&state, storage_id, normalized_path, &entries).map_err(|e| {
             tracing::error!("Template error: {}", e);
@@ -1204,9 +1185,6 @@ pub(crate) async fn list_directory_handler(
         .list_directory(&state.db, &path)
         .await
         .map_err(|e| internal(format!("Error listing directory: {e}")))?;
-
-    dispatch_hash_jobs(&state, &entries);
-
     Ok(Json(DirectoryListingResponse {
         storage_id: id,
         path: path.trim_matches('/').to_string(),
@@ -1506,7 +1484,9 @@ pub(crate) async fn share_entry_handler(
 
     let sub_path = path.trim_matches('/');
 
-    // Ensure entry exists in DB (create if missing)
+    // Ensure entry exists in DB (create if missing): lazy creation is fine
+    // here because this is a POST — share creation is an explicit mutation,
+    // unlike the (now side-effect free) GET listing handlers (issue #37).
     let entry_model = match entry::Entity::find()
         .filter(entry::Column::StorageId.eq(storage_id))
         .filter(entry::Column::Path.eq(sub_path))
@@ -1869,9 +1849,6 @@ async fn share_list_impl(
         .list_directory(&state.db, &full_path)
         .await
         .map_err(|e| internal(format!("Error listing directory: {e}")))?;
-
-    dispatch_hash_jobs(&state, &entries);
-
     let relative_entries = make_entries_relative(entries, base_path);
 
     Ok(Json(DirectoryListingResponse {
@@ -1947,9 +1924,6 @@ async fn share_index_impl(
         .list_directory(&state.db, &full_path)
         .await
         .map_err(|e| internal(format!("Error listing directory: {e}")))?;
-
-    dispatch_hash_jobs(&state, &entries);
-
     let relative_entries = make_entries_relative(entries, base_path);
 
     let html = generate_directory_index(
@@ -2299,6 +2273,163 @@ pub(crate) async fn trigger_hash_handler(
         .map_err(|_| internal("Job queue is full or closed"))?;
 
     Ok(message("Hash calculation queued"))
+}
+
+/// Scan summary returned by `POST /api/storage/:id/scan`.
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct ScanResponse {
+    /// Number of `entry` rows the scan created.
+    pub created: usize,
+    /// Number of unhashed files for which a `ProcessFile` job was queued.
+    pub queued: usize,
+}
+
+/// Scan a storage tree: ensure every non-ignored path has an `entry` row and
+/// queue background processing (`ProcessFile { mode: Auto }`) for unhashed
+/// files.
+///
+/// This is the explicit replacement for the GET-triggered hashing that used
+/// to live in the directory-listing handlers (issue #37): listing endpoints
+/// are now side-effect free; only this POST (and the inotify watcher /
+/// per-file `POST /:id/hash/*path`) enqueues work.
+///
+/// Like the inotify initial scan, the walk runs to completion within the
+/// request — bounded by the storage tree, with the storage's ignore patterns
+/// applied. Symlinked directories are classified as `EntryType::Symlink` and
+/// therefore not recursed into, so the walk cannot cycle or escape the tree.
+/// POST /api/storage/:id/scan
+#[utoipa::path(
+    post,
+    path = "/api/storage/{id}/scan",
+    tag = "storage",
+    params(("id" = i32, Path, description = "Storage ID")),
+    responses(
+        (status = 200, description = "Scan finished; summary of what was done", body = ScanResponse),
+        (status = 401, description = "Authentication required", body = ErrorResponse),
+        (status = 403, description = "Write access denied to this storage", body = ErrorResponse),
+        (status = 404, description = "Storage not found", body = ErrorResponse),
+    ),
+    security(("bearer" = []))
+)]
+#[instrument(skip(state, auth))]
+pub(crate) async fn scan_storage_handler(
+    auth: Auth,
+    AxumPath(storage_id): AxumPath<i32>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ScanResponse>, ApiError> {
+    let storage = StorageWrapper::find_by_id(&state.db, storage_id)
+        .await
+        .map_err(|e| storage_lookup_err(e, storage_id))?;
+
+    // A scan mutates `entry` rows across the whole storage and enqueues
+    // classification work, so it is gated like the other write endpoints
+    // (owner / default-group member / admin) — not with the listing-purpose
+    // `require_storage_access`, which a read-only share also satisfies.
+    require_storage_path_write_access(&auth, &storage.model, "", &state.db).await?;
+
+    let ignore_patterns = crate::ignore::parse_patterns(&storage.model.ignore_patterns);
+
+    let mut summary = ScanResponse {
+        created: 0,
+        queued: 0,
+    };
+    scan_tree(&storage, &state, &ignore_patterns, "", &mut summary).await?;
+
+    tracing::info!(
+        storage_id,
+        created = summary.created,
+        queued = summary.queued,
+        "Storage scan complete"
+    );
+
+    Ok(Json(summary))
+}
+
+/// Depth-first walk of one directory, recursing into real subdirectories.
+/// Enumeration reuses [`StorageWrapper::list_directory_fs`] and row creation
+/// reuses [`StorageWrapper::ensure_entry`] (the same lazy-ensure helper the
+/// share-creation handler uses), with ignore handling matching the inotify
+/// watcher's (`crate::ignore`).
+async fn scan_tree(
+    storage: &StorageWrapper,
+    state: &AppState,
+    ignore_patterns: &[String],
+    sub_path: &str,
+    summary: &mut ScanResponse,
+) -> Result<(), ApiError> {
+    // A subdirectory that vanishes mid-scan only drops that subtree; the
+    // storage root itself going missing (or any other I/O failure) fails the
+    // scan.
+    let entries = match storage.list_directory_fs(sub_path).await {
+        Ok(v) => v,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && !sub_path.is_empty() => {
+            tracing::warn!(dir = %sub_path, "Scan: directory vanished during scan");
+            Vec::new()
+        }
+        Err(e) => {
+            return Err(internal(format!("Error scanning directory '{sub_path}': {e}")))
+        }
+    };
+
+    for e in entries {
+        let rel = e.path.trim_matches('/').to_string();
+        if crate::ignore::is_ignored(&rel, ignore_patterns) {
+            continue;
+        }
+
+        // Find first (rather than blind ensure) so creations can be counted;
+        // `ensure_entry` is find-or-create but does not report which happened.
+        let model = match entry::Entity::find()
+            .filter(entry::Column::StorageId.eq(storage.model.id))
+            .filter(entry::Column::Path.eq(&rel))
+            .one(&state.db)
+            .await?
+        {
+            Some(m) => m,
+            None => match storage.ensure_entry(&state.db, &rel).await {
+                Ok(m) => {
+                    summary.created += 1;
+                    m
+                }
+                Err(e) => match e.downcast::<sea_orm::DbErr>() {
+                    // Database failures abort the scan; filesystem races
+                    // (entry removed between readdir and ensure) just skip it.
+                    Ok(db_err) => return Err(ApiError::Db(db_err)),
+                    Err(e) => {
+                        tracing::warn!(path = %rel, error = %e, "Scan: skipping unreadable entry");
+                        continue;
+                    }
+                },
+            },
+        };
+
+        match e.entry_type {
+            EntryType::Directory => {
+                Box::pin(scan_tree(storage, state, ignore_patterns, &rel, summary)).await?;
+            }
+            EntryType::File if model.hash.is_none() => {
+                match state
+                    .job_sender
+                    .try_send(crate::job::Job::ProcessFile {
+                        storage_id: storage.model.id,
+                        path: rel.clone(),
+                        mode: crate::job::ProcessMode::Auto,
+                    }) {
+                    Ok(()) => summary.queued += 1,
+                    // Same backpressure contract as the inotify watcher and
+                    // the old `dispatch_hash_jobs`: log and drop (M8).
+                    Err(err) => tracing::warn!(
+                        path = %rel,
+                        error = %err,
+                        "Scan: job queue full or closed; dropping job"
+                    ),
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
