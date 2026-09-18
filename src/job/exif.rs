@@ -46,16 +46,10 @@ pub(super) fn extract_exif(full_path: &Path) -> MergedClassification {
 /// Pure field extraction from already-parsed EXIF data — split from the file
 /// I/O above so tests can drive it with in-memory fixtures.
 fn parse_exif(exif_data: &exif::Exif) -> MergedClassification {
-    let mut merged = MergedClassification::default();
-
     // GPS. Each coordinate is extracted independently: a file with only one
     // of the two tags still yields the one it has.
-    merged.latitude = extract_gps_coord(
-        exif_data,
-        exif::Tag::GPSLatitude,
-        exif::Tag::GPSLatitudeRef,
-    );
-    merged.longitude = extract_gps_coord(
+    let latitude = extract_gps_coord(exif_data, exif::Tag::GPSLatitude, exif::Tag::GPSLatitudeRef);
+    let longitude = extract_gps_coord(
         exif_data,
         exif::Tag::GPSLongitude,
         exif::Tag::GPSLongitudeRef,
@@ -64,14 +58,15 @@ fn parse_exif(exif_data: &exif::Exif) -> MergedClassification {
     // Date. EXIF `DateTimeOriginal` carries no zone; `OffsetTimeOriginal`
     // (0x9011), when present, supplies it. Without it the civil time is
     // interpreted as UTC.
-    if let Some(bytes) = get_ascii_bytes(exif_data, exif::Tag::DateTimeOriginal) {
-        if let Ok(mut dt) = exif::DateTime::from_ascii(bytes) {
+    let date_unix = get_ascii_bytes(exif_data, exif::Tag::DateTimeOriginal)
+        .and_then(|bytes| exif::DateTime::from_ascii(bytes).ok())
+        .map(|mut dt| {
             if let Some(off_bytes) = get_ascii_bytes(exif_data, exif::Tag::OffsetTimeOriginal) {
                 let _ = dt.parse_offset(off_bytes);
             }
-            merged.date_unix = datetime_to_unix(&dt);
-        }
-    }
+            dt
+        })
+        .and_then(|dt| datetime_to_unix(&dt));
 
     // Camera metadata, nested under custom["exif"].
     let mut exif_map = serde_json::Map::new();
@@ -104,24 +99,31 @@ fn parse_exif(exif_data: &exif::Exif) -> MergedClassification {
     }
     // Mirror the structured fields so custom["exif"] is self-contained for
     // consumers that read the JSON map instead of the photo row.
-    if let Some(lat) = merged.latitude {
+    if let Some(lat) = latitude {
         exif_map.insert("latitude".into(), lat.into());
     }
-    if let Some(lon) = merged.longitude {
+    if let Some(lon) = longitude {
         exif_map.insert("longitude".into(), lon.into());
     }
-    if let Some(ts) = merged.date_unix {
+    if let Some(ts) = date_unix {
         exif_map.insert("date_unix".into(), ts.into());
     }
 
+    let mut custom = serde_json::Map::new();
     if !exif_map.is_empty() {
-        merged.custom.insert(
+        custom.insert(
             EXIF_CUSTOM_KEY.to_string(),
             serde_json::Value::Object(exif_map),
         );
     }
 
-    merged
+    MergedClassification {
+        latitude,
+        longitude,
+        date_unix,
+        custom,
+        ..Default::default()
+    }
 }
 
 /// Convert a parsed EXIF datetime to a Unix timestamp (seconds).
@@ -488,7 +490,10 @@ mod tests {
 
         let merged = parse_exif(&exif_data);
         assert!(merged.latitude.unwrap() < 0.0, "S reference must negate");
-        assert!(merged.longitude.unwrap() > 0.0, "E reference stays positive");
+        assert!(
+            merged.longitude.unwrap() > 0.0,
+            "E reference stays positive"
+        );
     }
 
     #[test]
@@ -504,10 +509,7 @@ mod tests {
 
     #[test]
     fn unrelated_tags_produce_an_empty_result() {
-        let exif_data = parse_fields(&[field(
-            exif::Tag::ImageDescription,
-            ascii(b"a caption\0"),
-        )]);
+        let exif_data = parse_fields(&[field(exif::Tag::ImageDescription, ascii(b"a caption\0"))]);
 
         let merged = parse_exif(&exif_data);
         assert!(merged.keywords.is_empty());
