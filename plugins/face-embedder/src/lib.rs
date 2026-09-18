@@ -1,32 +1,76 @@
 use std::io::Cursor;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use byteburrow_plugin_api::*;
 use image::DynamicImage;
+use tract_onnx::prelude::*;
 
 /// FaceONNX recognition_resnet27: input 1x3x128x128, output 512-dim embedding.
 const MODEL_INPUT_SIZE: u32 = 128;
 const DEFAULT_ENDPOINT: &str = "http://localhost:8090/";
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
+const DEFAULT_BACKEND: &str = "auto";
+/// Where `face_embed_backend = local`/`auto` look for the ONNX model. The file
+/// is deliberately NOT vendored in the repo (see service/README.md) — without
+/// it, `auto` falls back to the HTTP backend.
+const DEFAULT_MODEL_PATH: &str = "/etc/byteburrow/models/recognition_resnet27.onnx";
 
 /// Identity of the vector space these embeddings live in. Persisted with every
 /// embedding so the recognition side can refuse to compare vectors produced by
-/// a different model. The HTTP service (`plugins/face-embedder/service`) uses
-/// the same FaceONNX recognition_resnet27 model, so the identity matches.
+/// a different model. Both backends use the same FaceONNX
+/// recognition_resnet27 model, so the identity matches.
 const MODEL_ID: &str = "faceonnx-recognition-resnet27";
 const MODEL_VERSION: &str = "1";
 
-/// Delegates face embedding to an external HTTP service. The endpoint receives
-/// a cropped+resized face image (JPEG bytes) and returns `{"embedding": [...]}`.
+/// Tract runnable plan (same shape as the HTTP service's `Model` alias).
+type Model = SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>;
+
+/// Embedding backend seam (issue #30). Selected in `init` from
+/// `face_embed_backend` = `http` | `local` | `auto`:
 ///
-/// Uses a single shared [`ureq::Agent`] (internally Arc'd, `Send + Sync`) — no
-/// `Mutex`, no per-request Tokio runtime (H10/H11). The agent is constructed
-/// once in `init`.
-struct FaceEmbedder {
-    endpoint: String,
-    agent: Option<ureq::Agent>,
+/// - `http` — delegate to the external embedding service
+///   (`plugins/face-embedder/service`, `face_embed_endpoint`). Concurrency is
+///   the service's problem; the plugin stays lock-free (shared `ureq::Agent`).
+/// - `local` — in-process tract inference from `face_embed_model`. The plan is
+///   behind a `Mutex` held ONLY around the `run()` call itself; a local
+///   backend is how embedding works without deploying the service.
+/// - `auto` (default) — `local` when the model file exists at the configured
+///   path, else `http`.
+enum Backend {
+    Http {
+        agent: ureq::Agent,
+        endpoint: String,
+    },
+    Local {
+        model: Box<Mutex<Model>>,
+    },
 }
 
+impl Backend {
+    /// Embed one preprocessed 128×128 crop (the #23 seam — this is the single
+    /// dispatch point both backends implement).
+    fn embed_crop(&self, resized: &DynamicImage) -> Result<Vec<f32>, String> {
+        match self {
+            Backend::Http { agent, endpoint } => compute_embedding_http(agent, endpoint, resized),
+            Backend::Local { model } => {
+                let plan = model.lock().unwrap_or_else(|e| e.into_inner());
+                compute_embedding_local(&plan, resized)
+            }
+        }
+    }
+}
+
+/// Face embedding plugin: crops per-face regions (rects published by
+/// face-detector in stored-pixel coordinates) and embeds them through the
+/// configured [`Backend`].
+struct FaceEmbedder {
+    backend: Option<Backend>,
+}
+
+// Safety: both backends are thread-safe — the HTTP agent is `Send + Sync`
+// (Arc'd connection pool), and the tract plan is `Send` with all `run()` calls
+// serialized by its `Mutex`.
 unsafe impl Send for FaceEmbedder {}
 unsafe impl Sync for FaceEmbedder {}
 
@@ -36,7 +80,7 @@ impl ClassifierPlugin for FaceEmbedder {
     }
 
     fn version(&self) -> &str {
-        "0.2.0"
+        "0.3.0"
     }
 
     fn api_version(&self) -> (u32, u32) {
@@ -56,7 +100,7 @@ impl ClassifierPlugin for FaceEmbedder {
     }
 
     fn init(&mut self, config: &PluginConfig) -> Result<(), String> {
-        self.endpoint = config
+        let endpoint = config
             .get("face_embed_endpoint")
             .cloned()
             .or_else(|| std::env::var("BYTEBURROW__FACE_EMBED_ENDPOINT").ok())
@@ -72,13 +116,49 @@ impl ClassifierPlugin for FaceEmbedder {
             })
             .unwrap_or(DEFAULT_TIMEOUT_SECS);
 
-        let agent = ureq::Agent::new_with_config(
-            ureq::config::Config::builder()
-                .timeout_global(Some(Duration::from_secs(timeout_secs)))
-                .build(),
-        );
+        let model_path = config
+            .get("face_embed_model")
+            .cloned()
+            .or_else(|| std::env::var("BYTEBURROW__FACE_EMBED_MODEL").ok())
+            .unwrap_or_else(|| DEFAULT_MODEL_PATH.to_string());
 
-        self.agent = Some(agent);
+        let requested = config
+            .get("face_embed_backend")
+            .cloned()
+            .or_else(|| std::env::var("BYTEBURROW__FACE_EMBED_BACKEND").ok())
+            .unwrap_or_else(|| DEFAULT_BACKEND.to_string())
+            .to_ascii_lowercase();
+
+        // `auto` prefers in-process inference when the model file is present
+        // (zero extra deployment), else the HTTP service.
+        let use_local = match requested.as_str() {
+            "local" => true,
+            "http" => false,
+            "auto" => std::path::Path::new(&model_path).exists(),
+            other => {
+                return Err(format!(
+                    "Invalid face_embed_backend `{other}` (expected http, local, or auto)"
+                ));
+            }
+        };
+
+        self.backend = Some(if use_local {
+            let model = load_local_model(&model_path)?;
+            eprintln!(
+                "face-embedder: local backend (model {model_path}); inference is serialized by a mutex"
+            );
+            Backend::Local {
+                model: Box::new(Mutex::new(model)),
+            }
+        } else {
+            let agent = ureq::Agent::new_with_config(
+                ureq::config::Config::builder()
+                    .timeout_global(Some(Duration::from_secs(timeout_secs)))
+                    .build(),
+            );
+            eprintln!("face-embedder: http backend (endpoint {endpoint})");
+            Backend::Http { agent, endpoint }
+        });
         Ok(())
     }
 
@@ -109,8 +189,8 @@ impl ClassifierPlugin for FaceEmbedder {
             .and_then(|v| v.as_u64())
             .unwrap_or_else(|| get_orientation(ctx.custom));
 
-        let agent = match &self.agent {
-            Some(a) => a,
+        let backend = match &self.backend {
+            Some(b) => b,
             None => return Err("Face embedder not initialized".to_string()),
         };
 
@@ -148,7 +228,7 @@ impl ClassifierPlugin for FaceEmbedder {
                 image::imageops::FilterType::Triangle,
             );
 
-            match self.embed_crop(agent, &resized) {
+            match backend.embed_crop(&resized) {
                 Ok(embedding) => {
                     embeddings.push(serde_json::json!({
                         "face_index": i,
@@ -191,15 +271,6 @@ impl ClassifierPlugin for FaceEmbedder {
                 summarize_errors(&errors)
             )),
         }
-    }
-}
-
-impl FaceEmbedder {
-    /// Embed one preprocessed crop. This is the seam where a future `local`
-    /// (in-process tract) backend can slot in (issue #30) — the HTTP path is
-    /// the current implementation.
-    fn embed_crop(&self, agent: &ureq::Agent, resized: &DynamicImage) -> Result<Vec<f32>, String> {
-        compute_embedding(agent, &self.endpoint, resized)
     }
 }
 
@@ -249,7 +320,10 @@ enum EmbedOutcome {
 /// POST the cropped face (as JPEG) to the embedding endpoint and parse the
 /// `{"embedding": [...]}` response. Synchronous via `ureq` — no Tokio runtime
 /// involved (H10), and `agent` is shared without a lock (H11).
-fn compute_embedding(
+/// POST the cropped face (as JPEG) to the embedding endpoint and parse the
+/// `{"embedding": [...]}` response. Synchronous via `ureq` — no Tokio runtime
+/// involved (H10), and `agent` is shared without a lock (H11).
+fn compute_embedding_http(
     agent: &ureq::Agent,
     endpoint: &str,
     img: &DynamicImage,
@@ -268,6 +342,73 @@ fn compute_embedding(
         .map_err(|e| format!("Failed to parse embedding response: {e}"))?;
 
     Ok(response.embedding)
+}
+
+/// In-process tract inference. Mirrors the HTTP service's preprocessing
+/// exactly (see the "preprocessing contract" doc in service/README.md): CHW
+/// tensor in BGR order, `(pixel - 127.5) / 128.0`, then L2-normalize the
+/// output. Callers hold the model's `Mutex` so `run()` never races.
+fn compute_embedding_local(plan: &Model, img: &DynamicImage) -> Result<Vec<f32>, String> {
+    let rgb = img.to_rgb8();
+    let (w, h) = (rgb.width() as usize, rgb.height() as usize);
+
+    // FaceONNX expects a 1x3x128x128 f32 input in BGR, normalized.
+    let mut data = vec![0f32; 3 * h * w];
+    for y in 0..h {
+        for x in 0..w {
+            let px = rgb.get_pixel(x as u32, y as u32);
+            let i = y * w + x;
+            data[i] = (px[2] as f32 - 127.5) / 128.0; // B
+            data[w * h + i] = (px[1] as f32 - 127.5) / 128.0; // G
+            data[2 * w * h + i] = (px[0] as f32 - 127.5) / 128.0; // R
+        }
+    }
+
+    let tensor: Tensor =
+        tract_onnx::prelude::tract_ndarray::Array4::from_shape_vec((1, 3, h, w), data)
+            .map_err(|e| format!("Tensor creation failed: {e}"))?
+            .into();
+
+    let outputs = plan
+        .run(tvec![tensor.into()])
+        .map_err(|e| format!("Inference failed: {e}"))?;
+
+    let output = outputs[0]
+        .to_array_view::<f32>()
+        .map_err(|e| format!("Output extraction failed: {e}"))?;
+
+    // L2 normalize (identical to the HTTP service).
+    let raw: Vec<f32> = output.iter().copied().collect();
+    let norm: f32 = raw.iter().map(|v| v * v).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        Ok(raw.iter().map(|v| v / norm).collect())
+    } else {
+        Ok(raw)
+    }
+}
+
+/// Load and optimize the ONNX model for local inference. Same shape the HTTP
+/// service pins: 1x3x128x128 f32 input.
+fn load_local_model(path: &str) -> Result<Model, String> {
+    let model = tract_onnx::onnx()
+        .model_for_path(path)
+        .map_err(|e| format!("Failed to load ONNX model from {path}: {e}"))?;
+
+    let model = model
+        .with_input_fact(
+            0,
+            InferenceFact::dt_shape(
+                f32::datum_type(),
+                tvec![1, 3, MODEL_INPUT_SIZE as i64, MODEL_INPUT_SIZE as i64],
+            ),
+        )
+        .map_err(|e| format!("Failed to set input shape: {e}"))?
+        .into_optimized()
+        .map_err(|e| format!("Failed to optimize model: {e}"))?
+        .into_runnable()
+        .map_err(|e| format!("Failed to make model runnable: {e}"))?;
+
+    Ok(model)
 }
 
 fn apply_orientation(img: DynamicImage, orientation: u64) -> DynamicImage {
@@ -296,10 +437,7 @@ struct EmbeddingResponse {
     embedding: Vec<f32>,
 }
 
-declare_plugin!(FaceEmbedder {
-    endpoint: String::new(),
-    agent: None,
-});
+declare_plugin!(FaceEmbedder { backend: None });
 
 #[cfg(test)]
 mod tests {
@@ -323,6 +461,71 @@ mod tests {
             }
         }
         panic!("marker pixel not found");
+    }
+
+    // ── Backend selection (issue #30) ───────────────────────────────
+
+    fn inited(cfg: &[(&str, &str)]) -> FaceEmbedder {
+        let mut p = FaceEmbedder { backend: None };
+        let config: PluginConfig = cfg
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        p.init(&config).expect("init should succeed");
+        p
+    }
+
+    #[test]
+    fn explicit_http_backend_is_selected() {
+        let p = inited(&[("face_embed_backend", "http")]);
+        match &p.backend {
+            Some(Backend::Http { .. }) => {}
+            Some(Backend::Local { .. }) => panic!("expected Http backend, got Local"),
+            None => panic!("expected Http backend, got None"),
+        }
+    }
+
+    #[test]
+    fn invalid_backend_is_rejected() {
+        let mut p = FaceEmbedder { backend: None };
+        let config: PluginConfig = [("face_embed_backend".to_string(), "cloud".to_string())]
+            .into_iter()
+            .collect();
+        assert!(p.init(&config).is_err());
+    }
+
+    #[test]
+    fn auto_without_model_file_falls_back_to_http() {
+        // A path that certainly doesn't exist — `auto` must pick HTTP rather
+        // than fail init (embedding via the service is the zero-setup path).
+        let p = inited(&[
+            ("face_embed_backend", "auto"),
+            ("face_embed_model", "/nonexistent/dir/model.onnx"),
+        ]);
+        match &p.backend {
+            Some(Backend::Http { .. }) => {}
+            Some(Backend::Local { .. }) => panic!("expected Http fallback, got Local"),
+            None => panic!("expected Http fallback, got None"),
+        }
+    }
+
+    #[test]
+    fn explicit_local_with_missing_model_fails_init_loudly() {
+        let mut p = FaceEmbedder { backend: None };
+        let config: PluginConfig = [
+            ("face_embed_backend".to_string(), "local".to_string()),
+            (
+                "face_embed_model".to_string(),
+                "/nonexistent/dir/model.onnx".to_string(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let err = p.init(&config).expect_err("missing model must fail init");
+        assert!(
+            err.contains("/nonexistent/dir/model.onnx"),
+            "error should name the path: {err}"
+        );
     }
 
     #[test]

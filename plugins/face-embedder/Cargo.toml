@@ -14,3 +14,4 @@ image = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 ureq = { version = "3", features = ["json"] }
+tract-onnx = "0.21"
