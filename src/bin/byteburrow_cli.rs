@@ -47,6 +47,18 @@ enum Commands {
         #[arg(short, long)]
         margin: Option<f32>,
     },
+    /// Backfill re-match (#27): re-decide every machine-suggested face against
+    /// the current confirmed exemplar pool and sync the affected files' meta.
+    /// Does not re-run classification — stored embeddings are re-matched.
+    FaceRematch {
+        /// Similarity threshold. Defaults to the configured
+        /// `face_match_threshold`.
+        #[arg(short, long)]
+        threshold: Option<f32>,
+        /// Ambiguity margin. Defaults to the configured `face_match_margin`.
+        #[arg(short, long)]
+        margin: Option<f32>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -146,6 +158,16 @@ async fn main() {
                 margin: margin.unwrap_or(config.face_match_margin),
             };
             if let Err(e) = face_match(&config, *contact_id, params).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Commands::FaceRematch { threshold, margin } => {
+            let params = MatchParams {
+                threshold: threshold.unwrap_or(config.face_match_threshold),
+                margin: margin.unwrap_or(config.face_match_margin),
+            };
+            if let Err(e) = face_rematch(&config, params).await {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
@@ -431,11 +453,13 @@ async fn face_match(
     let contact_map: std::collections::HashMap<i32, String> =
         contacts.into_iter().map(|c| (c.id, c.name)).collect();
 
-    // Candidates: unconfirmed faces whose best confirmed match is this contact.
+    // Candidates: unconfirmed faces whose best confirmed match is this
+    // contact. Pinned rows are human labels (assigned via the API/confirm
+    // step) and must never be re-decided by the matcher.
     let mut matches: Vec<(f32, Option<f32>, &face_reference::Model)> = Vec::new();
 
     for r in &all_refs {
-        if r.confirmed {
+        if r.confirmed || r.pinned {
             continue;
         }
         let emb = bytes_to_floats(&r.embedding);
@@ -482,11 +506,15 @@ async fn face_match(
                 contact_name,
             );
 
-            // Assign contact (unconfirmed) to matched face references
+            // Assign contact (unconfirmed) to matched face references. The
+            // row stays unpinned: it is a machine suggestion, so a later
+            // re-match pass may still re-decide it.
             let model: face_reference::Model = (*r).clone();
             let mut active: face_reference::ActiveModel = model.into();
             active.contact_id = Set(Some(contact_id));
             active.update(&db).await?;
+            // Keep the file's per-face contact array in sync (#26/#27).
+            byteburrow::job::sync_face_meta(&db, &r.hash).await?;
             saved += 1;
         }
         println!(
@@ -496,5 +524,25 @@ async fn face_match(
         );
     }
 
+    Ok(())
+}
+
+/// Backfill re-match (#27): re-decide every machine-suggested face against
+/// the current confirmed exemplar pool and sync affected files' meta. This is
+/// the CLI twin of `POST /api/face/rematch` — useful for a one-off backfill
+/// without the server or after bulk exemplar changes.
+async fn face_rematch(
+    config: &Config,
+    params: MatchParams,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db = db_connect(config).await?;
+
+    println!(
+        "Re-matching all machine-suggested faces (threshold {:.2}, margin {:.2})…",
+        params.threshold, params.margin
+    );
+    let outcome = byteburrow::job::rematch_unconfirmed_faces(&db, params, None).await?;
+
+    println!("\nDone: {outcome}");
     Ok(())
 }

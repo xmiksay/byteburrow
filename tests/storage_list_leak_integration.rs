@@ -253,21 +253,30 @@ fn list_storages_admin_sees_everything() {
         let admin_token = bearer_token(&db, admin).await;
         let app = storage_web::router().with_state(make_app_state(db.clone()));
 
-        let req = Request::builder()
-            .uri("/")
-            .header("Authorization", format!("Bearer {admin_token}"))
-            .body(Body::empty())
-            .unwrap();
-        let res = app.clone().oneshot(req).await.unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
+        // Walk every page of the admin list: a shared scratch DB accumulates
+        // storages across runs, so the freshly inserted one (highest id) need
+        // not be on the default first page.
+        let mut ids: Vec<i64> = Vec::new();
+        let mut page = 1u64;
+        loop {
+            let req = Request::builder()
+                .uri(format!("/?page={page}"))
+                .header("Authorization", format!("Bearer {admin_token}"))
+                .body(Body::empty())
+                .unwrap();
+            let res = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
 
-        let body = body_json(res).await;
-        let ids: Vec<i64> = body["items"]
-            .as_array()
-            .expect("paginated list body must have an items array")
-            .iter()
-            .map(|s| s["id"].as_i64().expect("id field"))
-            .collect();
+            let body = body_json(res).await;
+            let items = body["items"].as_array().expect("items array").clone();
+            let total_pages = body["total_pages"].as_u64().expect("total_pages field");
+            ids.extend(items.iter().map(|s| s["id"].as_i64().expect("id field")));
+            if page >= total_pages || items.is_empty() {
+                break;
+            }
+            page += 1;
+        }
+
         assert!(
             ids.contains(&(stor.id as i64)),
             "admin must see all storages: {ids:?}"

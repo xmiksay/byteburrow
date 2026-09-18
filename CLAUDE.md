@@ -59,7 +59,14 @@ Full module map, request flow, OpenAPI tag grouping, and key patterns (auth, DB 
 
 - **`byteburrow`**: Main application server (runs both web server and job runner)
 - **`byteburrow-migration`**: Database migration CLI tool
-- **`byteburrow-cli`**: Command-line utilities (if present)
+- **`byteburrow_cli`**: Administrative CLI (underscore, per the binary target in `src/bin/`). Subcommands:
+  - `test-db` — check the database connection
+  - `user add|list|delete|toggle` — user CRUD/enable-disable
+  - `fixtures` — reset schema and seed admin user + admin group
+  - `openapi` — dump the OpenAPI spec JSON to stdout (source for `make openapi-generate`)
+  - `face-list` — list all `face_reference` rows with model identity
+  - `face-match <contact_id> [--threshold] [--margin]` — preview/assign which unconfirmed faces match a contact (shared host-side matcher)
+  - `face-rematch [--threshold] [--margin]` — backfill re-match over all machine-suggested faces (CLI twin of `POST /api/face/rematch`)
 
 ## Additional Notes
 

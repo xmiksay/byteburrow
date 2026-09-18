@@ -23,6 +23,11 @@ pub struct Model {
     /// Number of f32 components in `embedding` (i.e. `embedding.len() / 4`).
     pub dim: i32,
     pub confirmed: bool,
+    /// Human label that must survive re-matching. `true` for rows assigned
+    /// through the API (`PATCH /api/face/:id`); machine suggestions from the
+    /// matcher/backfill are `false` and get recomputed. Irrelevant for
+    /// `confirmed` rows (exemplars are implicitly human-chosen).
+    pub pinned: bool,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

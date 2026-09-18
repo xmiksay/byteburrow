@@ -1,4 +1,5 @@
 pub mod dav;
+pub mod face;
 pub mod group;
 pub mod photo;
 pub mod rate_limit;
@@ -453,6 +454,27 @@ pub async fn require_group_exists(group_id: i32, db: &DatabaseConnection) -> Res
     Ok(())
 }
 
+/// Helper function to verify a face contact exists by ID (#26).
+pub async fn require_contact_exists(
+    contact_id: i32,
+    db: &DatabaseConnection,
+) -> Result<(), ApiError> {
+    use crate::entity::contact;
+    use sea_orm::QueryFilter;
+
+    let exists = contact::Entity::find()
+        .filter(contact::Column::Id.eq(contact_id))
+        .one(db)
+        .await?
+        .is_some();
+    if !exists {
+        return Err(bad_request(format!(
+            "Contact with id {contact_id} not found"
+        )));
+    }
+    Ok(())
+}
+
 /// Load all group ids the given user belongs to.
 pub async fn user_group_ids(db: &DatabaseConnection, user_id: i32) -> Result<Vec<i32>, ApiError> {
     use crate::entity::group_user;
@@ -852,6 +874,16 @@ pub struct AppState {
         photo::list_by_year_month,
         photo::list_by_year_month_day,
         photo::regenerate_thumbnail,
+        // Face endpoints (contacts/faces management, #26/#27)
+        face::list_contacts_handler,
+        face::create_contact_handler,
+        face::update_contact_handler,
+        face::delete_contact_handler,
+        face::list_face_refs_handler,
+        face::assign_face_handler,
+        face::confirm_face_handler,
+        face::unconfirm_face_handler,
+        face::rematch_handler,
     ),
     components(
         schemas(
@@ -891,6 +923,14 @@ pub struct AppState {
             storage::MetaResponse,
             storage::DirectoryListingResponse,
             storage::ShareInfoResponse,
+            face::ContactResponse,
+            face::FaceRefResponse,
+            face::CreateContactRequest,
+            face::UpdateContactRequest,
+            face::AssignFaceRequest,
+            face::ConfirmFaceRequest,
+            face::RematchResponse,
+            Page<face::FaceRefResponse>,
         )
     ),
     modifiers(&SecurityAddon),
@@ -1230,7 +1270,8 @@ pub async fn run(
         .nest("/group", group::router())
         .nest("/storage", storage::router())
         .nest("/tag", tag::router())
-        .nest("/photo", photo::router());
+        .nest("/photo", photo::router())
+        .nest("/face", face::router());
 
     let app = Router::new()
         .nest("/api", api_router)

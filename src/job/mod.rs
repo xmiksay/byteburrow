@@ -3,6 +3,13 @@ mod exif;
 mod face;
 mod thumb;
 
+// Re-exported for the face-management API (`src/web/face.rs`) and the CLI
+// (`src/bin/byteburrow_cli.rs`): the confirm/assign endpoints sync per-file
+// meta after every label change, the explicit rematch endpoint runs the
+// backfill synchronously (#26/#27), and the CLI `face_match`/`face_rematch`
+// tools share the exact same code paths.
+pub use face::{rematch_unconfirmed_faces, sync_face_meta, RematchOutcome, RematchScope};
+
 use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
@@ -44,6 +51,11 @@ pub enum Job {
     },
     /// Generate thumbnails for an entry identified by hash.
     CreateThumbnail { hash: Vec<u8>, regenerate: bool },
+    /// Re-run face matching over stored embeddings (issue #27). `scope`
+    /// restricts the pass to one embedding model — the exact slice a single
+    /// confirmation can change; `None` re-decides every machine-suggested
+    /// face (manual backfill, contact deletion).
+    RematchFaces { scope: Option<(String, String)> },
 }
 
 /// Bounded channel capacity — prevents OOM under bulk file copy (M8). Jobs
@@ -217,6 +229,13 @@ fn dead_letter(job: &Job, attempts: u32, err: &anyhow::Error) {
             error = %err,
             "Dead-lettering job: retries exhausted"
         ),
+        Job::RematchFaces { scope } => error!(
+            job = ?job,
+            scope = ?scope,
+            attempts,
+            error = %err,
+            "Dead-lettering job: retries exhausted"
+        ),
     }
 }
 
@@ -344,6 +363,20 @@ impl JobRunner {
                 regenerate,
             } => {
                 Self::create_thumbnail(db, hash, *regenerate).await?;
+            }
+
+            Job::RematchFaces { scope } => {
+                let config = Config::get();
+                let outcome = face::rematch_unconfirmed_faces(
+                    db,
+                    crate::face_match::MatchParams {
+                        threshold: config.face_match_threshold,
+                        margin: config.face_match_margin,
+                    },
+                    scope.clone(),
+                )
+                .await?;
+                info!(%outcome, "RematchFaces job complete");
             }
         }
 

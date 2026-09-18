@@ -5,7 +5,8 @@ Deep reference for ByteBurrow's module layout, request flow, and key patterns. S
 ## Backend Structure
 
 - **`src/web/`**: Axum HTTP layer
-  - Route modules: `user.rs`, `group.rs`, `storage.rs`, `tag.rs`, `photo.rs`
+  - Route modules: `user.rs`, `group.rs`, `storage.rs`, `tag.rs`, `photo.rs`, `face.rs`
+  - `face.rs` — the contacts/faces management API (tag `face`, mounted at `/api/face`): contact CRUD, paginated listing of detected faces (`GET /refs`, filtered by `contact_id`/`confirmed`/`unassigned`), the human assignment (`PUT /refs/:id/assignment`) and confirm step (`POST`/`DELETE /refs/:id/confirm`), and the synchronous backfill (`POST /rematch`). Reads follow the thumbnail/meta hash-access rule (a face is visible iff the caller can access a storage holding an entry with that hash); every mutation is admin-only, like tag management. See "Face recognition confirmation flow" below.
   - WebSocket support in `ws/`
   - **DAV gateway** (`dav/`): WebDAV (RFC 4918), CalDAV (RFC 4791), and
     CardDAV (RFC 6352) served under `/dav/storage/<storage_id>/<path>`. All
@@ -43,7 +44,7 @@ Deep reference for ByteBurrow's module layout, request flow, and key patterns. S
 
 - **`src/job/`**: Background job runner
   - Asynchronous job processing with configurable concurrency (based on CPU cores), running on a dedicated low-priority Tokio runtime
-  - Single job type `Job::ProcessFile { storage_id, path, mode }`, where `ProcessMode` is `Auto` (check-then-classify, respects `skip_plugins`), `ForceClassify` (re-run plugins regardless of change), or `HashOnly` (recalculate hash only, never runs plugins)
+  - Job types: `Job::ProcessFile { storage_id, path, mode }` (`ProcessMode`: `Auto` — check-then-classify respecting `skip_plugins`; `ForceClassify` — re-run plugins regardless of change; `HashOnly` — recalculate hash only), `Job::CreateThumbnail { hash, regenerate }`, and `Job::RematchFaces { scope }` (backfill face re-match, scoped to one embedding model or all)
   - Runs on a **dedicated OS thread** that owns its own multi-threaded Tokio runtime, with every worker thread set to `nice 10` so the OS scheduler always prefers the web server (main runtime) over background work
   - Only the inotify watcher and the web server are the two arms of the main runtime's `tokio::select!`; the job runner is **not** an arm of that select — it blocks on its own thread, draining jobs from the channel on its low-priority runtime until the sender side is dropped
 
@@ -349,4 +350,34 @@ state.job_sender.send(Job::ProcessFile { storage_id, path, mode: ProcessMode::Au
 state.job_sender.send(Job::ProcessFile { storage_id, path, mode: ProcessMode::ForceClassify }).ok();
 // HashOnly: only recalculate hash, never run plugins
 state.job_sender.send(Job::ProcessFile { storage_id, path, mode: ProcessMode::HashOnly }).ok();
+// Backfill face re-match, scoped to one embedding model (None = all)
+state.job_sender.send(Job::RematchFaces { scope: Some((model_id, model_version)) }).ok();
 ```
+
+### Face recognition confirmation flow
+
+Recognition is a three-state loop over `face_reference` rows, closed by the
+`face` API (`src/web/face.rs`, issues #26/#27):
+
+1. **Detection/classification** (`src/job/face.rs`) stores every detected
+   face's embedding as a row with `confirmed = false, pinned = false` — a
+   *machine suggestion*. Suggestions are (re)computed by the matcher and
+   mirrored into `meta.custom["face_embeddings"]` (the per-file contact array
+   the UI reads; rebuilt by `job::sync_face_meta`).
+2. **Human labeling** through the API: `PUT /api/face/refs/:id/assignment`
+   sets/replaces/clears a face's contact and **pins** it (`pinned = true`) so
+   re-matching never overwrites a human decision. `POST /api/face/refs/:id/confirm`
+   additionally marks the row a **confirmed exemplar** — it joins the matching
+   pool that `match_embedding` scores against. `DELETE .../confirm` withdraws
+   exemplar status but keeps the pinned label.
+3. **Backfill re-match** (`rematch_unconfirmed_faces`, issue #27): because
+   the pool changed, suggestions are re-decided — but only the ones the change
+   can affect: the confirm/unassign endpoints queue `Job::RematchFaces`
+   scoped to the embedding model of the touched row (cross-model comparisons
+   are refused anyway), and every pass skips `pinned` rows and faces whose
+   model has no exemplars. Affected files' meta arrays are rewritten only when
+   something actually changed. A full synchronous backfill is also available:
+   `POST /api/face/rematch` and `byteburrow_cli face-rematch`.
+
+Naming a person therefore retroactively tags their existing photos without
+reclassifying anything — stored embeddings are re-scored, not re-extracted.

@@ -69,11 +69,23 @@ async fn test_db() -> &'static DatabaseConnection {
 }
 
 async fn create_test_user(db: &DatabaseConnection, username: &str) -> (user::Model, String) {
+    // Basic auth resolves the username through `Auth::from_user_password`,
+    // which matches ANY row (username is not unique in the schema). A shared
+    // scratch DB accumulates rows across runs, so the fresh fixture must be
+    // globally unique or the lookup returns a stale user that owns nothing
+    // (and the storage-access checks fail with 403).
+    let username = format!(
+        "{username}_{}",
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
     let password = format!("{username}-pw");
     let u = user::ActiveModel {
-        name: Set(username.to_string()),
+        name: Set(username.clone()),
         description: Set(None),
-        username: Set(username.to_string()),
+        username: Set(username),
         password: Set(Auth::hash_string(&password)),
         enabled: Set(true),
         admin: Set(false),
