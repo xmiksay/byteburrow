@@ -8,14 +8,20 @@
 //! background tasks on the runtime that created it, so reusing the pool
 //! from a different (and by-then-dropped) per-test runtime hangs.
 
+use axum::body::{to_bytes, Body};
+use axum::http::{header, Request, StatusCode};
+use axum::routing::get;
+use axum::Router;
 use byteburrow::auth::{Auth, AuthError};
 use byteburrow::config::Config;
 use byteburrow::entity::user;
 use byteburrow::migration::Migrator;
+use byteburrow::web::AppState;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
 use sea_orm_migration::MigratorTrait;
 use std::sync::{Arc, Once, OnceLock};
 use tokio::sync::OnceCell;
+use tower::ServiceExt;
 
 static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static DB: OnceCell<DatabaseConnection> = OnceCell::const_new();
@@ -237,5 +243,122 @@ fn unknown_token_fails_with_invalid_token() {
             .err()
             .expect("unknown token should fail");
         assert!(matches!(err, AuthError::InvalidToken));
+    });
+}
+
+// ----------------------------------------------------------------------------
+// HTTP-level transport tests (issue #36)
+// ----------------------------------------------------------------------------
+
+/// A trivial handler behind the `Auth` extractor. The body never matters —
+/// the point is to exercise the real HTTP rejection path (status, headers,
+/// JSON body) that the router produces when auth fails.
+async fn protected(_auth: Auth) -> &'static str {
+    "ok"
+}
+
+fn auth_router(state: Arc<AppState>) -> Router {
+    Router::new()
+        .route("/protected", get(protected))
+        .with_state(state)
+}
+
+/// Build a minimal `AppState` with a no-op job sender (the protected handler
+/// never enqueues jobs).
+fn make_state(db: DatabaseConnection) -> Arc<AppState> {
+    let (job_sender, _rx) = tokio::sync::mpsc::channel(16);
+    Arc::new(AppState {
+        db,
+        config: Config::get().as_ref().clone(),
+        jinja: minijinja::Environment::new(),
+        job_sender,
+        notify_reload: Arc::new(tokio::sync::Notify::new()),
+    })
+}
+
+#[test]
+fn query_param_token_alone_is_rejected() {
+    runtime().block_on(async {
+        let db = test_db().await;
+        let user = create_test_user(db, "it_query_token_rejected", "correct-password", true).await;
+        let auth = Auth::new(user);
+
+        let raw_token = auth
+            .create_token(db, None, None)
+            .await
+            .expect("token creation should succeed");
+
+        let app = auth_router(make_state(db.clone()));
+
+        // Only credential is a `?token=` query parameter — a valid token in a
+        // leaky transport must still be rejected (issue #36).
+        let req = Request::builder()
+            .uri(format!("/protected?token={raw_token}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "query-param tokens must not authenticate"
+        );
+
+        // Positive control: the very same token over the accepted Bearer
+        // transport authenticates, proving the 401 above is about the
+        // transport, not the token itself.
+        let req = Request::builder()
+            .uri("/protected")
+            .header(header::AUTHORIZATION, format!("Bearer {raw_token}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    });
+}
+
+#[test]
+fn unauthorized_rejection_body_is_json_error_envelope() {
+    runtime().block_on(async {
+        let db = test_db().await;
+        let app = auth_router(make_state(db.clone()));
+
+        let req = Request::builder()
+            .uri("/protected")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // `WWW-Authenticate: Basic realm="Cloud"` stays consistent with
+        // `ApiError`'s Unauthorized handling (native clients / DAV gateways
+        // rely on it to prompt for Basic credentials).
+        assert_eq!(
+            resp.headers()
+                .get(header::WWW_AUTHENTICATE)
+                .expect("WWW-Authenticate header must be present"),
+            "Basic realm=\"Cloud\""
+        );
+
+        let content_type = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .expect("Content-Type header must be present")
+            .to_str()
+            .unwrap();
+        assert!(
+            content_type.starts_with("application/json"),
+            "auth rejections must use the JSON error envelope, got Content-Type {content_type}"
+        );
+
+        let body = to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .expect("read body");
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&body).expect("body must be valid JSON");
+        assert_eq!(
+            parsed["error"], "Missing authentication credentials",
+            "body must match the ErrorResponse envelope"
+        );
     });
 }

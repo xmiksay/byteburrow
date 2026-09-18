@@ -23,7 +23,7 @@ Deep reference for ByteBurrow's module layout, request flow, and key patterns. S
   - OpenAPI documentation via `utoipa` + `utoipa-swagger-ui` (available at `/api/docs/`)
 
 - **`src/auth/mod.rs`**: Authentication system
-  - `Auth` extractor for Axum handlers (supports Bearer tokens, Basic auth, and query params)
+  - `Auth` extractor for Axum handlers (supports Bearer tokens, Basic auth, and the `session_token` cookie; `?token=` query auth was removed as a leakage vector, issue #36)
   - Token-based authentication with expiration and activity tracking
   - Password hashing using Argon2id with a per-user random salt (`Auth::hash_password` / `Auth::verify_password`); legacy SHA256 + global-salt hashes are still verified and transparently rehashed to Argon2id on next successful login. SHA256 + global salt (`Auth::hash_string`) remains in use only for hashing high-entropy session tokens.
   - User session management
@@ -147,11 +147,24 @@ The frontend does not hand-write API types. The spec is the single source of tru
 
 ### Authentication
 All protected routes use the `Auth` extractor. It automatically:
-- Extracts credentials from Bearer token, Basic auth, `?token=` query param, or
-  the `session_token` cookie (checked in that priority order)
+- Extracts credentials from Bearer token, Basic auth, or the `session_token`
+  cookie (checked in that priority order)
 - Validates token/credentials against database
 - Returns authenticated user model
 - Updates token activity timestamp
+
+The accepted transports are exactly: `Authorization: Basic` (CLI and the
+DAV/CalDAV/CardDAV gateways), `Authorization: Bearer` (API clients), and the
+`session_token` HttpOnly cookie (the SPA — see below). `?token=` query
+parameters were removed as a token-leakage vector (issue #36): URLs end up in
+proxy/server access logs, `Referer` headers, browser history, and bookmarks,
+so a query-borne session token leaks far beyond the request that carried it.
+Requests authenticating *only* via `?token=` are rejected with 401.
+
+Auth rejections render as the same JSON `ErrorResponse { error }` envelope as
+`ApiError` (see Response Envelopes below); 401s additionally carry
+`WWW-Authenticate: Basic realm="Cloud"` so credential-aware native clients
+(DAV gateways, CLI) can prompt for Basic credentials.
 
 `POST /api/user/login` sets the session token only as an `HttpOnly;
 SameSite=Strict` cookie — it is never returned in the JSON response body, so

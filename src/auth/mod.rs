@@ -70,11 +70,19 @@ impl IntoResponse for AuthError {
                     axum::http::header::WWW_AUTHENTICATE,
                     "Basic realm=\"Cloud\"",
                 )],
-                message,
+                axum::Json(crate::web::ErrorResponse {
+                    error: message.to_string(),
+                }),
             )
                 .into_response()
         } else {
-            (status, message).into_response()
+            (
+                status,
+                axum::Json(crate::web::ErrorResponse {
+                    error: message.to_string(),
+                }),
+            )
+                .into_response()
         }
     }
 }
@@ -124,11 +132,14 @@ impl FromRequestParts<Arc<AppState>> for Auth {
 ///
 /// Sources checked (in order):
 ///   1. `Authorization: Bearer <token>` header
-///   2. `?token=` query parameter
-///   3. `session_token=<...>` cookie
+///   2. `session_token=<...>` cookie
 ///
 /// (Basic auth is handled separately in [`Auth::from_request_parts`] because it
 /// requires database access to verify the password.)
+///
+/// `?token=` query parameters are deliberately *not* accepted: URLs are logged
+/// by proxies/servers and leak into `Referer` headers, browser history, and
+/// bookmarks, so a query-borne token is a token-leakage vector (issue #36).
 pub(crate) async fn extract_token(parts: &mut Parts) -> Option<String> {
     // 1. Bearer token in Authorization header.
     if let Ok(TypedHeader(Authorization(bearer))) =
@@ -137,18 +148,7 @@ pub(crate) async fn extract_token(parts: &mut Parts) -> Option<String> {
         return Some(bearer.token().to_string());
     }
 
-    // 2. Query parameter ?token=...
-    if let Some(query) = parts.uri.query() {
-        for pair in query.split('&') {
-            if let Some((key, value)) = pair.split_once('=') {
-                if key == "token" {
-                    return Some(value.to_string());
-                }
-            }
-        }
-    }
-
-    // 3. Cookie: session_token=...
+    // 2. Cookie: session_token=...
     if let Some(cookie_header) = parts.headers.get(axum::http::header::COOKIE) {
         if let Ok(cookies) = cookie_header.to_str() {
             for cookie in cookies.split(';') {
@@ -580,10 +580,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn extract_token_from_query_param() {
+    async fn extract_token_ignores_query_param() {
+        // Issue #36: `?token=` is a token-leakage vector (URLs are logged by
+        // proxies, leak into Referer/history/bookmarks) and is no longer an
+        // accepted transport. A query-borne token alone must yield `None`.
         let mut parts = parts_for_uri("/files?foo=bar&token=abc123&baz=qux").await;
 
-        assert_eq!(extract_token(&mut parts).await, Some("abc123".to_string()));
+        assert_eq!(extract_token(&mut parts).await, None);
     }
 
     #[tokio::test]
@@ -604,6 +607,7 @@ mod tests {
 
     #[tokio::test]
     async fn extract_token_prefers_bearer_over_query_and_cookie() {
+        // The query token must be ignored, not just deprioritized.
         let mut parts = parts_for_uri("/anything?token=query-token").await;
         parts.headers.insert(
             axum::http::header::AUTHORIZATION,
@@ -621,7 +625,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn extract_token_prefers_query_over_cookie() {
+    async fn extract_token_falls_back_to_cookie_when_query_token_present() {
+        // A query token alongside a cookie must not win (nor be used at all).
         let mut parts = parts_for_uri("/anything?token=query-token").await;
         parts.headers.insert(
             axum::http::header::COOKIE,
@@ -630,7 +635,7 @@ mod tests {
 
         assert_eq!(
             extract_token(&mut parts).await,
-            Some("query-token".to_string())
+            Some("cookie-token".to_string())
         );
     }
 
