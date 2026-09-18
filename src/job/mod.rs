@@ -3,8 +3,10 @@ mod exif;
 mod face;
 mod thumb;
 
+use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use tokio::sync::{mpsc, Semaphore};
@@ -48,6 +50,175 @@ pub enum Job {
 /// that can't be enqueued immediately are rejected (the sender logs and drops
 /// them); this is the safe backpressure behavior for a background classifier.
 const JOB_CHANNEL_CAPACITY: usize = 1024;
+
+// ===== Retry policy + dead-letter (issue #19) =====
+
+/// Total attempts a job gets before it is dead-lettered: the initial run
+/// plus up to two retries.
+const MAX_JOB_ATTEMPTS: u32 = 3;
+
+/// Seconds to sleep after the n-th failed attempt (`n` is 1-based, so the
+/// initial attempt needs no slot). Kept as a table so the schedule is
+/// greppable and adjustable in one place.
+const RETRY_BACKOFF_SECS: [u64; 2] = [5, 30];
+
+// One backoff slot per retry — keeps the table honest if either const moves.
+const _: () = assert!(
+    RETRY_BACKOFF_SECS.len() == MAX_JOB_ATTEMPTS as usize - 1,
+    "one backoff slot per retry (the initial attempt needs no backoff)"
+);
+
+/// Backoff in seconds before the attempt after the n-th failure, where `n`
+/// is 1-based (n = 1 → first retry). Valid for `n < MAX_JOB_ATTEMPTS`;
+/// out-of-range values return 0 as a safe fallback (callers never produce
+/// them — see the const assert below).
+///
+/// Pure function on purpose: tests exercise the whole schedule without
+/// sleeping, and `run_with_retries` takes the schedule as a parameter.
+fn retry_backoff_secs(failed_attempt: u32) -> u64 {
+    // Attempt numbers are 1-based; 0 (and any past-the-table value) has no
+    // slot. The retry loop caps at MAX_JOB_ATTEMPTS so out-of-range inputs
+    // never occur in production — 0 keeps malformed calls honest anyway.
+    let Some(idx) = failed_attempt.checked_sub(1) else {
+        return 0;
+    };
+    RETRY_BACKOFF_SECS.get(idx as usize).copied().unwrap_or(0)
+}
+
+/// Marker for expected, non-retryable outcomes — e.g. a path that matches
+/// the storage's ignore patterns. Replaces the bare `bail!("ignored")` in
+/// `hash_and_diff` so `is_transient` can recognize it structurally instead
+/// of string-matching.
+#[derive(Debug)]
+struct IgnoredPath;
+
+impl std::fmt::Display for IgnoredPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("path matches storage ignore patterns")
+    }
+}
+impl std::error::Error for IgnoredPath {}
+
+/// Decide whether a failed job attempt is worth retrying.
+///
+/// Walks the whole `anyhow` error *chain* (context layers wrap the real
+/// cause) and defaults to **permanent** — retrying a logic bug just burns a
+/// worker for 35s and re-logs the same failure:
+///
+/// - **Transient**: `sea_orm::DbErr` (pool timeouts, dropped connections)
+///   except `RecordNotFound` (a missing storage/entry row will not heal),
+///   and `std::io::Error` except `NotFound`/`IsADirectory` (file vanished
+///   or was replaced by a directory between the inotify event and
+///   processing — expected churn, not a fault).
+/// - **Permanent**: the [`IgnoredPath`] marker, `RecordNotFound`,
+///   vanished-file io errors, and anything unrecognized (plugin/FFI
+///   failures, image decode errors, …).
+///
+/// The first recognizable type in the chain wins; mixed chains do not
+/// occur in practice because each failure site produces one root cause.
+fn is_transient(err: &anyhow::Error) -> bool {
+    for cause in err.chain() {
+        // `chain()` includes the outermost context; `source()` would skip it.
+        if let Some(db_err) = cause.downcast_ref::<sea_orm::DbErr>() {
+            return !matches!(db_err, sea_orm::DbErr::RecordNotFound(_));
+        }
+        if let Some(io_err) = cause.downcast_ref::<std::io::Error>() {
+            return !matches!(
+                io_err.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::IsADirectory
+            );
+        }
+        if cause.downcast_ref::<IgnoredPath>().is_some() {
+            return false;
+        }
+    }
+    false
+}
+
+/// Outcome of [`run_with_retries`]: what actually happened, so the caller
+/// can tell "succeeded (possibly after retries)" from "dead-letter this".
+#[derive(Debug)]
+enum RetryOutcome {
+    /// Gave up. Carries the attempts made and the final error.
+    Exhausted {
+        attempts: u32,
+        last_error: anyhow::Error,
+    },
+    /// `op` succeeded — on the first try if `attempts == 1`, else after
+    /// transient failures that later recovered.
+    Succeeded { attempts: u32 },
+}
+
+/// Run `op` up to [`MAX_JOB_ATTEMPTS`] times, sleeping `backoff(failed_n)`
+/// between attempts — but only when the failure is [`is_transient`].
+/// Permanent failures return immediately; transient failures that run out
+/// of attempts return [`RetryOutcome::Exhausted`] for the caller to
+/// dead-letter.
+///
+/// `op` is a closure returning a fresh future per attempt (jobs are
+/// re-executed from scratch, not resumed); `backoff` is injected so tests
+/// pass `|_| 0` and never sleep. Attempt-count termination lives *here*,
+/// not in the backoff schedule, so no backoff function can loop forever.
+///
+/// This is the retry half of issue #19; the dead-letter log lives at the
+/// call site, where the `Job` (for structured fields) is still in scope.
+async fn run_with_retries<F, Fut>(mut op: F, backoff: impl Fn(u32) -> u64) -> RetryOutcome
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = anyhow::Result<()>>,
+{
+    let mut attempt: u32 = 1;
+    loop {
+        let err = match op().await {
+            Ok(()) => return RetryOutcome::Succeeded { attempts: attempt },
+            Err(e) => e,
+        };
+
+        if attempt >= MAX_JOB_ATTEMPTS || !is_transient(&err) {
+            return RetryOutcome::Exhausted {
+                attempts: attempt,
+                last_error: err,
+            };
+        }
+
+        let secs = backoff(attempt);
+        warn!(
+            attempt,
+            total = MAX_JOB_ATTEMPTS,
+            backoff_secs = secs,
+            error = %err,
+            "Job attempt failed (transient); retrying"
+        );
+        tokio::time::sleep(Duration::from_secs(secs)).await;
+        attempt += 1;
+    }
+}
+
+/// Emit the single structured dead-letter line after a job exhausted its
+/// retries (issue #19). Exactly one `error!` per dead-lettered job;
+/// per-attempt detail was already logged as `warn!` by `run_with_retries`,
+/// so this line carries only identity + final state.
+fn dead_letter(job: &Job, attempts: u32, err: &anyhow::Error) {
+    match job {
+        Job::ProcessFile {
+            storage_id, path, ..
+        } => error!(
+            job = ?job,
+            storage_id,
+            path,
+            attempts,
+            error = %err,
+            "Dead-lettering job: retries exhausted"
+        ),
+        Job::CreateThumbnail { hash, .. } => error!(
+            job = ?job,
+            hash = %hex::encode(hash),
+            attempts,
+            error = %err,
+            "Dead-lettering job: retries exhausted"
+        ),
+    }
+}
 
 pub type JobSender = mpsc::Sender<Job>;
 
@@ -97,11 +268,20 @@ impl JobRunner {
     ///
     /// When the sender is dropped, the channel drains: in-flight jobs are
     /// awaited (M6 — graceful shutdown) before the runtime shuts down.
+    ///
+    /// Retries (issue #19) happen *inside* the spawned task, so a job holds
+    /// its semaphore permit across backoff sleeps (up to 5s + 30s). Tradeoff:
+    /// a worker slot sits idle during backoff, briefly lowering effective
+    /// concurrency below `workers`. That is preferred over re-enqueuing
+    /// through the channel because re-enqueue costs a `try_send` race — a
+    /// full channel would dead-letter a job before its retries even ran —
+    /// and keeps the M6 drain guarantee simple: draining waits out pending
+    /// retries too.
     pub fn run(mut self) {
         self.runtime.block_on(async move {
             info!(
-                "Job runner started (dedicated runtime, nice {}, channel cap {})",
-                JOB_THREAD_NICE, JOB_CHANNEL_CAPACITY
+                "Job runner started (dedicated runtime, nice {}, channel cap {}, max attempts {})",
+                JOB_THREAD_NICE, JOB_CHANNEL_CAPACITY, MAX_JOB_ATTEMPTS
             );
             // Track spawned jobs so we can await them on shutdown (M6).
             let mut tasks = tokio::task::JoinSet::new();
@@ -116,8 +296,20 @@ impl JobRunner {
                 let plugins = self.plugins.clone();
                 tasks.spawn(async move {
                     info!(?job, "Processing job");
-                    if let Err(e) = Self::process_job(&db, &plugins, job).await {
-                        error!("Job failed: {e}");
+                    match run_with_retries(
+                        || Self::process_job(&db, &plugins, &job),
+                        retry_backoff_secs,
+                    )
+                    .await
+                    {
+                        RetryOutcome::Succeeded { attempts } if attempts > 1 => {
+                            info!(?job, attempts, "Job succeeded after retry");
+                        }
+                        RetryOutcome::Succeeded { .. } => {}
+                        RetryOutcome::Exhausted {
+                            attempts,
+                            last_error,
+                        } => dead_letter(&job, attempts, &last_error),
                     }
                     drop(permit);
                 });
@@ -136,7 +328,7 @@ impl JobRunner {
     async fn process_job(
         db: &DatabaseConnection,
         plugins: &PluginRegistry,
-        job: Job,
+        job: &Job,
     ) -> anyhow::Result<()> {
         match job {
             Job::ProcessFile {
@@ -144,14 +336,14 @@ impl JobRunner {
                 path,
                 mode,
             } => {
-                Self::process_file(db, plugins, storage_id, &path, mode).await?;
+                Self::process_file(db, plugins, *storage_id, path, *mode).await?;
             }
 
             Job::CreateThumbnail {
                 ref hash,
                 regenerate,
             } => {
-                Self::create_thumbnail(db, hash, regenerate).await?;
+                Self::create_thumbnail(db, hash, *regenerate).await?;
             }
         }
 
@@ -196,7 +388,9 @@ impl JobRunner {
         // Filter excluded paths using per-storage ignore patterns.
         let patterns = crate::ignore::parse_patterns(&storage.model.ignore_patterns);
         if crate::ignore::is_ignored(path, &patterns) {
-            anyhow::bail!("ignored");
+            // Marker type (not a string bail) so `is_transient` recognizes
+            // this expected outcome structurally and never retries it.
+            return Err(IgnoredPath.into());
         }
 
         let (updated, hash, entry) = storage.calculate_hash(db, path).await?;
@@ -338,6 +532,206 @@ mod tests {
             &entry,
             ProcessMode::ForceClassify
         ));
+    }
+
+    // ===== issue #19: retry classification, backoff schedule, retry loop =====
+
+    fn io_err(kind: std::io::ErrorKind) -> anyhow::Error {
+        std::io::Error::from(kind).into()
+    }
+
+    #[test]
+    fn backoff_table_has_one_slot_per_retry() {
+        assert_eq!(RETRY_BACKOFF_SECS.len(), (MAX_JOB_ATTEMPTS - 1) as usize);
+        assert_eq!(MAX_JOB_ATTEMPTS, 3);
+    }
+
+    #[test]
+    fn retry_backoff_schedule_matches_consts() {
+        assert_eq!(retry_backoff_secs(1), RETRY_BACKOFF_SECS[0]);
+        assert_eq!(retry_backoff_secs(2), RETRY_BACKOFF_SECS[1]);
+        assert_eq!(RETRY_BACKOFF_SECS, [5, 30]);
+    }
+
+    #[test]
+    fn retry_backoff_out_of_range_falls_back_to_zero() {
+        // No third retry exists; 0 also guards the saturating-sub path.
+        assert_eq!(retry_backoff_secs(0), 0);
+        assert_eq!(retry_backoff_secs(MAX_JOB_ATTEMPTS), 0);
+        assert_eq!(retry_backoff_secs(u32::MAX), 0);
+    }
+
+    #[test]
+    fn db_errors_are_transient() {
+        let err: anyhow::Error =
+            sea_orm::DbErr::ConnectionAcquire(sea_orm::ConnAcquireErr::Timeout).into();
+        assert!(is_transient(&err));
+
+        let err: anyhow::Error =
+            sea_orm::DbErr::Conn(sea_orm::RuntimeErr::Internal("closed".into())).into();
+        assert!(is_transient(&err));
+
+        let err: anyhow::Error = sea_orm::DbErr::Custom("pool saturated".into()).into();
+        assert!(is_transient(&err));
+    }
+
+    #[test]
+    fn record_not_found_is_permanent_even_with_context() {
+        let err: anyhow::Error = sea_orm::DbErr::RecordNotFound("storage 1".into()).into();
+        assert!(!is_transient(&err));
+
+        let wrapped = anyhow::Error::from(sea_orm::DbErr::RecordNotFound("storage 1".into()))
+            .context("looking up storage");
+        assert!(!is_transient(&wrapped));
+    }
+
+    #[test]
+    fn vanished_file_is_permanent_but_other_io_errors_are_transient() {
+        assert!(!is_transient(&io_err(std::io::ErrorKind::NotFound)));
+        assert!(!is_transient(&io_err(std::io::ErrorKind::IsADirectory)));
+        assert!(is_transient(&io_err(std::io::ErrorKind::PermissionDenied)));
+        assert!(is_transient(&io_err(std::io::ErrorKind::TimedOut)));
+    }
+
+    #[test]
+    fn ignored_path_marker_is_permanent_even_with_context() {
+        assert!(!is_transient(&(IgnoredPath.into())));
+
+        let wrapped = anyhow::Error::from(IgnoredPath).context("hash_and_diff");
+        assert!(!is_transient(&wrapped));
+    }
+
+    #[test]
+    fn unrecognized_errors_default_to_permanent() {
+        // A bare bail! (string error) has no recognizable cause — retrying
+        // a logic bug would only burn workers, so it must not retry.
+        assert!(!is_transient(&anyhow::anyhow!("plugin panicked")));
+        let err: anyhow::Error = std::fmt::Error.into();
+        assert!(!is_transient(&err));
+    }
+
+    #[tokio::test]
+    async fn flaky_job_recovers_on_third_attempt() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = calls.clone();
+        let outcome = run_with_retries(
+            move || {
+                let n = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                async move {
+                    if n < 3 {
+                        Err(anyhow::Error::new(std::io::Error::other("pool flake")))
+                    } else {
+                        Ok(())
+                    }
+                }
+            },
+            |_| 0, // injected schedule: tests never sleep
+        )
+        .await;
+
+        assert!(matches!(outcome, RetryOutcome::Succeeded { attempts: 3 }));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn permanent_failure_is_not_retried() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = calls.clone();
+        let outcome = run_with_retries(
+            move || {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { Err(anyhow::Error::new(IgnoredPath)) }
+            },
+            |_| 0,
+        )
+        .await;
+
+        match outcome {
+            RetryOutcome::Exhausted {
+                attempts,
+                last_error,
+            } => {
+                assert_eq!(attempts, 1, "permanent failures must not be retried");
+                assert!(last_error.downcast_ref::<IgnoredPath>().is_some());
+            }
+            RetryOutcome::Succeeded { .. } => panic!("expected exhaustion"),
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn persistent_transient_failure_exhausts_after_max_attempts() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = calls.clone();
+        let outcome = run_with_retries(
+            move || {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { Err(anyhow::Error::new(std::io::Error::other("db down"))) }
+            },
+            |_| 0,
+        )
+        .await;
+
+        match outcome {
+            RetryOutcome::Exhausted {
+                attempts,
+                last_error,
+            } => {
+                assert_eq!(attempts, MAX_JOB_ATTEMPTS);
+                assert!(is_transient(&last_error));
+            }
+            RetryOutcome::Succeeded { .. } => panic!("expected exhaustion"),
+        }
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            MAX_JOB_ATTEMPTS as usize
+        );
+    }
+
+    #[tokio::test]
+    async fn backoff_receives_one_based_failed_attempt_numbers() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = seen.clone();
+        let outcome = run_with_retries(
+            || async { Err::<(), anyhow::Error>(std::io::Error::other("x").into()) },
+            move |failed_attempt| {
+                recorder.lock().unwrap().push(failed_attempt);
+                0
+            },
+        )
+        .await;
+
+        assert!(matches!(
+            outcome,
+            RetryOutcome::Exhausted {
+                attempts: MAX_JOB_ATTEMPTS,
+                ..
+            }
+        ));
+        assert_eq!(*seen.lock().unwrap(), vec![1, 2]);
+    }
+
+    #[test]
+    fn dead_letter_handles_both_job_variants() {
+        // tracing macros are no-ops without a subscriber; this exercises
+        // the field-extraction match arms end to end.
+        dead_letter(
+            &Job::ProcessFile {
+                storage_id: 1,
+                path: "photos/a.jpg".into(),
+                mode: ProcessMode::Auto,
+            },
+            MAX_JOB_ATTEMPTS,
+            &anyhow::anyhow!("boom"),
+        );
+        dead_letter(
+            &Job::CreateThumbnail {
+                hash: vec![0xde, 0xad],
+                regenerate: false,
+            },
+            MAX_JOB_ATTEMPTS,
+            &anyhow::anyhow!("boom"),
+        );
     }
 
     fn make_entry(skip_plugins: bool) -> entry::Model {
