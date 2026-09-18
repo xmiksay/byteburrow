@@ -107,6 +107,10 @@ impl ClassifierPlugin for FaceEmbedder {
         };
 
         let mut embeddings = Vec::new();
+        // Per-face failures (face_index + error) — surfaced per issue #23:
+        // all-failed is systemic and becomes `Err`; some-failed is recorded
+        // alongside the successes as structured custom data.
+        let mut errors = Vec::new();
 
         for (i, rect) in rects.iter().enumerate() {
             let x = rect.get("x").and_then(|v| v.as_i64()).unwrap_or(0).max(0) as u32;
@@ -131,7 +135,7 @@ impl ClassifierPlugin for FaceEmbedder {
                 image::imageops::FilterType::Triangle,
             );
 
-            match compute_embedding(agent, &self.endpoint, &resized) {
+            match self.embed_crop(agent, &resized) {
                 Ok(embedding) => {
                     embeddings.push(serde_json::json!({
                         "face_index": i,
@@ -143,23 +147,90 @@ impl ClassifierPlugin for FaceEmbedder {
                 }
                 Err(e) => {
                     eprintln!("Embedding inference failed for face {i}: {e}");
-                    continue;
+                    errors.push(serde_json::json!({
+                        "face_index": i,
+                        "error": e,
+                    }));
                 }
             }
         }
 
-        if embeddings.is_empty() {
-            return Ok(None);
+        match finalize_embeddings(embeddings, errors) {
+            EmbedOutcome::None => Ok(None),
+            EmbedOutcome::Partial { embeddings, errors } => {
+                let mut result = ClassificationResult::default();
+                result.custom.insert(
+                    "face_embeddings_raw".to_string(),
+                    serde_json::Value::Array(embeddings),
+                );
+                // Diagnosis aid for partially-successful files; the host merge
+                // layer unions custom maps by key, so an extra key is inert for
+                // consumers that don't read it.
+                result.custom.insert(
+                    "face_embed_errors".to_string(),
+                    serde_json::Value::Array(errors),
+                );
+                Ok(Some(result))
+            }
+            EmbedOutcome::AllFailed(errors) => Err(format!(
+                "all {} face embedding(s) failed: {}",
+                errors.len(),
+                summarize_errors(&errors)
+            )),
         }
-
-        let mut result = ClassificationResult::default();
-        result.custom.insert(
-            "face_embeddings_raw".to_string(),
-            serde_json::Value::Array(embeddings),
-        );
-
-        Ok(Some(result))
     }
+}
+
+impl FaceEmbedder {
+    /// Embed one preprocessed crop. This is the seam where a future `local`
+    /// (in-process tract) backend can slot in (issue #30) — the HTTP path is
+    /// the current implementation.
+    fn embed_crop(&self, agent: &ureq::Agent, resized: &DynamicImage) -> Result<Vec<f32>, String> {
+        compute_embedding(agent, &self.endpoint, resized)
+    }
+}
+
+/// Decide the classify outcome from per-face successes and failures.
+///
+/// - no faces were processable at all → `None` (semantic skip, same as before)
+/// - every processed face failed → `AllFailed` (systemic — e.g. the embedding
+///   service is down; the host logs this as `Failed`)
+/// - at least one success → `Partial` (failures ride along as structured data)
+fn finalize_embeddings(
+    embeddings: Vec<serde_json::Value>,
+    errors: Vec<serde_json::Value>,
+) -> EmbedOutcome {
+    if embeddings.is_empty() {
+        if errors.is_empty() {
+            EmbedOutcome::None
+        } else {
+            EmbedOutcome::AllFailed(errors)
+        }
+    } else {
+        EmbedOutcome::Partial { embeddings, errors }
+    }
+}
+
+fn summarize_errors(errors: &[serde_json::Value]) -> String {
+    errors
+        .iter()
+        .map(|e| {
+            let idx = e.get("face_index").and_then(|v| v.as_u64()).unwrap_or(0);
+            let msg = e.get("error").and_then(|v| v.as_str()).unwrap_or("unknown");
+            format!("[{idx}] {msg}")
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+#[derive(Debug)]
+enum EmbedOutcome {
+    None,
+    Partial {
+        embeddings: Vec<serde_json::Value>,
+        errors: Vec<serde_json::Value>,
+    },
+    AllFailed(Vec<serde_json::Value>),
 }
 
 /// POST the cropped face (as JPEG) to the embedding endpoint and parse the
@@ -284,5 +355,47 @@ mod tests {
         // 270° CW (== 90° CCW): dims swap 2x3 → 3x2; top-left → bottom-left.
         assert_eq!((oriented.width(), oriented.height()), (3, 2));
         assert_eq!(marker_pos(&oriented), (0, 1));
+    }
+
+    // ── Error aggregation (issue #23) ───────────────────────────────
+
+    fn err_value(face_index: usize, msg: &str) -> serde_json::Value {
+        serde_json::json!({"face_index": face_index, "error": msg})
+    }
+
+    #[test]
+    fn no_faces_processed_is_none() {
+        match finalize_embeddings(vec![], vec![]) {
+            EmbedOutcome::None => {}
+            other => panic!("expected None, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn all_faces_failed_is_systemic_err() {
+        let errors = vec![err_value(0, "conn refused"), err_value(1, "timeout")];
+        match finalize_embeddings(vec![], errors) {
+            EmbedOutcome::AllFailed(e) => assert_eq!(e.len(), 2),
+            other => panic!("expected AllFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn partial_success_carries_errors_as_data() {
+        let embeddings = vec![serde_json::json!({"face_index": 0})];
+        let errors = vec![err_value(1, "timeout")];
+        match finalize_embeddings(embeddings, errors) {
+            EmbedOutcome::Partial { embeddings, errors } => {
+                assert_eq!(embeddings.len(), 1);
+                assert_eq!(errors.len(), 1);
+            }
+            other => panic!("expected Partial, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn summarize_joins_indexed_errors() {
+        let errors = vec![err_value(0, "conn refused"), err_value(2, "timeout")];
+        assert_eq!(summarize_errors(&errors), "[0] conn refused; [2] timeout");
     }
 }
