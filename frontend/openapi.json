@@ -4602,6 +4602,13 @@
               "null"
             ]
           },
+          "place": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Human-readable location resolved from the EXIF coordinates by the\nreverse-geocoding provider seam (`crate::geo`, #2); `null` until a\nprovider is configured / resolves it."
+          },
           "storage_id": {
             "type": [
               "integer",

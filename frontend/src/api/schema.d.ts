@@ -1487,6 +1487,12 @@ export interface components {
             /** Format: double */
             longitude?: number | null;
             path?: string | null;
+            /**
+             * @description Human-readable location resolved from the EXIF coordinates by the
+             *     reverse-geocoding provider seam (`crate::geo`, #2); `null` until a
+             *     provider is configured / resolves it.
+             */
+            place?: string | null;
             /** Format: int32 */
             storage_id?: number | null;
         };

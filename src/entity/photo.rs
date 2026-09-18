@@ -10,6 +10,9 @@ pub struct Model {
     pub longitude: Option<f64>,
     pub date: Option<DateTime>,
     pub keywords: Vec<String>,
+    /// Human-readable location resolved from the EXIF coordinates by the
+    /// reverse-geocoding provider seam (`crate::geo`); `NULL` until resolved.
+    pub place: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

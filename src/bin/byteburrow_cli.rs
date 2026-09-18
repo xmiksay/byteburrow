@@ -59,6 +59,14 @@ enum Commands {
         #[arg(short, long)]
         margin: Option<f32>,
     },
+    /// Backfill photo locations (#2): resolve `photo.place` for photos that
+    /// have EXIF coordinates but no place yet, via the configured
+    /// reverse-geocoding provider (`BYTEBURROW__REVERSE_GEOCODE_URL`).
+    PhotoGeocode {
+        /// Maximum number of photos to resolve in this run.
+        #[arg(short, long, default_value_t = 100)]
+        limit: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -168,6 +176,12 @@ async fn main() {
                 margin: margin.unwrap_or(config.face_match_margin),
             };
             if let Err(e) = face_rematch(&config, params).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Commands::PhotoGeocode { limit } => {
+            if let Err(e) = photo_geocode(&config, *limit).await {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
@@ -544,5 +558,28 @@ async fn face_rematch(
     let outcome = byteburrow::job::rematch_unconfirmed_faces(&db, params, None).await?;
 
     println!("\nDone: {outcome}");
+    Ok(())
+}
+
+/// Backfill photo locations (#2): resolve `photo.place` via the configured
+/// reverse-geocoding provider for photos that have EXIF coordinates but no
+/// place yet. New photos are resolved inline during classification; this
+/// exists for existing libraries and provider re-configurations.
+async fn photo_geocode(config: &Config, limit: u64) -> Result<(), Box<dyn std::error::Error>> {
+    if config.reverse_geocode_url.is_empty() {
+        eprintln!("Reverse geocoding is disabled (BYTEBURROW__REVERSE_GEOCODE_URL is empty).");
+        std::process::exit(1);
+    }
+    if config.reverse_geocode_url.contains("{key}") && config.reverse_geocode_api_key.is_empty() {
+        eprintln!(
+            "The configured URL template needs {{key}} but BYTEBURROW__REVERSE_GEOCODE_API_KEY is empty."
+        );
+        std::process::exit(1);
+    }
+
+    let db = db_connect(config).await?;
+    println!("Resolving up to {limit} photo location(s)…");
+    let filled = byteburrow::geo::backfill_photo_places(&db, limit, config).await?;
+    println!("Done: {filled} photo location(s) resolved.");
     Ok(())
 }

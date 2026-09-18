@@ -45,6 +45,9 @@ Config is read from the environment (a `.env` file in the project root is loaded
 - `BYTEBURROW__TRUST_FORWARDED_HEADERS` (optional): Defaults to `false`. Only set to `true` when the server sits behind a reverse proxy that sets `X-Forwarded-For`/`X-Real-IP` itself — otherwise these are ignored and the real TCP peer address is used, since any client can spoof them
 - `BYTEBURROW__FACE_MATCH_THRESHOLD` (optional): Defaults to `0.8`. Minimum cosine similarity for a face to be matched to a known contact — the single "is this a known person" threshold shared by the job pipeline and the CLI `face_match` tool (`src/face_match.rs`)
 - `BYTEBURROW__FACE_MATCH_MARGIN` (optional): Defaults to `0.05`. Minimum gap between the best contact's similarity and the best *different* contact's; rejects ambiguous matches where two people are almost equally close. Set to `0` to disable the guard
+- `BYTEBURROW__REVERSE_GEOCODE_URL` (optional): URL template for resolving photo locations from EXIF coordinates (`src/geo.rs`). `{lat}`, `{lng}`, `{key}` are substituted. Defaults to the Google Maps Geocoding API format; a self-hosted Nominatim (`.../reverse?lat={lat}&lon={lng}&format=json`) works too since both response shapes are parsed. Empty disables the feature
+- `BYTEBURROW__REVERSE_GEOCODE_API_KEY` (optional): Key substituted into `{key}`. Google requires one; keyless templates ignore it. When the template contains `{key}` and this is empty, lookups are skipped
+- `BYTEBURROW__REVERSE_GEOCODE_TIMEOUT` (optional): Defaults to `10` seconds per reverse-geocode request
 - `BYTEBURROW__PLUGIN__<KEY>` (optional): Any variable with this prefix is collected into the plugin config map (`Config::plugin`, key = lowercased `<KEY>`) and passed into every classifier plugin's `init()`. Each plugin reads the keys it recognizes and ignores the rest; every key still falls back to a legacy `BYTEBURROW_<KEY>` process env var and then a built-in default. Recognized keys: `ollama_url` / `ollama_model` / `ollama_timeout` / `keyword_prompt` / `keyword_max_concurrent` (keyword-extractor), `face_max_dim` / `face_score_threshold` / `face_portrait_area_threshold` (face-detector), `face_embed_endpoint` / `face_embed_timeout` / `face_embed_backend` / `face_embed_model` (face-embedder). See `.env.example` for defaults, `docs/architecture.md` for details, and `docs/plugins-external-services.md` for the external-service plugin pattern
 
 The frontend is **not** served from a runtime path: its build output (`frontend/dist`) is embedded into the server binary at compile time via `rust_embed`, so there is no `FRONTEND_DIST` variable — rebuild the binary to pick up frontend changes.
@@ -67,6 +70,7 @@ Full module map, request flow, OpenAPI tag grouping, and key patterns (auth, DB 
   - `face-list` — list all `face_reference` rows with model identity
   - `face-match <contact_id> [--threshold] [--margin]` — preview/assign which unconfirmed faces match a contact (shared host-side matcher)
   - `face-rematch [--threshold] [--margin]` — backfill re-match over all machine-suggested faces (CLI twin of `POST /api/face/rematch`)
+  - `photo-geocode [--limit N]` — backfill `photo.place` for photos with EXIF coordinates via the reverse-geocoding provider
 
 ## Additional Notes
 

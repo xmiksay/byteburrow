@@ -58,6 +58,12 @@ pub(super) async fn run_classification(
 
         persist_meta(db, hash_bytes, &merged).await?;
         persist_photo(db, hash_bytes, &merged).await?;
+
+        // Resolve the photo's EXIF coordinates into a place name (#2). Best
+        // effort: a provider outage must never fail classification.
+        if let Err(e) = crate::geo::resolve_photo_place(db, hash_bytes, &config).await {
+            tracing::warn!(error = %e, "photo location resolution skipped");
+        }
     }
 
     Ok(())
@@ -257,6 +263,8 @@ async fn persist_photo(
                 longitude: Set(merged.longitude),
                 date: Set(date),
                 keywords: Set(vec![]),
+                // Resolved afterwards by geo::resolve_photo_place (#2).
+                place: Set(None),
             };
             active.insert(db).await?;
         }
