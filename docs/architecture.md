@@ -91,6 +91,7 @@ Deep reference for ByteBurrow's module layout, request flow, and key patterns. S
   - `lucide-vue-next`: icon system
 - **Components**: located in `frontend/src/components/`
   - Reusable UI components like FileExplorer, FileViewer, UserSelect
+  - Management pages mirror each other (header + list + modal + confirm pattern): UserManagement, GroupManagement, TagManagement, StorageManagement, ShareManagement, FaceManagement (contacts + face review queue, `/faces` — the UI half of the #26 confirmation flow)
 - **Generated API client** (`frontend/src/api/`): request/response types come from
   the server's OpenAPI spec, not hand-written duplicates — see below. `frontend/src/types`
   and `frontend/src/services` re-export / consume these generated types so the
