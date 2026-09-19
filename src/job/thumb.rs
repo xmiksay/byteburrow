@@ -1,15 +1,22 @@
-use std::path::Path;
-
 use image::imageops::FilterType;
 use image::GenericImageView;
 use tracing::{info, warn};
 
 use crate::config::Config;
-use crate::storage::thumbnail;
+use crate::storage::thumbnail::{self, StorageSource};
+use crate::storage::Storage;
 
 /// Generate the mini/small/large thumbnail set for a file if missing.
 /// Called from `JobRunner::process_file` and `JobRunner::create_thumbnail`.
-pub(super) async fn generate_thumbnails(full_path: &Path, hash_hex: &str) -> anyhow::Result<()> {
+///
+/// Backend-neutral since ADR 0008: local storages decode via
+/// `image::open(full_path)`; remote (nextcloud) storages GET the bytes and
+/// decode with `image::load_from_memory`.
+pub(super) async fn generate_thumbnails(
+    storage: &Storage,
+    path: &str,
+    hash_hex: &str,
+) -> anyhow::Result<()> {
     let config = Config::get();
     let thumbnail_dir = std::path::PathBuf::from(&config.thumbnail_storage);
 
@@ -22,10 +29,22 @@ pub(super) async fn generate_thumbnails(full_path: &Path, hash_hex: &str) -> any
 
         thumbnail::ensure_thumbnail_dir(&thumb_path).await?;
 
-        let full_path = full_path.to_path_buf();
+        // Local: hand the decoder the on-disk path (streamed decode, no
+        // buffering). Remote: fetch the bytes once per missing size.
+        let source = if storage.is_local() {
+            let full_path = storage.get_full_path(path)?;
+            StorageSource::Path(full_path)
+        } else {
+            let bytes = storage.read_file(path).await?;
+            StorageSource::Bytes(bytes)
+        };
+
         let thumb_path_clone = thumb_path.clone();
         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-            let img = image::open(&full_path)?;
+            let img = match &source {
+                StorageSource::Path(p) => image::open(p)?,
+                StorageSource::Bytes(b) => image::load_from_memory(b)?,
+            };
             let (w, h) = img.dimensions();
             if w <= max_dim && h <= max_dim {
                 img.save(&thumb_path_clone)?;

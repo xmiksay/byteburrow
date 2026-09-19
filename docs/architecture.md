@@ -29,11 +29,14 @@ Deep reference for ByteBurrow's module layout, request flow, and key patterns. S
   - Password hashing using Argon2id with a per-user random salt (`Auth::hash_password` / `Auth::verify_password`); legacy SHA256 + global-salt hashes are still verified and transparently rehashed to Argon2id on next successful login. SHA256 + global salt (`Auth::hash_string`) remains in use only for hashing high-entropy session tokens.
   - User session management
 
-- **`src/storage/`**: Core filesystem abstraction
-  - `Storage` wrapper for filesystem operations
+- **`src/storage/`**: Core storage abstraction — local filesystem **and remote backends**
+  - `Storage` wrapper; every seam (`list_directory_fs`, `save_file`, `create_directory`, `rename_entry`, `remove_entry`, hashing, `stat_entry`, `read_file`) dispatches per `storage.backend` (ADR 0008)
+  - Backend-neutral accessors for callers that must work without a local path: `stat_entry -> EntryStat`, `entry_exists`, `read_file`, `read_file_prefix`, `copy_entry`
+  - `src/storage/nextcloud.rs`: the remote backend — a WebDAV client for Nextcloud's `remote.php/dav/files/<user>/<...>` endpoint (PROPFIND/GET/PUT/MKCOL/DELETE/MOVE/COPY, Basic auth with an app password, `ureq` inside `spawn_blocking`, 207 Multi-Status parsed with `quick-xml`)
   - `DirectoryEntry` type for representing files/folders
   - Helper modules: `content_type.rs`, `hash.rs`, `thumbnail.rs`
-  - Handles synchronization between filesystem and database state
+  - Handles synchronization between the storage backend and database state
+  - Remote storages have **no inotify** (nothing local to watch); they stay current via the scan endpoint. `get_full_path` errors for them — callers use the neutral accessors.
 
 - **`src/entity/`**: SeaORM database models
   - Core entities: `user`, `group`, `storage`, `entry`, `tag`, `token`, `photo`, `shared`, `meta`
@@ -286,11 +289,13 @@ by walking pages through `api.getAll()`.
 > deferred to the H1 generated-client cutover. See ADR 0004.
 
 ### File Operations
-Use `Storage` wrapper instead of direct filesystem access to maintain database consistency:
+Use the `Storage` wrapper instead of direct filesystem/HTTP access to maintain database consistency — the same calls work for local and nextcloud storages (ADR 0008):
 ```rust
 let storage = Storage::find_by_id(&db, storage_id).await?;
-let entries = storage.list_directory_fs(sub_path).await?;
+let entries = storage.list_directory_fs(sub_path).await?;   // read_dir | PROPFIND
+let bytes = storage.read_file(sub_path).await?;              // fs::read  | WebDAV GET
 ```
+Only call `get_full_path`/`resolve_safe_path*` on `storage.is_local()` rows — remote storages have no local path.
 
 ### Plugin System
 Plugins are dynamic libraries (`.so`) that classify files. Each plugin implements `ClassifierPlugin` from the `byteburrow-plugin-api` crate.

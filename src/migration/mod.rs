@@ -22,6 +22,7 @@ mod m20220101_000020_dav_lock;
 mod m20220101_000021_indexes;
 mod m20220101_000022_face_reference_pinned;
 mod m20220101_000023_photo_place;
+mod m20220101_000024_storage_backend;
 
 pub struct Migrator;
 
@@ -51,6 +52,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20220101_000021_indexes::Migration),
             Box::new(m20220101_000022_face_reference_pinned::Migration),
             Box::new(m20220101_000023_photo_place::Migration),
+            Box::new(m20220101_000024_storage_backend::Migration),
         ]
     }
 }

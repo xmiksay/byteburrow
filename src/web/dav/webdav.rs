@@ -170,12 +170,12 @@ async fn get_handler(
 ) -> Result<Response, ApiError> {
     require_storage_path_access(auth, &storage.model, path, &state.db).await?;
 
-    let full = storage.get_full_path(path);
-    let metadata = tokio::fs::metadata(&full)
+    let stat = storage
+        .stat_entry(path)
         .await
         .map_err(|e| map_io_to_api(e, path))?;
 
-    if metadata.is_dir() {
+    if stat.is_dir() {
         // A directory GET without trailing slash → redirect clients to add
         // one (RFC 4918 §8.3). Many clients rely on this to know the resource
         // is a collection.
@@ -185,7 +185,7 @@ async fn get_handler(
         return Ok(directory_listing(storage, path).await);
     }
 
-    serve_file(storage, path, metadata).await
+    serve_file(storage, path, &stat).await
 }
 
 async fn head_handler(
@@ -205,15 +205,39 @@ async fn head_handler(
     Ok(resp)
 }
 
-/// Stream a file's bytes (GET) via `tower_http::services::ServeFile`, which
-/// handles range requests and content-type detection. We override Content-Type
-/// with our own detector and add WebDAV-relevant headers (ETag, Last-Modified).
+/// Stream a file's bytes (GET). Local storages keep `tower_http`'s
+/// `ServeFile` (range requests, streamed from disk); remote (nextcloud)
+/// storages GET the bytes over WebDAV and serve them buffered (ADR 0008).
+/// Both override Content-Type with our own detector and add ETag.
 async fn serve_file(
     storage: &Storage,
     path: &str,
-    metadata: std::fs::Metadata,
+    stat: &crate::storage::EntryStat,
 ) -> Result<Response, ApiError> {
     use tower::Service;
+
+    let etag = weak_etag(stat.size, stat.modified_at);
+
+    if !storage.is_local() {
+        let data = storage
+            .read_file(path)
+            .await
+            .map_err(|e| map_io_to_api(e, path))?;
+        let content_type = determine_content_type(std::path::Path::new(path), &data);
+        let mut resp = (StatusCode::OK, Body::from(data)).into_response();
+        let headers = resp.headers_mut();
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_str(content_type).unwrap(),
+        );
+        headers.insert(header::ETAG, HeaderValue::from_str(&etag).unwrap());
+        headers.insert(
+            header::CONTENT_LENGTH,
+            HeaderValue::from_str(&stat.size.to_string()).unwrap(),
+        );
+        return Ok(resp);
+    }
+
     use tower_http::services::ServeFile;
 
     let full_path = storage
@@ -221,7 +245,6 @@ async fn serve_file(
         .await
         .map_err(|e| map_io_to_api(e, path))?;
     let content_type = determine_content_type(&full_path, &[]);
-    let etag = weak_etag(metadata.len(), &metadata);
 
     let mut service = ServeFile::new(full_path);
     let req = Request::builder()
@@ -323,10 +346,15 @@ async fn put_handler(
     // Keep the DB entry table in sync — DAV PUT is a real file create/overwrite.
     let _ = storage.ensure_entry(&state.db, path).await;
 
-    let metadata = tokio::fs::metadata(storage.get_full_path(path))
-        .await
-        .map_err(|e| internal(e.to_string()))?;
-    let etag = weak_etag(metadata.len(), &metadata);
+    // ETag from post-write metadata (local `fs::metadata` / remote stat).
+    let etag = match storage.stat_entry(path).await {
+        Ok(stat) => weak_etag(stat.size, stat.modified_at),
+        // The write succeeded; a failing stat must not fail the response.
+        Err(e) => {
+            tracing::warn!(path, error = %e, "DAV PUT: stat after write failed");
+            weak_etag(body.len() as u64, Utc::now())
+        }
+    };
 
     let mut headers = HeaderMap::new();
     headers.insert(header::ETAG, HeaderValue::from_str(&etag).unwrap());
@@ -386,8 +414,7 @@ async fn mkcol_handler(
         &if_header_tokens(headers.get(&H_IF)),
     )?;
 
-    let exists = storage.get_full_path(path);
-    if tokio::fs::try_exists(&exists).await.unwrap_or(false) {
+    if storage.entry_exists(path).await {
         return Err(conflict("A resource already exists at this path"));
     }
 
@@ -459,9 +486,7 @@ async fn copy_move_handler(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.eq_ignore_ascii_case("t") || s.eq_ignore_ascii_case("true"))
         .unwrap_or(true); // default Overwrite: T (RFC 4918 §9.8.3)
-    let dest_exists = tokio::fs::try_exists(storage.get_full_path(dest_path))
-        .await
-        .unwrap_or(false);
+    let dest_exists = storage.entry_exists(dest_path).await;
     if dest_exists && !overwrite {
         return Err(conflict("Destination exists and Overwrite: F"));
     }
@@ -472,7 +497,12 @@ async fn copy_move_handler(
             .await
             .map_err(|e| internal(format!("MOVE failed: {e}")))?;
     } else {
-        copy_tree(storage, src, dest_path).await?;
+        // `copy_entry` recurses locally or issues one WebDAV COPY remotely
+        // (ADR 0008) — the old `copy_tree` walk is the local-branch impl.
+        storage
+            .copy_entry(src, dest_path)
+            .await
+            .map_err(|e| internal(format!("COPY failed: {e}")))?;
     }
     let _ = storage.ensure_entry(&state.db, dest_path).await;
 
@@ -482,42 +512,6 @@ async fn copy_move_handler(
         StatusCode::CREATED
     };
     Ok(status.into_response())
-}
-
-/// Recursively copy `src` → `dest` within the same storage.
-async fn copy_tree(storage: &Storage, src: &str, dest: &str) -> Result<(), ApiError> {
-    let src_full = storage
-        .resolve_safe_path(src)
-        .await
-        .map_err(|e| internal(e.to_string()))?;
-    let dest_full = storage
-        .resolve_safe_path_lexical(dest)
-        .await
-        .map_err(|e| internal(e.to_string()))?;
-
-    let meta = tokio::fs::metadata(&src_full)
-        .await
-        .map_err(|e| internal(e.to_string()))?;
-    if meta.is_dir() {
-        tokio::fs::create_dir_all(&dest_full)
-            .await
-            .map_err(|e| internal(e.to_string()))?;
-        let mut rd = tokio::fs::read_dir(&src_full)
-            .await
-            .map_err(|e| internal(e.to_string()))?;
-        while let Some(entry) = rd.next_entry().await.map_err(|e| internal(e.to_string()))? {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            let child_src = format!("{src}/{name}");
-            let child_dest = format!("{dest}/{name}");
-            Box::pin(copy_tree(storage, &child_src, &child_dest)).await?;
-        }
-    } else {
-        tokio::fs::copy(&src_full, &dest_full)
-            .await
-            .map_err(|e| internal(e.to_string()))?;
-    }
-    Ok(())
 }
 
 fn parse_destination(headers: &HeaderMap) -> Result<String, ApiError> {
@@ -550,8 +544,8 @@ async fn propfind_handler(
     let depth = parse_depth(headers);
     let pf = PropFind::parse(body);
 
-    let full = storage.get_full_path(path);
-    let metadata = tokio::fs::metadata(&full)
+    let stat = storage
+        .stat_entry(path)
         .await
         .map_err(|e| map_io_to_api(e, path))?;
 
@@ -560,29 +554,28 @@ async fn propfind_handler(
     responses.push(build_response(
         storage,
         path,
-        &metadata,
-        trailing_slash || metadata.is_dir(),
+        &stat,
+        trailing_slash || stat.is_dir(),
         &pf,
     ));
 
     // Depth: 1 → immediate children; infinity → whole subtree; 0 → self only.
-    if depth != 0 && metadata.is_dir() {
+    if depth != 0 && stat.is_dir() {
         let entries = storage
             .list_directory_fs(path)
             .await
             .map_err(|e| internal(e.to_string()))?;
         for e in entries {
             let child_path = &e.path;
-            let child_full = storage.get_full_path(child_path);
-            if let Ok(child_meta) = tokio::fs::metadata(&child_full).await {
+            if let Ok(child_stat) = storage.stat_entry(child_path).await {
                 responses.push(build_response(
                     storage,
                     child_path,
-                    &child_meta,
+                    &child_stat,
                     matches!(e.entry_type, EntryType::Directory),
                     &pf,
                 ));
-                if depth == 255 && child_meta.is_dir() {
+                if depth == 255 && child_stat.is_dir() {
                     let mut stack = vec![child_path.clone()];
                     while let Some(d) = stack.pop() {
                         let sub = storage
@@ -590,8 +583,7 @@ async fn propfind_handler(
                             .await
                             .map_err(|e| internal(e.to_string()))?;
                         for s in sub {
-                            let sfull = storage.get_full_path(&s.path);
-                            if let Ok(sm) = tokio::fs::metadata(&sfull).await {
+                            if let Ok(sm) = storage.stat_entry(&s.path).await {
                                 responses.push(build_response(
                                     storage,
                                     &s.path,
@@ -634,7 +626,7 @@ fn parse_depth(headers: &HeaderMap) -> u8 {
 fn build_response(
     storage: &Storage,
     path: &str,
-    metadata: &std::fs::Metadata,
+    stat: &crate::storage::EntryStat,
     is_collection: bool,
     pf: &PropFind,
 ) -> DavResponse {
@@ -660,41 +652,34 @@ fn build_response(
         props.push(DavProp::text("displayname", name));
     }
     if pf.wants("getcontentlength") {
-        props.push(DavProp::text(
-            "getcontentlength",
-            metadata.len().to_string(),
-        ));
+        props.push(DavProp::text("getcontentlength", stat.size.to_string()));
     }
     if pf.wants("getcontenttype") && !is_collection {
-        let ct = determine_content_type(&storage.get_full_path(path), &[]);
+        // Extension-based lookup; the file name is the final path segment on
+        // both backends, so the relative path carries the same extension.
+        let ct = determine_content_type(std::path::Path::new(path), &[]);
         props.push(DavProp::text("getcontenttype", ct));
     }
     if pf.wants("getlastmodified") {
-        let s = metadata
-            .modified()
-            .ok()
-            .map(|t| {
-                let dt: DateTime<Utc> = t.into();
-                dt.format("%a, %d %b %Y %H:%M:%S GMT").to_string()
-            })
-            .unwrap_or_default();
+        let s = stat
+            .modified_at
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string();
         props.push(DavProp::text("getlastmodified", s));
     }
     if pf.wants("creationdate") {
-        let s = metadata
-            .created()
-            .ok()
-            .map(|t| {
-                let dt: DateTime<Utc> = t.into();
-                dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()
-            })
+        // Local `metadata.created()` when the platform has it; remote entries
+        // have no creation date in the properties we request (ADR 0008).
+        let s = stat
+            .created_at
+            .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
             .unwrap_or_default();
         props.push(DavProp::text("creationdate", s));
     }
     if pf.wants("getetag") {
         props.push(DavProp::text(
             "getetag",
-            weak_etag(metadata.len(), metadata),
+            weak_etag(stat.size, stat.modified_at),
         ));
     }
     if pf.wants("supportedlock") {
@@ -742,14 +727,10 @@ fn build_response(
 }
 
 /// A weak validator ETag from size + mtime — cheap, no hash job needed on
-/// every PROPFIND. Format: `W/"<hex-size>-<secs>"`.
-fn weak_etag(size: u64, metadata: &std::fs::Metadata) -> String {
-    let mtime = metadata
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+/// every PROPFIND. Format: `W/"<hex-size>-<secs>"`. Backend-neutral since
+/// ADR 0008 (mtime comes from `EntryStat`, not `fs::Metadata`).
+fn weak_etag(size: u64, modified_at: DateTime<Utc>) -> String {
+    let mtime = modified_at.timestamp().try_into().unwrap_or(0u64);
     format!("W/\"{size:x}-{mtime:x}\"")
 }
 
@@ -795,8 +776,7 @@ async fn lock_handler(
 
     // If the resource doesn't exist yet, create an empty one (a lock can
     // "create" a resource per RFC 4918 §8.10.4).
-    let full = storage.get_full_path(path);
-    if !tokio::fs::try_exists(&full).await.unwrap_or(false) {
+    if !storage.entry_exists(path).await {
         if trailing_slash {
             storage
                 .create_directory(path)

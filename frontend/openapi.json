@@ -3740,6 +3740,13 @@
           "default_group"
         ],
         "properties": {
+          "backend": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Backend to use. Defaults to `local`."
+          },
           "default_group": {
             "type": "integer",
             "format": "int32"
@@ -3764,7 +3771,29 @@
             "type": "string"
           },
           "path": {
-            "type": "string"
+            "type": "string",
+            "description": "Local: filesystem directory path. Nextcloud: arbitrary identifier\n(the canonical DAV base URL is derived and stored as `path`)."
+          },
+          "remote_password": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Nextcloud **app password**. Required when `backend == \"nextcloud\"`,\nwrite-only (never returned)."
+          },
+          "remote_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Nextcloud server base URL (e.g. `https://cloud.example.org`).\nRequired when `backend == \"nextcloud\"`."
+          },
+          "remote_username": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Nextcloud login name. Required when `backend == \"nextcloud\"`."
           }
         }
       },
@@ -4353,16 +4382,21 @@
             "type": "array",
             "items": {
               "type": "object",
-              "description": "Storage response",
+              "description": "Storage response\n\n`remote_password` is **never** included — the app password is write-only\n(ADR 0008). `remote_url`/`remote_username` are echoed so the UI can label\nthe connector.",
               "required": [
                 "id",
                 "name",
                 "path",
                 "default_user",
                 "default_group",
-                "ignore_patterns"
+                "ignore_patterns",
+                "backend"
               ],
               "properties": {
+                "backend": {
+                  "type": "string",
+                  "description": "Backend discriminator: `local` or `nextcloud`."
+                },
                 "default_group": {
                   "type": "integer",
                   "format": "int32"
@@ -4388,7 +4422,22 @@
                   "type": "string"
                 },
                 "path": {
-                  "type": "string"
+                  "type": "string",
+                  "description": "Local: filesystem root. Nextcloud: canonical DAV base URL."
+                },
+                "remote_url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Nextcloud server base URL (nextcloud storages only)."
+                },
+                "remote_username": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Nextcloud login name (nextcloud storages only)."
                 }
               }
             },
@@ -4843,16 +4892,21 @@
       },
       "StorageResponse": {
         "type": "object",
-        "description": "Storage response",
+        "description": "Storage response\n\n`remote_password` is **never** included — the app password is write-only\n(ADR 0008). `remote_url`/`remote_username` are echoed so the UI can label\nthe connector.",
         "required": [
           "id",
           "name",
           "path",
           "default_user",
           "default_group",
-          "ignore_patterns"
+          "ignore_patterns",
+          "backend"
         ],
         "properties": {
+          "backend": {
+            "type": "string",
+            "description": "Backend discriminator: `local` or `nextcloud`."
+          },
           "default_group": {
             "type": "integer",
             "format": "int32"
@@ -4878,7 +4932,22 @@
             "type": "string"
           },
           "path": {
-            "type": "string"
+            "type": "string",
+            "description": "Local: filesystem root. Nextcloud: canonical DAV base URL."
+          },
+          "remote_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Nextcloud server base URL (nextcloud storages only)."
+          },
+          "remote_username": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Nextcloud login name (nextcloud storages only)."
           }
         }
       },
@@ -4953,8 +5022,14 @@
       },
       "UpdateStorageRequest": {
         "type": "object",
-        "description": "Update storage request (all fields optional)",
+        "description": "Update storage request (all fields optional)\n\n`remote_password` semantics: absent → unchanged; empty string → cleared;\nany other value → replaced. This is the \"Optional-with-sentinel\" contract\nrequired because the stored password is never echoed back.",
         "properties": {
+          "backend": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "default_group": {
             "type": [
               "integer",
@@ -4988,6 +5063,24 @@
             ]
           },
           "path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "remote_password": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "remote_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "remote_username": {
             "type": [
               "string",
               "null"

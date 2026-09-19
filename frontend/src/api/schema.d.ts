@@ -1127,6 +1127,8 @@ export interface components {
         };
         /** @description Create storage request */
         CreateStorageRequest: {
+            /** @description Backend to use. Defaults to `local`. */
+            backend?: string | null;
             /** Format: int32 */
             default_group: number;
             /** Format: int32 */
@@ -1134,7 +1136,23 @@ export interface components {
             description?: string | null;
             ignore_patterns?: string | null;
             name: string;
+            /**
+             * @description Local: filesystem directory path. Nextcloud: arbitrary identifier
+             *     (the canonical DAV base URL is derived and stored as `path`).
+             */
             path: string;
+            /**
+             * @description Nextcloud **app password**. Required when `backend == "nextcloud"`,
+             *     write-only (never returned).
+             */
+            remote_password?: string | null;
+            /**
+             * @description Nextcloud server base URL (e.g. `https://cloud.example.org`).
+             *     Required when `backend == "nextcloud"`.
+             */
+            remote_url?: string | null;
+            /** @description Nextcloud login name. Required when `backend == "nextcloud"`. */
+            remote_username?: string | null;
         };
         /** @description Create tag request */
         CreateTagRequest: {
@@ -1377,6 +1395,8 @@ export interface components {
         Page_StorageResponse: {
             /** @description Items in this page. */
             items: {
+                /** @description Backend discriminator: `local` or `nextcloud`. */
+                backend: string;
                 /** Format: int32 */
                 default_group: number;
                 /** Format: int32 */
@@ -1386,7 +1406,12 @@ export interface components {
                 id: number;
                 ignore_patterns: string;
                 name: string;
+                /** @description Local: filesystem root. Nextcloud: canonical DAV base URL. */
                 path: string;
+                /** @description Nextcloud server base URL (nextcloud storages only). */
+                remote_url?: string | null;
+                /** @description Nextcloud login name (nextcloud storages only). */
+                remote_username?: string | null;
             }[];
             /**
              * Format: int64
@@ -1582,8 +1607,16 @@ export interface components {
             token?: string | null;
             user_ids: number[];
         };
-        /** @description Storage response */
+        /**
+         * @description Storage response
+         *
+         *     `remote_password` is **never** included — the app password is write-only
+         *     (ADR 0008). `remote_url`/`remote_username` are echoed so the UI can label
+         *     the connector.
+         */
         StorageResponse: {
+            /** @description Backend discriminator: `local` or `nextcloud`. */
+            backend: string;
             /** Format: int32 */
             default_group: number;
             /** Format: int32 */
@@ -1593,7 +1626,12 @@ export interface components {
             id: number;
             ignore_patterns: string;
             name: string;
+            /** @description Local: filesystem root. Nextcloud: canonical DAV base URL. */
             path: string;
+            /** @description Nextcloud server base URL (nextcloud storages only). */
+            remote_url?: string | null;
+            /** @description Nextcloud login name (nextcloud storages only). */
+            remote_username?: string | null;
         };
         /** @description Tag response */
         TagResponse: {
@@ -1615,8 +1653,15 @@ export interface components {
             description?: string | null;
             name?: string | null;
         };
-        /** @description Update storage request (all fields optional) */
+        /**
+         * @description Update storage request (all fields optional)
+         *
+         *     `remote_password` semantics: absent → unchanged; empty string → cleared;
+         *     any other value → replaced. This is the "Optional-with-sentinel" contract
+         *     required because the stored password is never echoed back.
+         */
         UpdateStorageRequest: {
+            backend?: string | null;
             /** Format: int32 */
             default_group?: number | null;
             /** Format: int32 */
@@ -1625,6 +1670,9 @@ export interface components {
             ignore_patterns?: string | null;
             name?: string | null;
             path?: string | null;
+            remote_password?: string | null;
+            remote_url?: string | null;
+            remote_username?: string | null;
         };
         /** @description Update tag request */
         UpdateTagRequest: {

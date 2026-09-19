@@ -134,6 +134,17 @@ impl InotifyHandler {
                 }
             };
 
+            // Remote storages (nextcloud/WebDAV) have no local filesystem to
+            // watch — inotify cannot see them (ADR 0008). Their entries stay
+            // up to date via the manual/periodic scan instead.
+            if !crate::storage::is_local_backend(&storage_model.backend) {
+                debug!(
+                    storage = entry_model.storage_id,
+                    "Skipping non-local storage in inotify watcher"
+                );
+                continue;
+            }
+
             let storage_base = PathBuf::from(&storage_model.path);
             let abs_path = if entry_model.path.is_empty() {
                 storage_base.clone()

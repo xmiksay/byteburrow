@@ -3,48 +3,62 @@ use std::path::Path;
 
 use anyhow::Context;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
-use tokio::io::AsyncReadExt;
 use tracing::info;
 
 use crate::entity::{entry, meta, photo};
 use crate::plugin::{MergedClassification, PluginRegistry};
-use crate::storage::determine_content_type;
+use crate::storage::{determine_content_type, Storage};
 
 use super::{exif, face};
 
 /// Classify a file (host-native EXIF + plugin pipeline) and persist the results.
 /// Sole caller: `JobRunner::process_file`.
+///
+/// Backend-neutral since ADR 0008: bytes come from the storage backend
+/// (`read_file_prefix` / `read_file`), which is a local FS read or a remote
+/// WebDAV GET. Plugins still receive a `full_path: &Path` (FFI contract,
+/// ADR 0006); for remote storages that is a virtual path under the storage's
+/// DAV base — path-based plugins fail to open it and are skipped, while
+/// `needs_file_data()` plugins keep working off the fetched bytes.
 pub(super) async fn run_classification(
     db: &DatabaseConnection,
     plugins: &PluginRegistry,
+    storage: &Storage,
     entry: &entry::Model,
     hash_bytes: &[u8],
-    full_path: &Path,
 ) -> anyhow::Result<()> {
     // Determine MIME from a bounded header read instead of slurping the whole
     // file. The header read also surfaces unreadable/missing files early
     // (issue #6) — propagating instead of silently classifying them as empty —
     // before we decide whether the full contents are actually needed.
-    let header = read_mime_header(full_path).await?;
-    let mime_type = determine_content_type(full_path, &header);
+    let header = storage
+        .read_file_prefix(&entry.path, MIME_HEADER_LEN)
+        .await
+        .with_context(|| format!("reading file header for classification: {}", entry.path))?;
+    // Extension lookup works off the relative path; magic bytes off `header`.
+    let mime_type = determine_content_type(Path::new(&entry.path), &header);
     info!(path = &entry.path, mime = mime_type, "Classifying file");
 
+    // The local EXIF extractor reads the file itself (path-based, no double
+    // read); a remote backend has no path, so image bytes are needed up front.
+    let is_image = mime_type.starts_with("image/");
+    let exif_needs_bytes = is_image && !storage.is_local();
+
     // Honor `ClassifierPlugin::needs_file_data()`: only load the whole file
-    // when a plugin that will run actually needs the bytes. Plugins that do
-    // their own path-based I/O (and host-native EXIF, which reads via its own
-    // extractor) never touch this buffer, so reading it would be wasted I/O —
-    // significant for large media. Async read keeps the job worker off a
-    // blocking sync call.
-    let data = if plugins.needs_file_data(mime_type) {
-        tokio::fs::read(full_path)
+    // when a plugin that will run actually needs the bytes (or remote EXIF
+    // does). Plugins that do their own path-based I/O never touch this buffer,
+    // so reading it would be wasted I/O — significant for large media.
+    let data = if plugins.needs_file_data(mime_type) || exif_needs_bytes {
+        storage
+            .read_file(&entry.path)
             .await
-            .with_context(|| format!("reading file for classification: {}", full_path.display()))?
+            .with_context(|| format!("reading file for classification: {}", entry.path))?
     } else {
         Vec::new()
     };
 
     // Run classification (host-native EXIF + plugin pipeline).
-    let result = classify_or_exif(plugins, entry, full_path, &data, mime_type).await?;
+    let result = classify_or_exif(plugins, storage, entry, &data, mime_type).await?;
 
     if let Some(mut merged) = result {
         // Persist face embeddings; this mutates merged.custom in place so
@@ -73,18 +87,22 @@ pub(super) async fn run_classification(
 /// for headroom. Bounded so we never load large media just to sniff its type.
 const MIME_HEADER_LEN: u64 = 64;
 
-/// Read the leading bytes of a file for MIME sniffing, propagating open/read
-/// errors so an unreadable file surfaces instead of being classified as empty.
-async fn read_mime_header(path: &Path) -> anyhow::Result<Vec<u8>> {
-    let file = tokio::fs::File::open(path)
-        .await
-        .with_context(|| format!("opening file for classification: {}", path.display()))?;
-    let mut buf = Vec::with_capacity(MIME_HEADER_LEN as usize);
-    file.take(MIME_HEADER_LEN)
-        .read_to_end(&mut buf)
-        .await
-        .with_context(|| format!("reading file header for classification: {}", path.display()))?;
-    Ok(buf)
+/// The `full_path` handed to the plugin pipeline (FFI contract, ADR 0006):
+/// the real on-disk path for local storages, or a virtual path under the
+/// storage's DAV base for remote ones. Path-based plugins fail to open the
+/// virtual path and skip themselves; `needs_file_data()` plugins use `data`.
+fn plugin_full_path(storage: &Storage, entry_path: &str) -> anyhow::Result<std::path::PathBuf> {
+    if storage.is_local() {
+        storage
+            .get_full_path(entry_path)
+            .map_err(anyhow::Error::from)
+    } else {
+        // Virtual marker path: never touches the local filesystem.
+        Ok(std::path::PathBuf::from(format!(
+            "{}/{entry_path}",
+            storage.model.path.trim_end_matches('/')
+        )))
+    }
 }
 
 /// Run the plugin classification pipeline (when plugins are loaded) layered
@@ -100,8 +118,8 @@ async fn read_mime_header(path: &Path) -> anyhow::Result<Vec<u8>> {
 /// loaded and the file is not an image.
 async fn classify_or_exif(
     plugins: &PluginRegistry,
+    storage: &Storage,
     entry: &entry::Model,
-    full_path: &Path,
     data: &[u8],
     mime_type: &'static str,
 ) -> anyhow::Result<Option<MergedClassification>> {
@@ -111,7 +129,14 @@ async fn classify_or_exif(
     let is_image = mime_type.starts_with("image/");
 
     let native = if is_image {
-        exif::extract_exif(full_path)
+        if storage.is_local() {
+            // Path-based read (no second copy of the bytes in memory).
+            let full_path = storage.get_full_path(&entry.path)?;
+            exif::extract_exif(&full_path)
+        } else {
+            // Remote: EXIF from the fetched bytes.
+            exif::extract_exif_from_memory(data)
+        }
     } else {
         MergedClassification::default()
     };
@@ -132,9 +157,10 @@ async fn classify_or_exif(
     // native keys are folded back in below.
     let existing_custom: HashMap<String, serde_json::Value> =
         native.custom.clone().into_iter().collect();
+    let full_path = plugin_full_path(storage, &entry.path)?;
     let ctx = byteburrow_plugin_api::FileContext {
         path: &entry.path,
-        full_path,
+        full_path: &full_path,
         data,
         mime_type,
         size: entry.size as u64,
@@ -367,9 +393,23 @@ mod tests {
             let result = run_classification(
                 db,
                 &plugins,
+                // A local storage whose root does not exist: the bounded
+                // header read must fail rather than classify empty data.
+                &Storage::new(crate::entity::storage::Model {
+                    id: 1,
+                    name: "unreadable".to_string(),
+                    description: None,
+                    path: "/nonexistent/unreadable-root".to_string(),
+                    default_user: 1,
+                    default_group: 1,
+                    ignore_patterns: String::new(),
+                    backend: crate::storage::BACKEND_LOCAL.to_string(),
+                    remote_url: None,
+                    remote_username: None,
+                    remote_password: None,
+                }),
                 &entry,
                 b"unreadable-file-hash",
-                Path::new("/nonexistent/unreadable-file.bin"),
             )
             .await;
 

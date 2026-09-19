@@ -56,6 +56,8 @@ The frontend is **not** served from a runtime path: its build output (`frontend/
 
 Axum HTTP layer (`src/web/`) → `Auth` extractor → handlers → `Storage` wrapper / SeaORM entities. A background job runner (`src/job/`) runs on its own OS thread with a dedicated low-priority (`nice 10`) multi-threaded Tokio runtime; it processes file classification through a multi-pass plugin pipeline (`src/plugin/` + `plugins/*` cdylib crates, loaded via `byteburrow-plugin-api`'s FFI contract). On the main runtime, only the inotify watcher and the web server are arms of the `tokio::select!`.
 
+Storages are **not always local directories**: each `storage` row has a `backend` (`local` filesystem, or `nextcloud` over WebDAV — ADR 0008). All content access goes through the `Storage` wrapper, which dispatches per backend; remote storages have no local path and no inotify (they are refreshed by the scan endpoint).
+
 Full module map, request flow, OpenAPI tag grouping, and key patterns (auth, DB access, error responses, plugin system, background jobs): **[docs/architecture.md](docs/architecture.md)**.
 
 ## Binary Targets

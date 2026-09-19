@@ -71,8 +71,7 @@ async fn calendar_query(
     let mut responses = Vec::new();
     for href in hrefs {
         let rel = href.trim_start_matches('/');
-        let full = storage.get_full_path(rel);
-        let Ok(data) = tokio::fs::read(&full).await else {
+        let Ok(data) = storage.read_file(rel).await else {
             continue;
         };
         let mut props = vec![DavProp::text("getcontenttype", "text/calendar")];
@@ -130,8 +129,8 @@ async fn calendar_multiget(
             });
             continue;
         }
-        let full = storage.get_full_path(rel);
-        match tokio::fs::read(&full).await {
+        // Backend-neutral read (local fs / remote WebDAV GET — ADR 0008).
+        match storage.read_file(rel).await {
             Ok(data) => {
                 let mut props = vec![DavProp::text("getcontenttype", "text/calendar")];
                 if want_calendar_data {
@@ -288,7 +287,6 @@ pub async fn is_calendar_collection(storage: &Storage, path: &str) -> bool {
     } else {
         format!("{path}/{CALENDAR_MARKER}")
     };
-    tokio::fs::try_exists(storage.get_full_path(&marker))
-        .await
-        .unwrap_or(false)
+    // Backend-neutral existence probe (local fs / remote WebDAV PROPFIND).
+    storage.entry_exists(&marker).await
 }

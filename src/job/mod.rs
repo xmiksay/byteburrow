@@ -390,32 +390,6 @@ impl JobRunner {
         path: &str,
         mode: ProcessMode,
     ) -> anyhow::Result<()> {
-        let (changed, hash, entry, full_path) = Self::hash_and_diff(db, storage_id, path).await?;
-
-        // In Auto mode, skip if nothing changed.
-        if !changed && matches!(mode, ProcessMode::Auto) {
-            return Ok(());
-        }
-
-        if Self::should_classify(&entry, mode) {
-            classify::run_classification(db, plugins, &entry, &hash, &full_path).await?;
-        }
-
-        if is_image_file(&entry.path) {
-            let hash_hex = hex::encode(&hash);
-            thumb::generate_thumbnails(&full_path, &hash_hex).await?;
-        }
-
-        Ok(())
-    }
-
-    /// Compute the file hash, compare it to the stored entry, and return
-    /// `(changed, hash, entry, full_path)`. Also short-circuits ignored paths.
-    async fn hash_and_diff(
-        db: &DatabaseConnection,
-        storage_id: i32,
-        path: &str,
-    ) -> anyhow::Result<(bool, Vec<u8>, entry::Model, std::path::PathBuf)> {
         let storage = Storage::find_by_id(db, storage_id).await?;
 
         // Filter excluded paths using per-storage ignore patterns.
@@ -426,10 +400,23 @@ impl JobRunner {
             return Err(IgnoredPath.into());
         }
 
-        let (updated, hash, entry) = storage.calculate_hash(db, path).await?;
-        let full_path = storage.get_full_path(&entry.path);
+        let (changed, hash, entry) = storage.calculate_hash(db, path).await?;
 
-        Ok((updated, hash, entry, full_path))
+        // In Auto mode, skip if nothing changed.
+        if !changed && matches!(mode, ProcessMode::Auto) {
+            return Ok(());
+        }
+
+        if Self::should_classify(&entry, mode) {
+            classify::run_classification(db, plugins, &storage, &entry, &hash).await?;
+        }
+
+        if is_image_file(&entry.path) {
+            let hash_hex = hex::encode(&hash);
+            thumb::generate_thumbnails(&storage, &entry.path, &hash_hex).await?;
+        }
+
+        Ok(())
     }
 
     /// Decide whether the classification pipeline should run for this entry
@@ -467,7 +454,6 @@ impl JobRunner {
         }
 
         let storage = Storage::find_by_id(db, entry.storage_id).await?;
-        let full_path = storage.get_full_path(&entry.path);
 
         if regenerate {
             let config = Config::get();
@@ -478,7 +464,7 @@ impl JobRunner {
             }
         }
 
-        thumb::generate_thumbnails(&full_path, &hash_hex).await
+        thumb::generate_thumbnails(&storage, &entry.path, &hash_hex).await
     }
 }
 

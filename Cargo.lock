@@ -517,6 +517,7 @@ dependencies = [
  "argon2",
  "axum",
  "axum-extra",
+ "base64",
  "byteburrow-plugin-api",
  "chrono",
  "clap",
