@@ -16,7 +16,8 @@ import {
   ChevronRight,
   Share2,
   Key,
-  Camera
+  Camera,
+  ScanFace
 } from 'lucide-vue-next'
 import Login from './components/Login.vue'
 import ChangePasswordDialog from './components/ChangePasswordDialog.vue'
@@ -224,6 +225,15 @@ onMounted(async () => {
         >
           <TagIcon :size="20" />
           <span v-if="!isSidebarCollapsed">Tags</span>
+        </router-link>
+        <router-link
+          to="/faces"
+          class="nav-item"
+          :class="{ active: isNavActive('faces') }"
+          title="Faces"
+        >
+          <ScanFace :size="20" />
+          <span v-if="!isSidebarCollapsed">Faces</span>
         </router-link>
         <router-link
           to="/shares"

@@ -21,6 +21,9 @@ export type Photo = Schemas['PhotoResponse']
 export type MetaResponse = Schemas['MetaResponse']
 export type ShareInfoResponse = Schemas['ShareInfoResponse']
 export type EntryType = Schemas['EntryType']
+export type Contact = Schemas['ContactResponse']
+export type FaceRef = Schemas['FaceRefResponse']
+export type RematchResult = Schemas['RematchResponse']
 
 // --- Request bodies ---
 export type CreateUserRequest = Schemas['CreateUserRequest']
@@ -36,6 +39,10 @@ export type ShareRequest = Schemas['ShareEntryRequest']
 export type CreateEntryRequest = Schemas['CreateEntryRequest']
 export type RenameEntryRequest = Schemas['RenameEntryRequest']
 export type UpdateEntryTagsRequest = Schemas['UpdateEntryTagsRequest']
+export type CreateContactRequest = Schemas['CreateContactRequest']
+export type RenameContactRequest = Schemas['UpdateContactRequest']
+export type AssignFaceRequest = Schemas['AssignFaceRequest']
+export type ConfirmFaceRequest = Schemas['ConfirmFaceRequest']
 
 // The API's `DirectoryEntry` DTO does not carry per-entry `tags` — they live in
 // the `meta` row keyed by the entry hash. The file browser still reads
