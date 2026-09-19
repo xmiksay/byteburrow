@@ -23,3 +23,5 @@ Write an ADR when a change is hard to reverse, affects multiple modules, or trad
 | [0004](0004-api-response-conventions.md) | API response conventions: envelopes, pagination, RPC naming | Accepted |
 | [0005](0005-share-access-scope.md) | Share access scope: entry-subtree, not storage-level | Accepted |
 | [0006](0006-plugin-ffi-contract.md) | Plugin FFI contract: accept Rust-ABI coupling, harden the host | Accepted |
+| [0007](0007-external-ml-provider-seam.md) | External ML provider seam: per-plugin enum, not a host trait | Accepted |
+| [0008](0008-nextcloud-connector.md) | Nextcloud connector: full remote storage backend over WebDAV | Accepted |

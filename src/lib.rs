@@ -4,6 +4,7 @@ pub mod auth;
 pub mod config;
 pub mod entity;
 pub mod face_match;
+pub mod geo;
 pub mod ignore;
 pub mod inotify;
 pub mod job;

@@ -19,12 +19,27 @@ use byteburrow::migration::Migrator;
 use byteburrow::web::AppState;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
 use sea_orm_migration::MigratorTrait;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Once, OnceLock};
 use tokio::sync::OnceCell;
 use tower::ServiceExt;
 
 static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static DB: OnceCell<DatabaseConnection> = OnceCell::const_new();
+
+/// Unique suffix so repeated runs against a shared scratch database don't
+/// collide: `Auth::from_user_password` looks users up by (non-unique)
+/// username, so a leftover row from an earlier run would shadow the fresh
+/// fixture and flip the id/rehash assertions. Time-based (not a plain
+/// counter) so separate processes/runs can't repeat a name.
+fn uniq() -> u32 {
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+    nanos.wrapping_add(COUNTER.fetch_add(1, Ordering::Relaxed))
+}
 
 fn runtime() -> &'static tokio::runtime::Runtime {
     RUNTIME.get_or_init(|| tokio::runtime::Runtime::new().expect("build shared test runtime"))
@@ -52,6 +67,9 @@ async fn test_db() -> &'static DatabaseConnection {
                 face_match_threshold: 0.8,
                 face_match_margin: 0.05,
                 plugin: std::collections::HashMap::new(),
+                reverse_geocode_url: String::new(),
+                reverse_geocode_api_key: String::new(),
+                reverse_geocode_timeout: 10,
             }));
         });
 
@@ -88,9 +106,10 @@ async fn create_test_user(
 fn login_with_correct_password_succeeds() {
     runtime().block_on(async {
         let db = test_db().await;
-        let user = create_test_user(db, "it_login_ok", "correct-password", true).await;
+        let username = format!("it_login_ok_{}", uniq());
+        let user = create_test_user(db, &username, "correct-password", true).await;
 
-        let auth = Auth::from_user_password("it_login_ok", "correct-password", db)
+        let auth = Auth::from_user_password(&username, "correct-password", db)
             .await
             .expect("login should succeed");
         assert_eq!(auth.user.id, user.id);
@@ -101,9 +120,10 @@ fn login_with_correct_password_succeeds() {
 fn login_with_wrong_password_fails() {
     runtime().block_on(async {
         let db = test_db().await;
-        create_test_user(db, "it_login_bad_password", "correct-password", true).await;
+        let username = format!("it_login_bad_password_{}", uniq());
+        create_test_user(db, &username, "correct-password", true).await;
 
-        let err = Auth::from_user_password("it_login_bad_password", "wrong-password", db)
+        let err = Auth::from_user_password(&username, "wrong-password", db)
             .await
             .err()
             .expect("login should fail");
@@ -116,10 +136,14 @@ fn login_with_unknown_username_fails() {
     runtime().block_on(async {
         let db = test_db().await;
 
-        let err = Auth::from_user_password("it_login_does_not_exist", "irrelevant", db)
-            .await
-            .err()
-            .expect("login should fail");
+        let err = Auth::from_user_password(
+            &format!("it_login_does_not_exist_{}", uniq()),
+            "irrelevant",
+            db,
+        )
+        .await
+        .err()
+        .expect("login should fail");
         assert!(matches!(err, AuthError::InvalidCredentials));
     });
 }
@@ -128,13 +152,14 @@ fn login_with_unknown_username_fails() {
 fn login_with_legacy_sha256_hash_rehashes_to_argon2id() {
     runtime().block_on(async {
         let db = test_db().await;
-        let user = create_test_user(db, "it_login_legacy_rehash", "correct-password", true).await;
+        let username = format!("it_login_legacy_rehash_{}", uniq());
+        let user = create_test_user(db, &username, "correct-password", true).await;
         assert!(
             !user.password.starts_with("$argon2"),
             "test fixture should seed a legacy SHA-256 hash"
         );
 
-        Auth::from_user_password("it_login_legacy_rehash", "correct-password", db)
+        Auth::from_user_password(&username, "correct-password", db)
             .await
             .expect("login should succeed against legacy hash");
 
@@ -149,7 +174,7 @@ fn login_with_legacy_sha256_hash_rehashes_to_argon2id() {
         );
 
         // The rehashed password must still authenticate.
-        Auth::from_user_password("it_login_legacy_rehash", "correct-password", db)
+        Auth::from_user_password(&username, "correct-password", db)
             .await
             .expect("login should succeed against rehashed password");
     });
@@ -159,9 +184,10 @@ fn login_with_legacy_sha256_hash_rehashes_to_argon2id() {
 fn login_for_disabled_user_fails() {
     runtime().block_on(async {
         let db = test_db().await;
-        create_test_user(db, "it_login_disabled", "correct-password", false).await;
+        let username = format!("it_login_disabled_{}", uniq());
+        create_test_user(db, &username, "correct-password", false).await;
 
-        let err = Auth::from_user_password("it_login_disabled", "correct-password", db)
+        let err = Auth::from_user_password(&username, "correct-password", db)
             .await
             .err()
             .expect("login should fail");
@@ -173,7 +199,13 @@ fn login_for_disabled_user_fails() {
 fn token_roundtrip_authenticates_and_revoke_invalidates() {
     runtime().block_on(async {
         let db = test_db().await;
-        let user = create_test_user(db, "it_token_roundtrip", "correct-password", true).await;
+        let user = create_test_user(
+            db,
+            &format!("it_token_roundtrip_{}", uniq()),
+            "correct-password",
+            true,
+        )
+        .await;
         let auth = Auth::new(user.clone());
 
         let raw_token = auth
@@ -206,7 +238,8 @@ fn token_roundtrip_authenticates_and_revoke_invalidates() {
 fn revoke_all_tokens_invalidates_every_token_for_user() {
     runtime().block_on(async {
         let db = test_db().await;
-        let user = create_test_user(db, "it_revoke_all", "correct-password", true).await;
+        let username = format!("it_revoke_all_{}", uniq());
+        let user = create_test_user(db, &username, "correct-password", true).await;
         let auth = Auth::new(user.clone());
 
         let token_a = auth.create_token(db, None, None).await.unwrap();
@@ -280,7 +313,13 @@ fn make_state(db: DatabaseConnection) -> Arc<AppState> {
 fn query_param_token_alone_is_rejected() {
     runtime().block_on(async {
         let db = test_db().await;
-        let user = create_test_user(db, "it_query_token_rejected", "correct-password", true).await;
+        let user = create_test_user(
+            db,
+            &format!("it_query_token_rejected_{}", uniq()),
+            "correct-password",
+            true,
+        )
+        .await;
         let auth = Auth::new(user);
 
         let raw_token = auth

@@ -49,6 +49,9 @@ fn ensure_config() {
             face_match_threshold: 0.8,
             face_match_margin: 0.05,
             plugin: std::collections::HashMap::new(),
+            reverse_geocode_url: String::new(),
+            reverse_geocode_api_key: String::new(),
+            reverse_geocode_timeout: 10,
         }));
     });
 }

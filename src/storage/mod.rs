@@ -1,7 +1,7 @@
 use crate::entity::entry::{self, EntryType};
 use crate::entity::storage;
 use anyhow::{Context, Result};
-use chrono::{TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use serde::{Deserialize, Serialize};
 use std::io;
@@ -9,9 +9,40 @@ use std::path::{Path, PathBuf};
 use tokio::fs;
 use tracing::instrument;
 
+pub mod nextcloud;
+
+pub use nextcloud::{
+    is_local_backend, normalize_backend, NextcloudClient, BACKEND_LOCAL, BACKEND_NEXTCLOUD,
+};
+
+mod content_type;
+mod hash;
+pub mod thumbnail;
+pub use content_type::determine_content_type;
+
 #[derive(Debug)]
 pub struct Storage {
     pub model: storage::Model,
+}
+
+/// Backend-neutral entry metadata — the remote counterpart of the
+/// `std::fs::Metadata` facts ByteBurrow consumes (kind, size, mtime).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EntryStat {
+    /// `Directory`, `File`, or (local only) `Symlink`.
+    pub entry_type: EntryType,
+    pub size: u64,
+    pub modified_at: DateTime<Utc>,
+    /// Local `metadata.created()` when the platform provides it; `None`
+    /// remotely (WebDAV PROPFIND carries no creation date here).
+    pub created_at: Option<DateTime<Utc>>,
+}
+
+impl EntryStat {
+    /// Collections report as directories on both backends.
+    pub fn is_dir(&self) -> bool {
+        matches!(self.entry_type, EntryType::Directory)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, utoipa::ToSchema)]
@@ -66,9 +97,69 @@ impl Storage {
         })
     }
 
-    /// List directory contents from the filesystem for a given subpath within the storage
+    /// Whether this storage is backed by the local filesystem (`backend
+    /// == "local"`). Everything else (`nextcloud`, …) goes through the remote
+    /// WebDAV client and has **no local path**.
+    pub fn is_local(&self) -> bool {
+        is_local_backend(&self.model.backend)
+    }
+
+    /// The remote client for non-local storages. Local storages get
+    /// `ErrorKind::Unsupported` — call [`Self::is_local`] before using this.
+    fn remote_client(&self) -> io::Result<NextcloudClient> {
+        if self.is_local() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "storage backend is local; no remote client",
+            ));
+        }
+        NextcloudClient::from_model(&self.model)
+    }
+
+    /// Run one blocking remote WebDAV call on the blocking pool — the
+    /// established pattern for sync I/O in this codebase (see `src/geo.rs`).
+    async fn remote<T, F>(&self, op: F) -> io::Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(NextcloudClient) -> io::Result<T> + Send + 'static,
+    {
+        let client = self.remote_client()?;
+        tokio::task::spawn_blocking(move || op(client))
+            .await
+            .map_err(|e| io::Error::other(format!("remote storage task failed: {e}")))?
+    }
+
+    /// List directory contents from the storage **backend** (local filesystem
+    /// or remote WebDAV) for a given subpath within the storage. The `_fs`
+    /// name is historical — since ADR 0008 it dispatches per backend.
     #[instrument]
     pub async fn list_directory_fs(&self, sub_path: &str) -> io::Result<Vec<DirectoryEntry>> {
+        if !self.is_local() {
+            let sub = sub_path.to_string();
+            let remote_entries = self.remote(move |c| c.list_dir(&sub)).await?;
+            return Ok(remote_entries
+                .into_iter()
+                .map(|e| DirectoryEntry {
+                    id: None,
+                    storage_id: self.model.id,
+                    user_id: self.model.default_user,
+                    group_id: self.model.default_group,
+                    parent_id: None, // Will be resolved during discovery/sync
+                    path: e.path,
+                    hash: None, // Will be calculated if needed
+                    entry_type: if e.is_dir {
+                        EntryType::Directory
+                    } else {
+                        EntryType::File
+                    },
+                    notify: false,
+                    size: e.size as i64,
+                    created_at: e.modified_at,
+                    modified_at: e.modified_at,
+                })
+                .collect());
+        }
+
         let base_path = PathBuf::from(&self.model.path);
         // Canonicalize the root once for safe relative-path computation below.
         let canon_root = tokio::fs::canonicalize(&base_path)
@@ -216,6 +307,10 @@ impl Storage {
 
     /// Get the full filesystem path for a subpath within this storage.
     ///
+    /// **Local storages only** — a remote backend has no local path. Callers
+    /// that must work for both backends use the backend-neutral accessors
+    /// ([`Self::stat_entry`], [`Self::read_file`], …) instead.
+    ///
     /// **Security:** This only performs lexical joining; it does NOT verify the
     /// resolved path stays inside the storage root. Prefer [`Self::resolve_safe_path`]
     /// for any operation driven by user input, which canonicalizes the path and
@@ -223,13 +318,114 @@ impl Storage {
     /// is trusted (e.g. constructed internally) or for paths that may not yet exist
     /// (canonicalize requires the file to be present).
     #[instrument]
-    pub fn get_full_path(&self, sub_path: &str) -> PathBuf {
+    pub fn get_full_path(&self, sub_path: &str) -> io::Result<PathBuf> {
+        if !self.is_local() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "storage '{}' uses the '{}' backend and has no local path",
+                    self.model.name, self.model.backend
+                ),
+            ));
+        }
         let mut full_path = PathBuf::from(&self.model.path);
         let sanitized_path = sub_path.trim_start_matches('/');
         if !sanitized_path.is_empty() {
             full_path.push(sanitized_path);
         }
-        full_path
+        Ok(full_path)
+    }
+
+    /// Backend-neutral metadata for one entry: local `fs::metadata` or a
+    /// remote `PROPFIND Depth: 0`. `NotFound` means the path does not exist,
+    /// on either backend.
+    #[instrument]
+    pub async fn stat_entry(&self, sub_path: &str) -> io::Result<EntryStat> {
+        if !self.is_local() {
+            let sub = sub_path.to_string();
+            return self.remote(move |c| c.stat(&sub)).await.map(|s| EntryStat {
+                entry_type: if s.is_dir {
+                    EntryType::Directory
+                } else {
+                    EntryType::File
+                },
+                size: s.size,
+                modified_at: s.modified_at,
+                created_at: None,
+            });
+        }
+
+        let full_path = self.resolve_safe_path(sub_path).await?;
+        let metadata = tokio::fs::metadata(&full_path).await?;
+        Ok(EntryStat {
+            entry_type: if metadata.is_dir() {
+                EntryType::Directory
+            } else if metadata.is_file() {
+                EntryType::File
+            } else {
+                EntryType::Symlink
+            },
+            size: metadata.len(),
+            modified_at: metadata
+                .modified()
+                .ok()
+                .map(chrono::DateTime::<chrono::Utc>::from)
+                .unwrap_or_else(Utc::now),
+            created_at: metadata
+                .created()
+                .ok()
+                .map(chrono::DateTime::<chrono::Utc>::from),
+        })
+    }
+
+    /// Backend-neutral existence probe.
+    #[instrument]
+    pub async fn entry_exists(&self, sub_path: &str) -> bool {
+        if !self.is_local() {
+            let sub = sub_path.to_string();
+            return self
+                .remote(move |c| Ok(c.exists(&sub)))
+                .await
+                .unwrap_or(false);
+        }
+        match self.resolve_safe_path(sub_path).await {
+            Ok(p) => tokio::fs::try_exists(&p).await.unwrap_or(false),
+            Err(_) => false,
+        }
+    }
+
+    /// Read a whole file's bytes from the storage backend. Local storages
+    /// stream from disk; remote ones GET via WebDAV. Used by hashing,
+    /// classification, thumbnails and the download/show endpoints.
+    #[instrument(skip_all)]
+    pub async fn read_file(&self, sub_path: &str) -> io::Result<Vec<u8>> {
+        if !self.is_local() {
+            let sub = sub_path.to_string();
+            return self.remote(move |c| c.read_file(&sub)).await;
+        }
+        let full_path = self.resolve_safe_path(sub_path).await?;
+        fs::read(&full_path).await
+    }
+
+    /// Read at most `max_len` leading bytes of a file. Local storages read
+    /// only that many bytes; remote ones use an HTTP Range (and truncate the
+    /// response, which servers may ignore).
+    #[instrument(skip_all)]
+    pub async fn read_file_prefix(&self, sub_path: &str, max_len: u64) -> io::Result<Vec<u8>> {
+        use tokio::io::AsyncReadExt;
+
+        if !self.is_local() {
+            let sub = sub_path.to_string();
+            return self
+                .remote(move |c| c.read_file_prefix(&sub, max_len))
+                .await;
+        }
+        let full_path = self.resolve_safe_path(sub_path).await?;
+        let file = fs::File::open(&full_path).await?;
+        let mut buf = Vec::with_capacity(max_len as usize);
+        let mut limited = file.take(max_len);
+        limited.read_to_end(&mut buf).await?;
+        Ok(buf)
     }
 
     /// Resolve a user-supplied sub-path to an absolute filesystem path,
@@ -242,9 +438,11 @@ impl Storage {
     ///
     /// Returns [`io::ErrorKind::NotFound`] if the path does not exist yet
     /// (canonicalize requires existence); for not-yet-created paths use
-    /// [`Self::resolve_safe_path_lexical`].
+    /// [`Self::resolve_safe_path_lexical`]. Remote storages return
+    /// [`io::ErrorKind::Unsupported`] — they have no local path.
     #[instrument]
     pub async fn resolve_safe_path(&self, sub_path: &str) -> io::Result<PathBuf> {
+        self.ensure_local()?;
         let root = tokio::fs::canonicalize(&self.model.path)
             .await
             .map_err(|e| {
@@ -279,6 +477,7 @@ impl Storage {
     /// canonicalized to confirm containment.
     #[instrument]
     pub async fn resolve_safe_path_lexical(&self, sub_path: &str) -> io::Result<PathBuf> {
+        self.ensure_local()?;
         let root = tokio::fs::canonicalize(&self.model.path)
             .await
             .map_err(|e| {
@@ -331,32 +530,34 @@ impl Storage {
         full
     }
 
-    /// Open a file and return its handle and metadata.
-    ///
-    /// The sub-path is resolved safely and verified to stay within the storage
-    /// root (rejects `..` traversal).
-    #[instrument]
-    pub async fn open_file(
-        &self,
-        sub_path: &str,
-    ) -> io::Result<(tokio::fs::File, std::fs::Metadata)> {
-        let full_path = self.resolve_safe_path(sub_path).await?;
-        let file = tokio::fs::File::open(&full_path).await?;
-        let metadata = file.metadata().await?;
-
-        if metadata.is_dir() {
-            return Err(io::Error::other("Path is a directory"));
+    /// Guard for the local-only seams: remote storages have no local path.
+    fn ensure_local(&self) -> io::Result<()> {
+        if self.is_local() {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "storage '{}' uses the '{}' backend; operation requires a local storage",
+                    self.model.name, self.model.backend
+                ),
+            ))
         }
-
-        Ok((file, metadata))
     }
 
-    /// Save file content to the filesystem.
+    /// Save file content to the storage backend (local `fs::write` or remote
+    /// `PUT`, which also creates missing parent collections).
     ///
     /// The sub-path is resolved safely (lexical, since the file may not exist
     /// yet) and verified to stay within the storage root.
     #[instrument(skip(data))]
     pub async fn save_file(&self, sub_path: &str, data: &[u8]) -> io::Result<()> {
+        if !self.is_local() {
+            let sub = sub_path.to_string();
+            let data = data.to_vec();
+            return self.remote(move |c| c.write_file(&sub, &data)).await;
+        }
+
         let full_path = self.resolve_safe_path_lexical(sub_path).await?;
 
         // Ensure parent directory exists
@@ -367,22 +568,30 @@ impl Storage {
         tokio::fs::write(full_path, data).await
     }
 
-    /// Create a new directory.
+    /// Create a new directory (`fs::create_dir_all` / recursive `MKCOL`).
     ///
     /// The sub-path is resolved safely (lexical) and verified to stay within
     /// the storage root.
     #[instrument]
     pub async fn create_directory(&self, sub_path: &str) -> io::Result<()> {
+        if !self.is_local() {
+            let sub = sub_path.to_string();
+            return self.remote(move |c| c.create_dir_all(&sub)).await;
+        }
         let full_path = self.resolve_safe_path_lexical(sub_path).await?;
         tokio::fs::create_dir_all(full_path).await
     }
 
-    /// Create an empty file.
+    /// Create an empty file (`File::create` / empty `PUT`).
     ///
     /// The sub-path is resolved safely (lexical) and verified to stay within
     /// the storage root.
     #[instrument]
     pub async fn create_file(&self, sub_path: &str) -> io::Result<()> {
+        if !self.is_local() {
+            let sub = sub_path.to_string();
+            return self.remote(move |c| c.write_file(&sub, &[])).await;
+        }
         let full_path = self.resolve_safe_path_lexical(sub_path).await?;
 
         // Ensure parent directory exists
@@ -394,12 +603,17 @@ impl Storage {
         Ok(())
     }
 
-    /// Rename or move an entry.
+    /// Rename or move an entry (`fs::rename` / WebDAV `MOVE`).
     ///
     /// Both source and destination are resolved safely (lexical) and verified
     /// to stay within the storage root.
     #[instrument]
     pub async fn rename_entry(&self, old_path: &str, new_path: &str) -> io::Result<()> {
+        if !self.is_local() {
+            let from = old_path.to_string();
+            let to = new_path.to_string();
+            return self.remote(move |c| c.rename(&from, &to)).await;
+        }
         let old_full_path = self.resolve_safe_path(old_path).await?;
         let new_full_path = self.resolve_safe_path_lexical(new_path).await?;
 
@@ -411,12 +625,17 @@ impl Storage {
         tokio::fs::rename(old_full_path, new_full_path).await
     }
 
-    /// Remove an entry (file or directory).
+    /// Remove an entry (`remove_dir_all`/`remove_file` / WebDAV `DELETE`,
+    /// which is recursive for collections).
     ///
     /// The sub-path is resolved safely and verified to stay within the storage
     /// root.
     #[instrument]
     pub async fn remove_entry(&self, sub_path: &str) -> io::Result<()> {
+        if !self.is_local() {
+            let sub = sub_path.to_string();
+            return self.remote(move |c| c.delete(&sub)).await;
+        }
         let full_path = self.resolve_safe_path(sub_path).await?;
         let metadata = tokio::fs::metadata(&full_path).await?;
 
@@ -424,6 +643,30 @@ impl Storage {
             tokio::fs::remove_dir_all(full_path).await
         } else {
             tokio::fs::remove_file(full_path).await
+        }
+    }
+
+    /// Copy an entry (file or whole collection) within this storage —
+    /// `fs::copy`-and-recurse locally, a single WebDAV `COPY` remotely.
+    /// Used by the DAV gateway's COPY handler.
+    #[instrument]
+    pub async fn copy_entry(&self, src: &str, dest: &str) -> io::Result<()> {
+        if !self.is_local() {
+            let from = src.to_string();
+            let to = dest.to_string();
+            return self.remote(move |c| c.copy(&from, &to)).await;
+        }
+        let src_full = self.resolve_safe_path(src).await?;
+        let dest_full = self.resolve_safe_path_lexical(dest).await?;
+
+        let meta = tokio::fs::metadata(&src_full).await?;
+        if meta.is_dir() {
+            copy_dir_recursive(&src_full, &dest_full).await
+        } else {
+            if let Some(parent) = dest_full.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            tokio::fs::copy(&src_full, &dest_full).await.map(|_| ())
         }
     }
 
@@ -463,13 +706,13 @@ impl Storage {
             None
         };
 
-        // Gather metadata from the filesystem if available
-        let full_path = self.get_full_path(dir_path);
-        let modified_at = tokio::fs::metadata(&full_path)
+        // Gather metadata from the backend if available (remote storages
+        // PROPFIND; a missing/unreachable ancestor just falls back to now).
+        let modified_at = self
+            .stat_entry(dir_path)
             .await
             .ok()
-            .and_then(|meta| meta.modified().ok())
-            .map(|t| chrono::DateTime::<chrono::Utc>::from(t).naive_utc())
+            .map(|s| s.modified_at.naive_utc())
             .unwrap_or_else(|| Utc::now().naive_utc());
 
         let active = entry::ActiveModel {
@@ -493,7 +736,8 @@ impl Storage {
     /// Find or create a database entry for a given sub-path.
     ///
     /// The sub-path is resolved safely (rejecting traversal escapes) and
-    /// metadata is read asynchronously (no blocking `std::fs` call).
+    /// metadata comes from the storage backend — `fs::metadata` locally, a
+    /// `PROPFIND` remotely (`stat_entry`), no blocking `std::fs` call.
     #[instrument(skip(self, db))]
     pub async fn ensure_entry(
         &self,
@@ -501,9 +745,13 @@ impl Storage {
         sub_path: &str,
     ) -> Result<entry::Model> {
         let normalized_path = sub_path.trim_matches('/').to_string();
-        let full_path = self.resolve_safe_path(&normalized_path).await?;
-
-        anyhow::ensure!(full_path.exists(), "Path {} not found on disk", sub_path);
+        let stat = self.stat_entry(&normalized_path).await.map_err(|e| {
+            if e.kind() == io::ErrorKind::NotFound {
+                anyhow::anyhow!("Path {} not found on disk", sub_path)
+            } else {
+                anyhow::Error::new(e).context(format!("Cannot access path {}", sub_path))
+            }
+        })?;
 
         let existing = entry::Entity::find()
             .filter(entry::Column::StorageId.eq(self.model.id))
@@ -520,15 +768,6 @@ impl Storage {
         } else {
             None
         };
-        let metadata = tokio::fs::metadata(&full_path).await?;
-
-        let entry_type = if metadata.is_dir() {
-            EntryType::Directory
-        } else if metadata.is_file() {
-            EntryType::File
-        } else {
-            EntryType::Symlink
-        };
 
         let active = entry::ActiveModel {
             storage_id: Set(self.model.id),
@@ -536,14 +775,10 @@ impl Storage {
             group_id: Set(self.model.default_group),
             parent_id: Set(parent_id),
             path: Set(normalized_path),
-            entry_type: Set(entry_type),
+            entry_type: Set(stat.entry_type),
             notify: Set(false),
-            size: Set(metadata.len().try_into()?),
-            modified_at: Set(metadata
-                .modified()
-                .ok()
-                .map(|t| chrono::DateTime::<chrono::Utc>::from(t).naive_utc())
-                .unwrap_or_else(|| Utc::now().naive_utc())),
+            size: Set(stat.size as i64),
+            modified_at: Set(stat.modified_at.naive_utc()),
             created_at: Set(Utc::now().naive_utc()),
             ..Default::default()
         };
@@ -571,7 +806,26 @@ pub fn path_exists(path: &str) -> bool {
     PathBuf::from(path).exists()
 }
 
-/// Validate that a path exists and is a readable directory
+/// Recursively copy a local directory tree (`src` → `dest`).
+///
+/// Local twin of the remote backend's single-request `COPY`; the DAV
+/// gateway's COPY handler uses both through [`Storage::copy_entry`].
+async fn copy_dir_recursive(src: &Path, dest: &Path) -> io::Result<()> {
+    tokio::fs::create_dir_all(dest).await?;
+    let mut read_dir = fs::read_dir(src).await?;
+    while let Some(entry) = read_dir.next_entry().await? {
+        let path = entry.path();
+        let target = dest.join(entry.file_name());
+        if entry.metadata().await?.is_dir() {
+            Box::pin(copy_dir_recursive(&path, &target)).await?;
+        } else {
+            tokio::fs::copy(&path, &target).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Validate that a path exists and is a readable directory (local storages).
 pub async fn validate_storage_path(path: &str) -> Result<()> {
     let path_buf = PathBuf::from(path);
 
@@ -586,10 +840,32 @@ pub async fn validate_storage_path(path: &str) -> Result<()> {
     Ok(())
 }
 
-mod content_type;
-mod hash;
-pub mod thumbnail;
-pub use content_type::determine_content_type;
+/// Validate remote (nextcloud) storage settings: the URL must be well-formed
+/// and the DAV base must answer a `PROPFIND Depth: 0` with the given
+/// credentials — the remote counterpart of [`validate_storage_path`].
+///
+/// Runs the probe on the blocking pool (see [`Storage::remote`]'s pattern).
+pub async fn validate_remote_storage(
+    remote_url: &str,
+    remote_username: &str,
+    remote_password: &str,
+) -> Result<()> {
+    let url = remote_url.trim().to_string();
+    let user = remote_username.trim().to_string();
+    let pass = remote_password.to_string();
+
+    anyhow::ensure!(!url.is_empty(), "remote_url must not be empty");
+    anyhow::ensure!(!user.is_empty(), "remote_username must not be empty");
+    anyhow::ensure!(!pass.trim().is_empty(), "remote_password must not be empty");
+
+    let client = NextcloudClient::new(&url, &user, &pass)
+        .map_err(|e| anyhow::Error::new(e).context("Invalid Nextcloud configuration"))?;
+
+    tokio::task::spawn_blocking(move || client.ping())
+        .await
+        .map_err(|e| anyhow::anyhow!("nextcloud probe task failed: {e}"))?
+        .map_err(|e| anyhow::anyhow!("Cannot reach Nextcloud at '{}' as '{}': {}", url, user, e))
+}
 
 /// Format file size in human-readable format
 pub fn format_size(bytes: i64) -> String {
@@ -635,6 +911,10 @@ mod tests {
             default_user: 1,
             default_group: 1,
             ignore_patterns: String::new(),
+            backend: BACKEND_LOCAL.to_string(),
+            remote_url: None,
+            remote_username: None,
+            remote_password: None,
         })
     }
 
@@ -721,6 +1001,10 @@ mod tests {
             default_user: 1,
             default_group: 1,
             ignore_patterns: String::new(),
+            backend: BACKEND_LOCAL.to_string(),
+            remote_url: None,
+            remote_username: None,
+            remote_password: None,
         })
     }
 

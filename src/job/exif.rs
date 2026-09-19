@@ -43,6 +43,22 @@ pub(super) fn extract_exif(full_path: &Path) -> MergedClassification {
     parse_exif(&exif_data)
 }
 
+/// In-memory twin of [`extract_exif`] for remote (nextcloud) storages, where
+/// the bytes are fetched over WebDAV and no local path exists. Same tolerance
+/// for missing/unparseable EXIF (ADR 0008).
+pub(super) fn extract_exif_from_memory(data: &[u8]) -> MergedClassification {
+    let exif_data = match exif::Reader::new().read_from_container(&mut std::io::Cursor::new(data)) {
+        Ok(data) => data,
+        Err(e) => {
+            // Not an error — many images simply carry no (or unparseable) EXIF.
+            warn!(error = %e, "Failed to parse EXIF data");
+            return MergedClassification::default();
+        }
+    };
+
+    parse_exif(&exif_data)
+}
+
 /// Pure field extraction from already-parsed EXIF data — split from the file
 /// I/O above so tests can drive it with in-memory fixtures.
 fn parse_exif(exif_data: &exif::Exif) -> MergedClassification {

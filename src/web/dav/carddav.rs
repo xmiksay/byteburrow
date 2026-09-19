@@ -60,8 +60,8 @@ async fn addressbook_query(
 
     let mut responses = Vec::new();
     for rel in hrefs {
-        let full = storage.get_full_path(&rel);
-        let Ok(data) = tokio::fs::read(&full).await else {
+        // Backend-neutral read (local fs / remote WebDAV GET — ADR 0008).
+        let Ok(data) = storage.read_file(&rel).await else {
             continue;
         };
         let mut props = vec![DavProp::text("getcontenttype", "text/vcard")];
@@ -117,8 +117,8 @@ async fn addressbook_multiget(
             });
             continue;
         }
-        let full = storage.get_full_path(rel);
-        match tokio::fs::read(&full).await {
+        // Backend-neutral read (local fs / remote WebDAV GET — ADR 0008).
+        match storage.read_file(rel).await {
             Ok(data) => {
                 let mut props = vec![DavProp::text("getcontenttype", "text/vcard")];
                 if want_address_data {
@@ -267,7 +267,6 @@ pub async fn is_addressbook_collection(storage: &Storage, path: &str) -> bool {
     } else {
         format!("{path}/{ADDRESSBOOK_MARKER}")
     };
-    tokio::fs::try_exists(storage.get_full_path(&marker))
-        .await
-        .unwrap_or(false)
+    // Backend-neutral existence probe (local fs / remote WebDAV PROPFIND).
+    storage.entry_exists(&marker).await
 }

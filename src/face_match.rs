@@ -151,10 +151,14 @@ pub fn floats_to_bytes(floats: &[f32]) -> Vec<u8> {
 }
 
 /// Decode a stored `face_reference.embedding` blob back into an embedding.
+///
+/// Trailing bytes that don't form a whole f32 (a corrupt/odd-length blob) are
+/// ignored — same tolerance `chunks_exact` had.
 pub fn bytes_to_floats(bytes: &[u8]) -> Vec<f32> {
-    bytes
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+    let (chunks, _remainder) = bytes.as_chunks::<4>();
+    chunks
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
         .collect()
 }
 

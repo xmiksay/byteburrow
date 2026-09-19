@@ -33,15 +33,26 @@ use tower_http::services::ServeFile;
 use tracing::instrument;
 
 /// Storage response
+///
+/// `remote_password` is **never** included — the app password is write-only
+/// (ADR 0008). `remote_url`/`remote_username` are echoed so the UI can label
+/// the connector.
 #[derive(Debug, serde::Serialize, utoipa::ToSchema)]
 pub struct StorageResponse {
     pub id: i32,
     pub name: String,
     pub description: Option<String>,
+    /// Local: filesystem root. Nextcloud: canonical DAV base URL.
     pub path: String,
     pub default_user: i32,
     pub default_group: i32,
     pub ignore_patterns: String,
+    /// Backend discriminator: `local` or `nextcloud`.
+    pub backend: String,
+    /// Nextcloud server base URL (nextcloud storages only).
+    pub remote_url: Option<String>,
+    /// Nextcloud login name (nextcloud storages only).
+    pub remote_username: Option<String>,
 }
 
 impl From<storage::Model> for StorageResponse {
@@ -54,6 +65,9 @@ impl From<storage::Model> for StorageResponse {
             default_user: storage.default_user,
             default_group: storage.default_group,
             ignore_patterns: storage.ignore_patterns,
+            backend: crate::storage::normalize_backend(&storage.backend).to_string(),
+            remote_url: storage.remote_url,
+            remote_username: storage.remote_username,
         }
     }
 }
@@ -63,13 +77,34 @@ impl From<storage::Model> for StorageResponse {
 pub struct CreateStorageRequest {
     pub name: String,
     pub description: Option<String>,
+    /// Local: filesystem directory path. Nextcloud: arbitrary identifier
+    /// (the canonical DAV base URL is derived and stored as `path`).
     pub path: String,
     pub default_user: i32,
     pub default_group: i32,
     pub ignore_patterns: Option<String>,
+    /// Backend to use. Defaults to `local`.
+    #[serde(default)]
+    pub backend: Option<String>,
+    /// Nextcloud server base URL (e.g. `https://cloud.example.org`).
+    /// Required when `backend == "nextcloud"`.
+    pub remote_url: Option<String>,
+    /// Nextcloud login name. Required when `backend == "nextcloud"`.
+    pub remote_username: Option<String>,
+    /// Nextcloud **app password**. Required when `backend == "nextcloud"`,
+    /// write-only (never returned).
+    pub remote_password: Option<String>,
 }
 
+/// Sentinel for "clear the stored app password" on update: any other string
+/// replaces it, `Some("")` clears it, `None` leaves it untouched.
+pub const CLEAR_PASSWORD: &str = "";
+
 /// Update storage request (all fields optional)
+///
+/// `remote_password` semantics: absent → unchanged; empty string → cleared;
+/// any other value → replaced. This is the "Optional-with-sentinel" contract
+/// required because the stored password is never echoed back.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateStorageRequest {
     pub name: Option<String>,
@@ -78,6 +113,10 @@ pub struct UpdateStorageRequest {
     pub default_user: Option<i32>,
     pub default_group: Option<i32>,
     pub ignore_patterns: Option<String>,
+    pub backend: Option<String>,
+    pub remote_url: Option<String>,
+    pub remote_username: Option<String>,
+    pub remote_password: Option<String>,
 }
 
 /// Create entry request
@@ -151,6 +190,52 @@ async fn serve_file_response(
         header::HeaderValue::from_static(content_type),
     );
     res
+}
+
+/// Serve one file's content, backend-neutral (ADR 0008).
+///
+/// Local storages keep the `ServeFile` path (streamed, range requests); remote
+/// (nextcloud) storages GET the bytes over WebDAV and serve them buffered.
+/// `forced_content_type` skips detection (raw downloads).
+async fn serve_storage_file(
+    storage: &StorageWrapper,
+    path: &str,
+    forced_content_type: Option<&'static str>,
+    req: Request<Body>,
+) -> Result<axum::response::Response, ApiError> {
+    let stat = storage
+        .stat_entry(path)
+        .await
+        .map_err(|e| map_path_err(e, path))?;
+
+    if stat.is_dir() {
+        return Err(bad_request(format!(
+            "Requested path is a directory: {path}"
+        )));
+    }
+
+    if storage.is_local() {
+        // Canonicalizing resolution rejects `..` traversal escaping the root.
+        let full_path = storage
+            .resolve_safe_path(path)
+            .await
+            .map_err(|e| map_path_err(e, path))?;
+        let content_type = match forced_content_type {
+            Some(ct) => ct,
+            None => detect_content_type(&full_path).await,
+        };
+        return Ok(serve_file_response(full_path, content_type, req).await);
+    }
+
+    let data = storage
+        .read_file(path)
+        .await
+        .map_err(|e| map_path_err(e, path))?;
+    let content_type = match forced_content_type {
+        Some(ct) => ct,
+        None => determine_content_type(std::path::Path::new(path), &data),
+    };
+    Ok((StatusCode::OK, [(header::CONTENT_TYPE, content_type)], data).into_response())
 }
 
 /// Detect content type from a file's first kilobyte, falling back to
@@ -497,16 +582,39 @@ async fn create_storage_handler(
 ) -> Result<Json<StorageResponse>, ApiError> {
     require_admin(&auth)?;
 
-    // Validate path exists and is accessible
-    validate_storage_path(&payload.path)
-        .await
-        .map_err(|e| bad_request(e.to_string()))?;
+    let backend = crate::storage::normalize_backend(payload.backend.as_deref().unwrap_or("local"))
+        .to_string();
+
+    // Backend-aware validation + canonical path.
+    // Local: the directory must exist and be readable (unchanged behavior).
+    // Nextcloud: PROPFIND Depth 0 on the DAV base must succeed with the given
+    // app password; `path` becomes the canonical DAV base URL so the existing
+    // path-uniqueness check keeps meaning (ADR 0008).
+    let canonical_path = match backend.as_str() {
+        crate::storage::BACKEND_LOCAL => {
+            validate_storage_path(&payload.path)
+                .await
+                .map_err(|e| bad_request(e.to_string()))?;
+            payload.path
+        }
+        crate::storage::BACKEND_NEXTCLOUD => {
+            let url = payload.remote_url.as_deref().unwrap_or("");
+            let username = payload.remote_username.as_deref().unwrap_or("");
+            let password = payload.remote_password.as_deref().unwrap_or("");
+            crate::storage::validate_remote_storage(url, username, password)
+                .await
+                .map_err(|e| bad_request(e.to_string()))?;
+            crate::storage::nextcloud::dav_base_url(url, username)
+                .map_err(|e| bad_request(e.to_string()))?
+        }
+        other => return Err(bad_request(format!("Unknown storage backend: {other}"))),
+    };
 
     // DRY-2: uniqueness checks
-    if storage_path_taken(&state.db, &payload.path).await? {
+    if storage_path_taken(&state.db, &canonical_path).await? {
         return Err(conflict(format!(
             "Storage with path '{}' already exists",
-            payload.path
+            canonical_path
         )));
     }
     if storage_name_taken(&state.db, &payload.name).await? {
@@ -527,10 +635,19 @@ async fn create_storage_handler(
     let new_storage = storage::ActiveModel {
         name: Set(payload.name),
         description: Set(payload.description),
-        path: Set(payload.path),
+        path: Set(canonical_path),
         default_user: Set(payload.default_user),
         default_group: Set(payload.default_group),
         ignore_patterns: Set(ignore_patterns),
+        backend: Set(backend.clone()),
+        remote_url: Set(if backend == crate::storage::BACKEND_NEXTCLOUD {
+            Some(payload.remote_url.unwrap_or_default())
+        } else {
+            None
+        }),
+        remote_username: Set(payload.remote_username),
+        // Write-only: stored, never echoed back in responses.
+        remote_password: Set(payload.remote_password),
         ..Default::default()
     };
 
@@ -600,20 +717,78 @@ async fn update_storage_handler(
         .await?
         .ok_or_else(|| not_found("Storage", storage_id))?;
 
-    // Validate path if being changed
-    if let Some(ref new_path) = payload.path {
-        if new_path != &storage.path {
-            validate_storage_path(new_path)
+    // Effective (post-update) backend and remote settings, so validation
+    // always checks the resulting configuration, not just the delta.
+    let current_backend = crate::storage::normalize_backend(&storage.backend).to_string();
+    let new_backend = payload
+        .backend
+        .as_deref()
+        .map(crate::storage::normalize_backend)
+        .unwrap_or(&current_backend)
+        .to_string();
+    if !matches!(
+        new_backend.as_str(),
+        crate::storage::BACKEND_LOCAL | crate::storage::BACKEND_NEXTCLOUD
+    ) {
+        return Err(bad_request(format!(
+            "Unknown storage backend: {new_backend}"
+        )));
+    }
+
+    let effective_remote_url = payload
+        .remote_url
+        .clone()
+        .or_else(|| storage.remote_url.clone());
+    let effective_username = payload
+        .remote_username
+        .clone()
+        .or_else(|| storage.remote_username.clone());
+    // Sentinel semantics: absent → keep the stored password (it is never
+    // echoed back, so "unchanged" cannot be expressed any other way);
+    // empty string → clear it; anything else → replace it.
+    let effective_password = match payload.remote_password.as_deref() {
+        None => storage.remote_password.clone(),
+        Some(CLEAR_PASSWORD) => None,
+        Some(p) => Some(p.to_string()),
+    };
+
+    // Validate + derive the effective canonical path.
+    let current_path_changed = payload.path.as_deref() != Some(storage.path.as_str());
+    let effective_path = if let Some(ref new_path) = payload.path {
+        new_path.clone()
+    } else {
+        storage.path.clone()
+    };
+
+    let canonical_path = match new_backend.as_str() {
+        crate::storage::BACKEND_LOCAL => {
+            if current_path_changed {
+                validate_storage_path(&effective_path)
+                    .await
+                    .map_err(|e| bad_request(e.to_string()))?;
+            }
+            effective_path
+        }
+        crate::storage::BACKEND_NEXTCLOUD => {
+            let url = effective_remote_url.clone().unwrap_or_default();
+            let username = effective_username.clone().unwrap_or_default();
+            let password = effective_password.clone().unwrap_or_default();
+            crate::storage::validate_remote_storage(&url, &username, &password)
                 .await
                 .map_err(|e| bad_request(e.to_string()))?;
-
-            if storage_path_taken(&state.db, new_path).await? {
-                return Err(conflict(format!(
-                    "Storage with path '{}' already exists",
-                    new_path
-                )));
-            }
+            crate::storage::nextcloud::dav_base_url(&url, &username)
+                .map_err(|e| bad_request(e.to_string()))?
         }
+        other => return Err(bad_request(format!("Unknown storage backend: {other}"))),
+    };
+
+    // Validate path if being changed (both branches: the canonical DAV base
+    // of a nextcloud storage participates in the same uniqueness check).
+    if canonical_path != storage.path && storage_path_taken(&state.db, &canonical_path).await? {
+        return Err(conflict(format!(
+            "Storage with path '{}' already exists",
+            canonical_path
+        )));
     }
 
     // Check name conflict if changed
@@ -636,6 +811,9 @@ async fn update_storage_handler(
         require_group_exists(group_id, &state.db).await?;
     }
 
+    // Capture before `storage.into()` consumes the model (compared below to
+    // decide whether `path` is being written at all).
+    let storage_path_before = storage.path.clone();
     let mut active_storage: storage::ActiveModel = storage.into();
 
     if let Some(name) = payload.name {
@@ -644,8 +822,8 @@ async fn update_storage_handler(
     if let Some(description) = payload.description {
         active_storage.description = Set(Some(description));
     }
-    if let Some(path) = payload.path {
-        active_storage.path = Set(path);
+    if canonical_path != storage_path_before {
+        active_storage.path = Set(canonical_path);
     }
     if let Some(default_user) = payload.default_user {
         active_storage.default_user = Set(default_user);
@@ -656,6 +834,24 @@ async fn update_storage_handler(
     if let Some(ignore_patterns) = payload.ignore_patterns {
         active_storage.ignore_patterns = Set(ignore_patterns);
     }
+
+    // Backend switch / remote credential updates.
+    active_storage.backend = Set(new_backend.clone());
+    active_storage.remote_url = Set(if new_backend == crate::storage::BACKEND_NEXTCLOUD {
+        effective_remote_url
+    } else {
+        None
+    });
+    active_storage.remote_username = Set(if new_backend == crate::storage::BACKEND_NEXTCLOUD {
+        effective_username
+    } else {
+        None
+    });
+    active_storage.remote_password = Set(if new_backend == crate::storage::BACKEND_NEXTCLOUD {
+        effective_password
+    } else {
+        None
+    });
 
     let updated_storage = save_or_err(active_storage, &state.db).await?;
 
@@ -805,14 +1001,23 @@ async fn directory_index_impl(
 
     // Authorization: must have access to this path within the storage.
     require_storage_path_access(auth, &storage.model, normalized_path, &state.db).await?;
-    let full_path = storage.get_full_path(normalized_path);
 
-    // If it's a file, serve it directly with content-type
-    if full_path.is_file() {
-        let content_type = detect_content_type(&full_path).await;
-        return Ok(serve_file_response(full_path, content_type, req)
-            .await
-            .into_response());
+    // If it's a file, serve it directly with content-type (any backend).
+    if !storage.is_local() {
+        if let Ok(stat) = storage.stat_entry(normalized_path).await {
+            if !stat.is_dir() {
+                return Ok(serve_storage_file(&storage, normalized_path, None, req)
+                    .await?
+                    .into_response());
+            }
+        }
+    } else if let Ok(full_path) = storage.get_full_path(normalized_path) {
+        if full_path.is_file() {
+            let content_type = detect_content_type(&full_path).await;
+            return Ok(serve_file_response(full_path, content_type, req)
+                .await
+                .into_response());
+        }
     }
 
     // It's a directory - list entries and return HTML
@@ -904,24 +1109,10 @@ async fn serve_file_with_content_type(
 
     require_storage_path_access(auth, &storage.model, &path, &state.db).await?;
 
-    // Canonicalizing resolution rejects `..` traversal escaping the storage root.
-    let full_path = storage
-        .resolve_safe_path(&path)
-        .await
-        .map_err(|e| map_path_err(e, &path))?;
-
-    if full_path.is_dir() {
-        return Err(bad_request(format!(
-            "Requested path is a directory: {path}"
-        )));
-    }
-
-    let content_type = match forced_content_type {
-        Some(ct) => ct,
-        None => detect_content_type(&full_path).await,
-    };
-
-    let res = serve_file_response(full_path, content_type, req).await;
+    // Backend-neutral serving: local `ServeFile` (streamed, range requests)
+    // or a buffered WebDAV GET for remote storages (ADR 0008). Traversal
+    // (`..`) escapes are rejected inside both branches.
+    let res = serve_storage_file(&storage, &path, forced_content_type, req).await?;
     Ok(res)
 }
 
@@ -1909,14 +2100,22 @@ async fn share_index_impl(
         return Err(bad_request("Invalid path: traversal detected"));
     }
 
-    let abs_path = storage.get_full_path(&full_path);
-
-    // If it's a file, serve it directly
-    if abs_path.is_file() {
-        let content_type = detect_content_type(&abs_path).await;
-        return Ok(serve_file_response(abs_path, content_type, req)
-            .await
-            .into_response());
+    // If it's a file, serve it directly (any backend)
+    if !storage.is_local() {
+        if let Ok(stat) = storage.stat_entry(&full_path).await {
+            if !stat.is_dir() {
+                return Ok(serve_storage_file(&storage, &full_path, None, req)
+                    .await?
+                    .into_response());
+            }
+        }
+    } else if let Ok(abs_path) = storage.get_full_path(&full_path) {
+        if abs_path.is_file() {
+            let content_type = detect_content_type(&abs_path).await;
+            return Ok(serve_file_response(abs_path, content_type, req)
+                .await
+                .into_response());
+        }
     }
 
     // Directory listing → HTML
@@ -1992,14 +2191,16 @@ pub(crate) async fn share_show_handler(
         return Err(bad_request("Invalid path: traversal detected"));
     }
 
-    let abs_path = storage.get_full_path(&relative_path);
-
-    if !abs_path.exists() || !abs_path.is_file() {
+    // 404 unless it's an existing file (any backend).
+    let is_file = match storage.stat_entry(&relative_path).await {
+        Ok(stat) => !stat.is_dir(),
+        Err(_) => false,
+    };
+    if !is_file {
         return Err(not_found_msg("File not found"));
     }
 
-    let content_type = detect_content_type(&abs_path).await;
-    let res = serve_file_response(abs_path, content_type, req).await;
+    let res = serve_storage_file(&storage, &relative_path, None, req).await?;
     Ok(res)
 }
 

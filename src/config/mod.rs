@@ -54,6 +54,22 @@ pub struct Config {
     /// `.env.example`.
     #[serde(default)]
     pub plugin: HashMap<String, String>,
+    /// Reverse-geocoding URL template for photo locations (#2, `src/geo`).
+    /// `{lat}`, `{lng}` and `{key}` are substituted before the request. The
+    /// default is the Google Maps Geocoding API format; a self-hosted
+    /// Nominatim works by pointing this at
+    /// `.../reverse?lat={lat}&lon={lng}&format=json` (response parsing
+    /// handles both shapes). Empty disables the feature.
+    #[serde(default = "defaults::reverse_geocode_url")]
+    pub reverse_geocode_url: String,
+    /// API key substituted into `{key}` in the template. Google requires one;
+    /// keyless templates (self-hosted Nominatim) ignore it. When the template
+    /// contains `{key}` and this is empty, lookups are skipped.
+    #[serde(default)]
+    pub reverse_geocode_api_key: String,
+    /// Reverse-geocode request timeout in seconds.
+    #[serde(default = "defaults::reverse_geocode_timeout")]
+    pub reverse_geocode_timeout: u64,
 }
 
 mod defaults {
@@ -90,6 +106,15 @@ mod defaults {
             "__pycache__".to_string(),
             ".Trash".to_string(),
         ]
+    }
+    pub fn reverse_geocode_url() -> String {
+        // Google Maps Geocoding API (the #2 default). Swap for a self-hosted
+        // Nominatim template (`.../reverse?lat={lat}&lon={lng}&format=json`)
+        // or set empty to disable — see `src/geo.rs`.
+        "https://maps.googleapis.com/maps/api/geocode/json?latlng={lat},{lng}&key={key}".to_string()
+    }
+    pub fn reverse_geocode_timeout() -> u64 {
+        10
     }
 }
 

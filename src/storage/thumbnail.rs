@@ -2,6 +2,14 @@ use std::io;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
+/// Where a thumbnail's source image comes from: a local-filesystem path
+/// (streamed decode) or in-memory bytes (remote backends fetch first).
+#[derive(Debug)]
+pub enum StorageSource {
+    Path(PathBuf),
+    Bytes(Vec<u8>),
+}
+
 /// Returns the path to a thumbnail based on its hash and size
 /// Structure: {thumbnail_dir}/{first_4_chars}/{next_2_chars}/{rest_of_hash}_{size}.png
 pub fn get_thumbnail_path(thumbnail_dir: &Path, hash: &str, size: &str) -> PathBuf {

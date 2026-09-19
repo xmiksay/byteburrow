@@ -4,6 +4,148 @@
  */
 
 export interface paths {
+    "/api/face/contacts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List contacts with their face counts
+         *     GET /api/face/contacts
+         */
+        get: operations["list_contacts_handler"];
+        put?: never;
+        /**
+         * Create a contact (a named person)
+         *     POST /api/face/contacts
+         */
+        post: operations["create_contact_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/face/contacts/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Rename a contact
+         *     PUT /api/face/contacts/:id
+         */
+        put: operations["update_contact_handler"];
+        post?: never;
+        /**
+         * Delete a contact. Its face rows cascade away (FK), shrinking the exemplar
+         *     pool, so a full re-match pass is queued afterwards — remaining suggestions
+         *     that only matched this person get withdrawn.
+         *     DELETE /api/face/contacts/:id
+         */
+        delete: operations["delete_contact_handler"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/face/refs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List detected faces (the review queue)
+         *     GET /api/face/refs
+         */
+        get: operations["list_face_refs_handler"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/face/refs/{id}/assignment": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set, replace, or clear a face's human label
+         *     PUT /api/face/refs/:id/assignment
+         */
+        put: operations["assign_face_handler"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/face/refs/{id}/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Confirm a face as an exemplar of a contact and queue a scoped re-match
+         *     (issue #27): other faces of the same embedding model are re-decided
+         *     against the now-larger pool, so naming a person retroactively tags their
+         *     existing photos.
+         *     POST /api/face/refs/:id/confirm
+         */
+        post: operations["confirm_face_handler"];
+        /**
+         * Withdraw exemplar status. The human label is kept (as a pinned label), but
+         *     the face stops contributing to the matching pool; a scoped re-match is
+         *     queued since assignments may change.
+         *     DELETE /api/face/refs/:id/confirm
+         */
+        delete: operations["unconfirm_face_handler"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/face/rematch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Run a full backfill re-match synchronously and report what changed
+         *     (issue #27). Re-decides every machine-suggested face against the current
+         *     exemplar pool and syncs the affected files' meta. Embeddings are already
+         *     stored, so this is vector math + writes, not reclassification.
+         *     POST /api/face/rematch
+         */
+        post: operations["rematch_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/group": {
         parameters: {
             query?: never;
@@ -935,9 +1077,43 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @description Set/replace/clear a face's human label. `null` clears the assignment. */
+        AssignFaceRequest: {
+            /** Format: int32 */
+            contact_id?: number | null;
+        };
         /** @description Change password request */
         ChangePasswordRequest: {
             password: string;
+        };
+        /**
+         * @description Confirm a face as an exemplar, optionally assigning a contact in the same
+         *     call (`contact_id` overrides any existing assignment).
+         */
+        ConfirmFaceRequest: {
+            /** Format: int32 */
+            contact_id?: number | null;
+        };
+        /** @description A named person faces can be matched to. */
+        ContactResponse: {
+            /**
+             * Format: int64
+             * @description Faces of this contact that are confirmed exemplars.
+             */
+            confirmed_faces: number;
+            /** Format: int32 */
+            id: number;
+            name: string;
+            /**
+             * Format: int64
+             * @description Faces carrying this contact as a (confirmed, pinned, or suggested)
+             *     label.
+             */
+            total_faces: number;
+        };
+        /** @description Create contact request */
+        CreateContactRequest: {
+            name: string;
         };
         /** @description Create entry request */
         CreateEntryRequest: {
@@ -951,6 +1127,8 @@ export interface components {
         };
         /** @description Create storage request */
         CreateStorageRequest: {
+            /** @description Backend to use. Defaults to `local`. */
+            backend?: string | null;
             /** Format: int32 */
             default_group: number;
             /** Format: int32 */
@@ -958,7 +1136,23 @@ export interface components {
             description?: string | null;
             ignore_patterns?: string | null;
             name: string;
+            /**
+             * @description Local: filesystem directory path. Nextcloud: arbitrary identifier
+             *     (the canonical DAV base URL is derived and stored as `path`).
+             */
             path: string;
+            /**
+             * @description Nextcloud **app password**. Required when `backend == "nextcloud"`,
+             *     write-only (never returned).
+             */
+            remote_password?: string | null;
+            /**
+             * @description Nextcloud server base URL (e.g. `https://cloud.example.org`).
+             *     Required when `backend == "nextcloud"`.
+             */
+            remote_url?: string | null;
+            /** @description Nextcloud login name. Required when `backend == "nextcloud"`. */
+            remote_username?: string | null;
         };
         /** @description Create tag request */
         CreateTagRequest: {
@@ -1012,6 +1206,40 @@ export interface components {
         /** @description Error response */
         ErrorResponse: {
             error: string;
+        };
+        /**
+         * @description A detected face. The embedding blob itself is never exposed — only its
+         *     model identity and dimension, which is what callers need to reason about
+         *     comparability.
+         */
+        FaceRefResponse: {
+            /** Format: int32 */
+            bbox_h: number;
+            /** Format: int32 */
+            bbox_w: number;
+            /** Format: int32 */
+            bbox_x: number;
+            /** Format: int32 */
+            bbox_y: number;
+            /** @description Exemplar: part of the matching pool. */
+            confirmed: boolean;
+            /** Format: int32 */
+            contact_id?: number | null;
+            /** Format: int32 */
+            dim: number;
+            /**
+             * Format: int32
+             * @description 0-based index of this face within the file's detection list.
+             */
+            face_index: number;
+            /** @description Hex-encoded content hash of the file the face was detected in. */
+            hash: string;
+            /** Format: int32 */
+            id: number;
+            model_id: string;
+            model_version: string;
+            /** @description Human label that the re-match pass must not overwrite. */
+            pinned: boolean;
         };
         /** @description Group response */
         GroupResponse: {
@@ -1075,6 +1303,62 @@ export interface components {
          * @description A single page of results plus the metadata a client needs to walk the rest.
          *     The uniform envelope returned by every paginated list endpoint.
          */
+        Page_FaceRefResponse: {
+            /** @description Items in this page. */
+            items: {
+                /** Format: int32 */
+                bbox_h: number;
+                /** Format: int32 */
+                bbox_w: number;
+                /** Format: int32 */
+                bbox_x: number;
+                /** Format: int32 */
+                bbox_y: number;
+                /** @description Exemplar: part of the matching pool. */
+                confirmed: boolean;
+                /** Format: int32 */
+                contact_id?: number | null;
+                /** Format: int32 */
+                dim: number;
+                /**
+                 * Format: int32
+                 * @description 0-based index of this face within the file's detection list.
+                 */
+                face_index: number;
+                /** @description Hex-encoded content hash of the file the face was detected in. */
+                hash: string;
+                /** Format: int32 */
+                id: number;
+                model_id: string;
+                model_version: string;
+                /** @description Human label that the re-match pass must not overwrite. */
+                pinned: boolean;
+            }[];
+            /**
+             * Format: int64
+             * @description 1-based page number this response represents.
+             */
+            page: number;
+            /**
+             * Format: int64
+             * @description Page size used to build this response.
+             */
+            per_page: number;
+            /**
+             * Format: int64
+             * @description Total number of items across all pages.
+             */
+            total: number;
+            /**
+             * Format: int64
+             * @description Total number of pages at this `per_page` (at least 1).
+             */
+            total_pages: number;
+        };
+        /**
+         * @description A single page of results plus the metadata a client needs to walk the rest.
+         *     The uniform envelope returned by every paginated list endpoint.
+         */
         Page_GroupResponse: {
             /** @description Items in this page. */
             items: {
@@ -1111,6 +1395,8 @@ export interface components {
         Page_StorageResponse: {
             /** @description Items in this page. */
             items: {
+                /** @description Backend discriminator: `local` or `nextcloud`. */
+                backend: string;
                 /** Format: int32 */
                 default_group: number;
                 /** Format: int32 */
@@ -1120,7 +1406,12 @@ export interface components {
                 id: number;
                 ignore_patterns: string;
                 name: string;
+                /** @description Local: filesystem root. Nextcloud: canonical DAV base URL. */
                 path: string;
+                /** @description Nextcloud server base URL (nextcloud storages only). */
+                remote_url?: string | null;
+                /** @description Nextcloud login name (nextcloud storages only). */
+                remote_username?: string | null;
             }[];
             /**
              * Format: int64
@@ -1221,8 +1512,23 @@ export interface components {
             /** Format: double */
             longitude?: number | null;
             path?: string | null;
+            /**
+             * @description Human-readable location resolved from the EXIF coordinates by the
+             *     reverse-geocoding provider seam (`crate::geo`, #2); `null` until a
+             *     provider is configured / resolves it.
+             */
+            place?: string | null;
             /** Format: int32 */
             storage_id?: number | null;
+        };
+        /** @description Outcome of a re-match pass (issue #27), mirrored from the job layer. */
+        RematchResponse: {
+            assigned: number;
+            cleared: number;
+            considered: number;
+            metas_updated: number;
+            skipped: number;
+            unchanged: number;
         };
         /** @description Rename entry request */
         RenameEntryRequest: {
@@ -1301,8 +1607,16 @@ export interface components {
             token?: string | null;
             user_ids: number[];
         };
-        /** @description Storage response */
+        /**
+         * @description Storage response
+         *
+         *     `remote_password` is **never** included — the app password is write-only
+         *     (ADR 0008). `remote_url`/`remote_username` are echoed so the UI can label
+         *     the connector.
+         */
         StorageResponse: {
+            /** @description Backend discriminator: `local` or `nextcloud`. */
+            backend: string;
             /** Format: int32 */
             default_group: number;
             /** Format: int32 */
@@ -1312,13 +1626,22 @@ export interface components {
             id: number;
             ignore_patterns: string;
             name: string;
+            /** @description Local: filesystem root. Nextcloud: canonical DAV base URL. */
             path: string;
+            /** @description Nextcloud server base URL (nextcloud storages only). */
+            remote_url?: string | null;
+            /** @description Nextcloud login name (nextcloud storages only). */
+            remote_username?: string | null;
         };
         /** @description Tag response */
         TagResponse: {
             description?: string | null;
             /** Format: int32 */
             id: number;
+            name: string;
+        };
+        /** @description Rename contact request */
+        UpdateContactRequest: {
             name: string;
         };
         /** @description Update entry tags request */
@@ -1330,8 +1653,15 @@ export interface components {
             description?: string | null;
             name?: string | null;
         };
-        /** @description Update storage request (all fields optional) */
+        /**
+         * @description Update storage request (all fields optional)
+         *
+         *     `remote_password` semantics: absent → unchanged; empty string → cleared;
+         *     any other value → replaced. This is the "Optional-with-sentinel" contract
+         *     required because the stored password is never echoed back.
+         */
         UpdateStorageRequest: {
+            backend?: string | null;
             /** Format: int32 */
             default_group?: number | null;
             /** Format: int32 */
@@ -1340,6 +1670,9 @@ export interface components {
             ignore_patterns?: string | null;
             name?: string | null;
             path?: string | null;
+            remote_password?: string | null;
+            remote_url?: string | null;
+            remote_username?: string | null;
         };
         /** @description Update tag request */
         UpdateTagRequest: {
@@ -1381,6 +1714,375 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    list_contacts_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description All contacts */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContactResponse"][];
+                };
+            };
+        };
+    };
+    create_contact_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateContactRequest"];
+            };
+        };
+        responses: {
+            /** @description Contact created */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContactResponse"];
+                };
+            };
+            /** @description Admin access required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Contact name already exists */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    update_contact_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Contact ID */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateContactRequest"];
+            };
+        };
+        responses: {
+            /** @description Contact renamed */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContactResponse"];
+                };
+            };
+            /** @description Admin access required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Contact not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Contact name already exists */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    delete_contact_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Contact ID */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Contact deleted, re-match queued */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessageResponse"];
+                };
+            };
+            /** @description Admin access required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Contact not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    list_face_refs_handler: {
+        parameters: {
+            query?: {
+                /** @description 1-based page number (default 1). */
+                page?: number;
+                /** @description Items per page (default 50, capped at 200). */
+                per_page?: number;
+                /** @description Only faces labeled with this contact. */
+                contact_id?: number;
+                /**
+                 * @description Filter by exemplar state: `true` = confirmed exemplars only,
+                 *     `false` = suggestions only.
+                 */
+                confirmed?: boolean;
+                /** @description Only faces with no contact label at all (the review queue). */
+                unassigned?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Paginated list of detected faces */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_FaceRefResponse"];
+                };
+            };
+        };
+    };
+    assign_face_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Face reference ID */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AssignFaceRequest"];
+            };
+        };
+        responses: {
+            /** @description Label updated */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FaceRefResponse"];
+                };
+            };
+            /** @description Contact does not exist */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Admin access required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Face not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    confirm_face_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Face reference ID */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConfirmFaceRequest"];
+            };
+        };
+        responses: {
+            /** @description Face confirmed, re-match queued */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessageResponse"];
+                };
+            };
+            /** @description No contact assigned */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Admin access required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Face not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    unconfirm_face_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Face reference ID */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Exemplar withdrawn, re-match queued */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessageResponse"];
+                };
+            };
+            /** @description Admin access required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Face not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    rematch_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Re-match complete */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RematchResponse"];
+                };
+            };
+            /** @description Admin access required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
     list_groups_handler: {
         parameters: {
             query?: {

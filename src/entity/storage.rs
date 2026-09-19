@@ -12,6 +12,16 @@ pub struct Model {
     pub default_user: i32,
     pub default_group: i32,
     pub ignore_patterns: String,
+    /// Backend discriminator: `"local"` (filesystem) or `"nextcloud"`.
+    /// Defaults to `"local"` (DB default) — see migration 000024.
+    pub backend: String,
+    /// Nextcloud server base URL (remote storages only).
+    pub remote_url: Option<String>,
+    /// Nextcloud login name (remote storages only).
+    pub remote_username: Option<String>,
+    /// Nextcloud app password (remote storages only). Never serialized into
+    /// API responses — `StorageResponse` omits it.
+    pub remote_password: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -12,6 +12,7 @@ const TagManagement = () => import('../components/TagManagement.vue')
 const ShareManagement = () => import('../components/ShareManagement.vue')
 const Monitoring = () => import('../components/Monitoring.vue')
 const PhotoLibrary = () => import('../components/PhotoLibrary.vue')
+const FaceManagement = () => import('../components/FaceManagement.vue')
 
 const routes: RouteRecordRaw[] = [
     {
@@ -65,6 +66,12 @@ const routes: RouteRecordRaw[] = [
         name: 'tags',
         component: TagManagement,
         meta: { title: 'Tag Management' }
+    },
+    {
+        path: '/faces',
+        name: 'faces',
+        component: FaceManagement,
+        meta: { title: 'Face Management' }
     },
     {
         path: '/shares',

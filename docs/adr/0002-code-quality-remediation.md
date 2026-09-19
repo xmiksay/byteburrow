@@ -1,6 +1,6 @@
 # 0002. Code quality remediation: DRY / KISS / tests / CI
 
-Status: Proposed
+Status: Accepted (items 1–5 landed; see Update log)
 Date: 2026-07-18
 
 ## Context
@@ -45,7 +45,12 @@ Items 4 and 5 partially landed:
 - **Unit tests** added for the first three items in the item-4 priority list — `src/auth/mod.rs` (`hash_string`, `extract_token` credential-source priority), `src/plugin/mod.rs` (`MergedClassification::absorb` merge/overwrite semantics), `src/job/mod.rs` (`should_classify`, `is_image_file`) — 20 new tests, 25 unit tests total (`make test-unit`).
 - **First integration test** added: `tests/auth_integration.rs` exercises `Auth` against a real Postgres (login success/failure/disabled-user, token create/authenticate/revoke, revoke-all) — 7 tests, `make test-integration`. `storage/hash.rs::calculate_hash` (item 4's last bullet) and the `web/storage.rs` handler tests (blocked on item 1's split) are still open.
   - Gotcha for future integration tests in this crate: don't put a shared `DatabaseConnection` behind `#[tokio::test]` (each test gets its own per-test runtime that's dropped after the test, killing the pool's background tasks and hanging any later test that reuses it). Use a single process-lifetime `tokio::runtime::Runtime` static instead — see `tests/auth_integration.rs`.
-- **CI** (item 5) added: `.gitlab-ci.yml` runs `fmt-check` + `clippy` + `frontend-typecheck` + `test-unit`/`test-integration` (with a `postgres:15` service) on every push/MR; a `coverage` job (`cargo-llvm-cov`) runs only on tag pipelines and publishes an HTML report artifact.
+- **CI** (item 5) added: `.gitlab-ci.yml` runs `fmt-check` + `clippy` + `frontend-typecheck` + `test-unit`/`test-integration` (with a `postgres:15` service) on every push/MR; a `coverage` job (`cargo-llvm-cov`) runs only on tag pipelines and publishes an HTML report artifact. *(A GitHub Actions pipeline at `.github/workflows/ci.yml` mirrors this since the 2026-09 audit wave.)*
 - Also added, not originally scoped by this ADR but needed to make "tests run before push" actually true locally: `.githooks/pre-push` (wired up via `make install-hooks`) runs `make test-unit` before every push.
 
-Items 1–3 and 6 remain open.
+## Update — 2026-09 (audit wave)
+
+The test-infra item outgrew this ADR's scratch-note scope; current state:
+
+- Item 4 (tests): integration suites now cover web handlers, sharing/access-control, path-traversal regressions, DAV gateways, rate limiting, storage hashing/scan, and the contacts/faces management API (`tests/face_management_integration.rs`); unit tests cover auth, plugin pipeline, job runner, storage hashing, face matching, and the re-match engine.
+- Items 1–3 and 6 remain open; tracked under the umbrella issues rather than this ADR.

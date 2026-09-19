@@ -5,7 +5,8 @@ Deep reference for ByteBurrow's module layout, request flow, and key patterns. S
 ## Backend Structure
 
 - **`src/web/`**: Axum HTTP layer
-  - Route modules: `user.rs`, `group.rs`, `storage.rs`, `tag.rs`, `photo.rs`
+  - Route modules: `user.rs`, `group.rs`, `storage.rs`, `tag.rs`, `photo.rs`, `face.rs`
+  - `face.rs` — the contacts/faces management API (tag `face`, mounted at `/api/face`): contact CRUD, paginated listing of detected faces (`GET /refs`, filtered by `contact_id`/`confirmed`/`unassigned`), the human assignment (`PUT /refs/:id/assignment`) and confirm step (`POST`/`DELETE /refs/:id/confirm`), and the synchronous backfill (`POST /rematch`). Reads follow the thumbnail/meta hash-access rule (a face is visible iff the caller can access a storage holding an entry with that hash); every mutation is admin-only, like tag management. See "Face recognition confirmation flow" below.
   - WebSocket support in `ws/`
   - **DAV gateway** (`dav/`): WebDAV (RFC 4918), CalDAV (RFC 4791), and
     CardDAV (RFC 6352) served under `/dav/storage/<storage_id>/<path>`. All
@@ -28,11 +29,14 @@ Deep reference for ByteBurrow's module layout, request flow, and key patterns. S
   - Password hashing using Argon2id with a per-user random salt (`Auth::hash_password` / `Auth::verify_password`); legacy SHA256 + global-salt hashes are still verified and transparently rehashed to Argon2id on next successful login. SHA256 + global salt (`Auth::hash_string`) remains in use only for hashing high-entropy session tokens.
   - User session management
 
-- **`src/storage/`**: Core filesystem abstraction
-  - `Storage` wrapper for filesystem operations
+- **`src/storage/`**: Core storage abstraction — local filesystem **and remote backends**
+  - `Storage` wrapper; every seam (`list_directory_fs`, `save_file`, `create_directory`, `rename_entry`, `remove_entry`, hashing, `stat_entry`, `read_file`) dispatches per `storage.backend` (ADR 0008)
+  - Backend-neutral accessors for callers that must work without a local path: `stat_entry -> EntryStat`, `entry_exists`, `read_file`, `read_file_prefix`, `copy_entry`
+  - `src/storage/nextcloud.rs`: the remote backend — a WebDAV client for Nextcloud's `remote.php/dav/files/<user>/<...>` endpoint (PROPFIND/GET/PUT/MKCOL/DELETE/MOVE/COPY, Basic auth with an app password, `ureq` inside `spawn_blocking`, 207 Multi-Status parsed with `quick-xml`)
   - `DirectoryEntry` type for representing files/folders
   - Helper modules: `content_type.rs`, `hash.rs`, `thumbnail.rs`
-  - Handles synchronization between filesystem and database state
+  - Handles synchronization between the storage backend and database state
+  - Remote storages have **no inotify** (nothing local to watch); they stay current via the scan endpoint. `get_full_path` errors for them — callers use the neutral accessors.
 
 - **`src/entity/`**: SeaORM database models
   - Core entities: `user`, `group`, `storage`, `entry`, `tag`, `token`, `photo`, `shared`, `meta`
@@ -41,9 +45,11 @@ Deep reference for ByteBurrow's module layout, request flow, and key patterns. S
 
 - **`src/face_match.rs`**: The single host-side "is this a known person?" routine. Both the classification job (`src/job/face.rs`) and the CLI `face_match` tool route through `match_embedding`, so the threshold and ambiguity rules live in one place instead of two disconnected matchers with disagreeing hardcoded thresholds. It scores each contact by its nearest confirmed exemplar and applies two configurable guards: a **similarity threshold** (`BYTEBURROW__FACE_MATCH_THRESHOLD`, default 0.8) and a **margin** (`BYTEBURROW__FACE_MATCH_MARGIN`, default 0.05) rejecting matches where a different contact is almost equally close. Cross-model exemplars are refused (not scored 0); cosine similarity returns `None` on a dimension mismatch rather than a silent 0.
 
+- **`src/geo.rs`**: The photo-location provider seam (#2). After classification persists a photo's EXIF coordinates, `resolve_photo_place` reverse-geocodes them into a human-readable place stored on `photo.place` (surfaced as `PhotoResponse.place`). The provider is a **URL template** (`BYTEBURROW__REVERSE_GEOCODE_URL`) with `{lat}`/`{lng}`/`{key}` substitution — the default is the Google Maps Geocoding API format (needs `BYTEBURROW__REVERSE_GEOCODE_API_KEY`); a self-hosted Nominatim template works unchanged because both response shapes are parsed. Results are cached per coordinate (rounded to ~11 m), failures are memoized and never fail classification, and empty URL disables the feature. Existing libraries backfill via `byteburrow_cli photo-geocode [--limit N]`. Same external-service seam pattern as the face embedder (ADR-0007).
+
 - **`src/job/`**: Background job runner
   - Asynchronous job processing with configurable concurrency (based on CPU cores), running on a dedicated low-priority Tokio runtime
-  - Single job type `Job::ProcessFile { storage_id, path, mode }`, where `ProcessMode` is `Auto` (check-then-classify, respects `skip_plugins`), `ForceClassify` (re-run plugins regardless of change), or `HashOnly` (recalculate hash only, never runs plugins)
+  - Job types: `Job::ProcessFile { storage_id, path, mode }` (`ProcessMode`: `Auto` — check-then-classify respecting `skip_plugins`; `ForceClassify` — re-run plugins regardless of change; `HashOnly` — recalculate hash only), `Job::CreateThumbnail { hash, regenerate }`, and `Job::RematchFaces { scope }` (backfill face re-match, scoped to one embedding model or all)
   - Runs on a **dedicated OS thread** that owns its own multi-threaded Tokio runtime, with every worker thread set to `nice 10` so the OS scheduler always prefers the web server (main runtime) over background work
   - Only the inotify watcher and the web server are the two arms of the main runtime's `tokio::select!`; the job runner is **not** an arm of that select — it blocks on its own thread, draining jobs from the channel on its low-priority runtime until the sender side is dropped
 
@@ -85,6 +91,7 @@ Deep reference for ByteBurrow's module layout, request flow, and key patterns. S
   - `lucide-vue-next`: icon system
 - **Components**: located in `frontend/src/components/`
   - Reusable UI components like FileExplorer, FileViewer, UserSelect
+  - Management pages mirror each other (header + list + modal + confirm pattern): UserManagement, GroupManagement, TagManagement, StorageManagement, ShareManagement, FaceManagement (contacts + face review queue, `/faces` — the UI half of the #26 confirmation flow)
 - **Generated API client** (`frontend/src/api/`): request/response types come from
   the server's OpenAPI spec, not hand-written duplicates — see below. `frontend/src/types`
   and `frontend/src/services` re-export / consume these generated types so the
@@ -283,11 +290,13 @@ by walking pages through `api.getAll()`.
 > deferred to the H1 generated-client cutover. See ADR 0004.
 
 ### File Operations
-Use `Storage` wrapper instead of direct filesystem access to maintain database consistency:
+Use the `Storage` wrapper instead of direct filesystem/HTTP access to maintain database consistency — the same calls work for local and nextcloud storages (ADR 0008):
 ```rust
 let storage = Storage::find_by_id(&db, storage_id).await?;
-let entries = storage.list_directory_fs(sub_path).await?;
+let entries = storage.list_directory_fs(sub_path).await?;   // read_dir | PROPFIND
+let bytes = storage.read_file(sub_path).await?;              // fs::read  | WebDAV GET
 ```
+Only call `get_full_path`/`resolve_safe_path*` on `storage.is_local()` rows — remote storages have no local path.
 
 ### Plugin System
 Plugins are dynamic libraries (`.so`) that classify files. Each plugin implements `ClassifierPlugin` from the `byteburrow-plugin-api` crate.
@@ -349,4 +358,34 @@ state.job_sender.send(Job::ProcessFile { storage_id, path, mode: ProcessMode::Au
 state.job_sender.send(Job::ProcessFile { storage_id, path, mode: ProcessMode::ForceClassify }).ok();
 // HashOnly: only recalculate hash, never run plugins
 state.job_sender.send(Job::ProcessFile { storage_id, path, mode: ProcessMode::HashOnly }).ok();
+// Backfill face re-match, scoped to one embedding model (None = all)
+state.job_sender.send(Job::RematchFaces { scope: Some((model_id, model_version)) }).ok();
 ```
+
+### Face recognition confirmation flow
+
+Recognition is a three-state loop over `face_reference` rows, closed by the
+`face` API (`src/web/face.rs`, issues #26/#27):
+
+1. **Detection/classification** (`src/job/face.rs`) stores every detected
+   face's embedding as a row with `confirmed = false, pinned = false` — a
+   *machine suggestion*. Suggestions are (re)computed by the matcher and
+   mirrored into `meta.custom["face_embeddings"]` (the per-file contact array
+   the UI reads; rebuilt by `job::sync_face_meta`).
+2. **Human labeling** through the API: `PUT /api/face/refs/:id/assignment`
+   sets/replaces/clears a face's contact and **pins** it (`pinned = true`) so
+   re-matching never overwrites a human decision. `POST /api/face/refs/:id/confirm`
+   additionally marks the row a **confirmed exemplar** — it joins the matching
+   pool that `match_embedding` scores against. `DELETE .../confirm` withdraws
+   exemplar status but keeps the pinned label.
+3. **Backfill re-match** (`rematch_unconfirmed_faces`, issue #27): because
+   the pool changed, suggestions are re-decided — but only the ones the change
+   can affect: the confirm/unassign endpoints queue `Job::RematchFaces`
+   scoped to the embedding model of the touched row (cross-model comparisons
+   are refused anyway), and every pass skips `pinned` rows and faces whose
+   model has no exemplars. Affected files' meta arrays are rewritten only when
+   something actually changed. A full synchronous backfill is also available:
+   `POST /api/face/rematch` and `byteburrow_cli face-rematch`.
+
+Naming a person therefore retroactively tags their existing photos without
+reclassifying anything — stored embeddings are re-scored, not re-extracted.

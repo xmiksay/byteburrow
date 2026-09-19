@@ -50,7 +50,8 @@ const mockStorage = computed<Storage>(() => ({
   description: '',
   default_user: 0,
   default_group: 0,
-  ignore_patterns: ''
+  ignore_patterns: '',
+  backend: 'local'
 }))
 
 const breadcrumbs = computed(() => {

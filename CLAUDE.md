@@ -45,6 +45,9 @@ Config is read from the environment (a `.env` file in the project root is loaded
 - `BYTEBURROW__TRUST_FORWARDED_HEADERS` (optional): Defaults to `false`. Only set to `true` when the server sits behind a reverse proxy that sets `X-Forwarded-For`/`X-Real-IP` itself — otherwise these are ignored and the real TCP peer address is used, since any client can spoof them
 - `BYTEBURROW__FACE_MATCH_THRESHOLD` (optional): Defaults to `0.8`. Minimum cosine similarity for a face to be matched to a known contact — the single "is this a known person" threshold shared by the job pipeline and the CLI `face_match` tool (`src/face_match.rs`)
 - `BYTEBURROW__FACE_MATCH_MARGIN` (optional): Defaults to `0.05`. Minimum gap between the best contact's similarity and the best *different* contact's; rejects ambiguous matches where two people are almost equally close. Set to `0` to disable the guard
+- `BYTEBURROW__REVERSE_GEOCODE_URL` (optional): URL template for resolving photo locations from EXIF coordinates (`src/geo.rs`). `{lat}`, `{lng}`, `{key}` are substituted. Defaults to the Google Maps Geocoding API format; a self-hosted Nominatim (`.../reverse?lat={lat}&lon={lng}&format=json`) works too since both response shapes are parsed. Empty disables the feature
+- `BYTEBURROW__REVERSE_GEOCODE_API_KEY` (optional): Key substituted into `{key}`. Google requires one; keyless templates ignore it. When the template contains `{key}` and this is empty, lookups are skipped
+- `BYTEBURROW__REVERSE_GEOCODE_TIMEOUT` (optional): Defaults to `10` seconds per reverse-geocode request
 - `BYTEBURROW__PLUGIN__<KEY>` (optional): Any variable with this prefix is collected into the plugin config map (`Config::plugin`, key = lowercased `<KEY>`) and passed into every classifier plugin's `init()`. Each plugin reads the keys it recognizes and ignores the rest; every key still falls back to a legacy `BYTEBURROW_<KEY>` process env var and then a built-in default. Recognized keys: `ollama_url` / `ollama_model` / `ollama_timeout` / `keyword_prompt` / `keyword_max_concurrent` (keyword-extractor), `face_max_dim` / `face_score_threshold` / `face_portrait_area_threshold` (face-detector), `face_embed_endpoint` / `face_embed_timeout` / `face_embed_backend` / `face_embed_model` (face-embedder). See `.env.example` for defaults, `docs/architecture.md` for details, and `docs/plugins-external-services.md` for the external-service plugin pattern
 
 The frontend is **not** served from a runtime path: its build output (`frontend/dist`) is embedded into the server binary at compile time via `rust_embed`, so there is no `FRONTEND_DIST` variable — rebuild the binary to pick up frontend changes.
@@ -53,13 +56,23 @@ The frontend is **not** served from a runtime path: its build output (`frontend/
 
 Axum HTTP layer (`src/web/`) → `Auth` extractor → handlers → `Storage` wrapper / SeaORM entities. A background job runner (`src/job/`) runs on its own OS thread with a dedicated low-priority (`nice 10`) multi-threaded Tokio runtime; it processes file classification through a multi-pass plugin pipeline (`src/plugin/` + `plugins/*` cdylib crates, loaded via `byteburrow-plugin-api`'s FFI contract). On the main runtime, only the inotify watcher and the web server are arms of the `tokio::select!`.
 
+Storages are **not always local directories**: each `storage` row has a `backend` (`local` filesystem, or `nextcloud` over WebDAV — ADR 0008). All content access goes through the `Storage` wrapper, which dispatches per backend; remote storages have no local path and no inotify (they are refreshed by the scan endpoint).
+
 Full module map, request flow, OpenAPI tag grouping, and key patterns (auth, DB access, error responses, plugin system, background jobs): **[docs/architecture.md](docs/architecture.md)**.
 
 ## Binary Targets
 
 - **`byteburrow`**: Main application server (runs both web server and job runner)
 - **`byteburrow-migration`**: Database migration CLI tool
-- **`byteburrow-cli`**: Command-line utilities (if present)
+- **`byteburrow_cli`**: Administrative CLI (underscore, per the binary target in `src/bin/`). Subcommands:
+  - `test-db` — check the database connection
+  - `user add|list|delete|toggle` — user CRUD/enable-disable
+  - `fixtures` — reset schema and seed admin user + admin group
+  - `openapi` — dump the OpenAPI spec JSON to stdout (source for `make openapi-generate`)
+  - `face-list` — list all `face_reference` rows with model identity
+  - `face-match <contact_id> [--threshold] [--margin]` — preview/assign which unconfirmed faces match a contact (shared host-side matcher)
+  - `face-rematch [--threshold] [--margin]` — backfill re-match over all machine-suggested faces (CLI twin of `POST /api/face/rematch`)
+  - `photo-geocode [--limit N]` — backfill `photo.place` for photos with EXIF coordinates via the reverse-geocoding provider
 
 ## Additional Notes
 

@@ -25,6 +25,10 @@ pub struct PhotoResponse {
     pub path: Option<String>,
     pub latitude: Option<f64>,
     pub longitude: Option<f64>,
+    /// Human-readable location resolved from the EXIF coordinates by the
+    /// reverse-geocoding provider seam (`crate::geo`, #2); `null` until a
+    /// provider is configured / resolves it.
+    pub place: Option<String>,
     pub date: Option<String>,
     pub keywords: Vec<String>,
 }
@@ -80,6 +84,7 @@ async fn enrich_photos(
                     path: None,
                     latitude: p.latitude,
                     longitude: p.longitude,
+                    place: p.place,
                     date: p.date.map(|d| d.to_string()),
                     keywords: p.keywords,
                 });
@@ -97,6 +102,7 @@ async fn enrich_photos(
                 path: Some(e.path.clone()),
                 latitude: p.latitude,
                 longitude: p.longitude,
+                place: p.place,
                 date: p.date.map(|d| d.to_string()),
                 keywords: p.keywords,
             })

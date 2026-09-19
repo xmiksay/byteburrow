@@ -47,6 +47,26 @@ enum Commands {
         #[arg(short, long)]
         margin: Option<f32>,
     },
+    /// Backfill re-match (#27): re-decide every machine-suggested face against
+    /// the current confirmed exemplar pool and sync the affected files' meta.
+    /// Does not re-run classification — stored embeddings are re-matched.
+    FaceRematch {
+        /// Similarity threshold. Defaults to the configured
+        /// `face_match_threshold`.
+        #[arg(short, long)]
+        threshold: Option<f32>,
+        /// Ambiguity margin. Defaults to the configured `face_match_margin`.
+        #[arg(short, long)]
+        margin: Option<f32>,
+    },
+    /// Backfill photo locations (#2): resolve `photo.place` for photos that
+    /// have EXIF coordinates but no place yet, via the configured
+    /// reverse-geocoding provider (`BYTEBURROW__REVERSE_GEOCODE_URL`).
+    PhotoGeocode {
+        /// Maximum number of photos to resolve in this run.
+        #[arg(short, long, default_value_t = 100)]
+        limit: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -146,6 +166,22 @@ async fn main() {
                 margin: margin.unwrap_or(config.face_match_margin),
             };
             if let Err(e) = face_match(&config, *contact_id, params).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Commands::FaceRematch { threshold, margin } => {
+            let params = MatchParams {
+                threshold: threshold.unwrap_or(config.face_match_threshold),
+                margin: margin.unwrap_or(config.face_match_margin),
+            };
+            if let Err(e) = face_rematch(&config, params).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Commands::PhotoGeocode { limit } => {
+            if let Err(e) = photo_geocode(&config, *limit).await {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
@@ -431,11 +467,13 @@ async fn face_match(
     let contact_map: std::collections::HashMap<i32, String> =
         contacts.into_iter().map(|c| (c.id, c.name)).collect();
 
-    // Candidates: unconfirmed faces whose best confirmed match is this contact.
+    // Candidates: unconfirmed faces whose best confirmed match is this
+    // contact. Pinned rows are human labels (assigned via the API/confirm
+    // step) and must never be re-decided by the matcher.
     let mut matches: Vec<(f32, Option<f32>, &face_reference::Model)> = Vec::new();
 
     for r in &all_refs {
-        if r.confirmed {
+        if r.confirmed || r.pinned {
             continue;
         }
         let emb = bytes_to_floats(&r.embedding);
@@ -482,11 +520,15 @@ async fn face_match(
                 contact_name,
             );
 
-            // Assign contact (unconfirmed) to matched face references
+            // Assign contact (unconfirmed) to matched face references. The
+            // row stays unpinned: it is a machine suggestion, so a later
+            // re-match pass may still re-decide it.
             let model: face_reference::Model = (*r).clone();
             let mut active: face_reference::ActiveModel = model.into();
             active.contact_id = Set(Some(contact_id));
             active.update(&db).await?;
+            // Keep the file's per-face contact array in sync (#26/#27).
+            byteburrow::job::sync_face_meta(&db, &r.hash).await?;
             saved += 1;
         }
         println!(
@@ -496,5 +538,48 @@ async fn face_match(
         );
     }
 
+    Ok(())
+}
+
+/// Backfill re-match (#27): re-decide every machine-suggested face against
+/// the current confirmed exemplar pool and sync affected files' meta. This is
+/// the CLI twin of `POST /api/face/rematch` — useful for a one-off backfill
+/// without the server or after bulk exemplar changes.
+async fn face_rematch(
+    config: &Config,
+    params: MatchParams,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db = db_connect(config).await?;
+
+    println!(
+        "Re-matching all machine-suggested faces (threshold {:.2}, margin {:.2})…",
+        params.threshold, params.margin
+    );
+    let outcome = byteburrow::job::rematch_unconfirmed_faces(&db, params, None).await?;
+
+    println!("\nDone: {outcome}");
+    Ok(())
+}
+
+/// Backfill photo locations (#2): resolve `photo.place` via the configured
+/// reverse-geocoding provider for photos that have EXIF coordinates but no
+/// place yet. New photos are resolved inline during classification; this
+/// exists for existing libraries and provider re-configurations.
+async fn photo_geocode(config: &Config, limit: u64) -> Result<(), Box<dyn std::error::Error>> {
+    if config.reverse_geocode_url.is_empty() {
+        eprintln!("Reverse geocoding is disabled (BYTEBURROW__REVERSE_GEOCODE_URL is empty).");
+        std::process::exit(1);
+    }
+    if config.reverse_geocode_url.contains("{key}") && config.reverse_geocode_api_key.is_empty() {
+        eprintln!(
+            "The configured URL template needs {{key}} but BYTEBURROW__REVERSE_GEOCODE_API_KEY is empty."
+        );
+        std::process::exit(1);
+    }
+
+    let db = db_connect(config).await?;
+    println!("Resolving up to {limit} photo location(s)…");
+    let filled = byteburrow::geo::backfill_photo_places(&db, limit, config).await?;
+    println!("Done: {filled} photo location(s) resolved.");
     Ok(())
 }
